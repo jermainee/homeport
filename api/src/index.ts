@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { routePath } from "hono/route";
 import { authApi } from "./auth/api";
 import { confirmPages } from "./auth/confirm";
@@ -7,6 +8,14 @@ import { EmailUnavailableError } from "./email";
 import { meApi } from "./me";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Every request body this API accepts is a few hundred bytes.
+app.use(
+  bodyLimit({
+    maxSize: 16 * 1024,
+    onError: (c) => c.json({ error: "payload_too_large" }, 413),
+  }),
+);
 
 app.route("/v1/auth", authApi);
 app.route("/v1/me", meApi);

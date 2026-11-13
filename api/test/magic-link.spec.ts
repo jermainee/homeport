@@ -88,6 +88,31 @@ describe("polling", () => {
     expect((await poll(request)).status).toBe(200);
     const second = await poll(request);
     expect(second.status).toBe(410);
+    expect(await second.json()).toEqual({ error: "already_collected" });
+  });
+
+  it("can collect a session for 5 minutes after a confirmation made just before expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-11-13T10:00:00Z") });
+    const { request, link } = await startLogin(uniqueEmail());
+
+    vi.setSystemTime(Date.parse("2026-11-13T10:14:30Z"));
+    await postForm("/auth/confirm", { token: tokenFrom(link), match_code: request.match_code });
+
+    vi.setSystemTime(Date.parse("2026-11-13T10:19:29Z"));
+    expect((await poll(request)).status).toBe(200);
+  });
+
+  it("cannot collect a session more than 5 minutes after a late confirmation", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-11-13T10:00:00Z") });
+    const { request, link } = await startLogin(uniqueEmail());
+
+    vi.setSystemTime(Date.parse("2026-11-13T10:14:30Z"));
+    await postForm("/auth/confirm", { token: tokenFrom(link), match_code: request.match_code });
+
+    vi.setSystemTime(Date.parse("2026-11-13T10:19:30Z"));
+    const late = await poll(request);
+    expect(late.status).toBe(410);
+    expect(await late.json()).toEqual({ error: "expired" });
   });
 
   it("needs the poll secret", async () => {

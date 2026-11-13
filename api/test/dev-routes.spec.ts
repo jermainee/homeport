@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { postJson, startLogin, uniqueEmail } from "./helpers";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function devConfirm(
   request: { login_request_id: string; poll_secret: string },
@@ -61,6 +65,5 @@ describe("email log mode", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "email_unavailable" });
     expect(JSON.stringify(log.mock.calls)).not.toContain("magic_link_email");
-    log.mockRestore();
   });
 });

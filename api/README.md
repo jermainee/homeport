@@ -37,7 +37,7 @@ npm run dev
 | --- | --- | --- |
 | `ENVIRONMENT` | `dev` enables the `/dev` routes and email log mode; anything else is production | `production` |
 | `EMAIL_MODE` | `log` writes sign-in links to the log, and works only when `ENVIRONMENT=dev`. Real delivery comes in a later PR; until then, other values return `503 email_unavailable` | `disabled` |
-| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails | `http://localhost:8787` |
+| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails. Without a valid http(s) URL no link is sent (`503 email_unavailable`) | empty |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
 
 ## Sign-in
@@ -64,7 +64,7 @@ sequenceDiagram
 
 1. `POST /v1/auth/login-requests` takes `{email, install_id?}`. It returns `{login_request_id, poll_secret, match_code, expires_at}` and sends the link. The app shows the match code.
 2. Opening the link shows a confirm page with the same match code. Opening it changes nothing, so mail scanners that prefetch links cannot sign anyone in. The member checks that the codes agree and clicks Confirm. The form posts the code back, and the API confirms only if it agrees with the request's code. The member is created on first sign-in.
-3. `POST /v1/auth/login-requests/{id}/poll` with `{poll_secret}` returns `202 {status: "pending"}` until the link is confirmed. After that it returns `200 {status: "confirmed", session_token, expires_at}`, exactly once. A wrong secret or unknown id gives `404`, and an expired or already collected request gives `410`.
+3. `POST /v1/auth/login-requests/{id}/poll` with `{poll_secret}` returns `202 {status: "pending"}` until the link is confirmed. After that it returns `200 {status: "confirmed", session_token, expires_at}`, exactly once. A wrong secret or unknown id gives `404`. An expired request gives `410 {error: "expired"}`, and a request whose session was already handed out gives `410 {error: "already_collected"}`.
 4. `GET /v1/me` with `Authorization: Bearer <session_token>` returns the member, or `401` without a live session.
 5. `DELETE /v1/auth/session` revokes the session it is called with.
 
@@ -72,8 +72,11 @@ Rules the code enforces:
 
 - Link tokens, poll secrets and session tokens are 256-bit random values, stored only as SHA-256 hashes.
 - A link is single-use and expires 15 minutes after the request, together with the request.
+- Once confirmed, a request stays open for at least 5 more minutes, so a confirmation just before expiry still signs the app in.
 - Sessions last 90 days.
 - The match code is a six-digit number. It is not a secret, so it is stored as is.
+- Request bodies over 16 KB are rejected with `413`.
+- Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
 
 ## Dev-only routes
 

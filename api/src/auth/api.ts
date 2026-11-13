@@ -16,9 +16,7 @@ authApi.post("/login-requests", async (c) => {
 
   const request = await createLoginRequest(c.env.DB, { email, installId, now: Date.now() });
 
-  const link = new URL("/auth/confirm", c.env.PUBLIC_BASE_URL);
-  link.searchParams.set("token", request.linkToken);
-  await sendSignInEmail(c.env, { to: email, link: link.href, matchCode: request.matchCode });
+  await sendSignInEmail(c.env, { to: email, token: request.linkToken, matchCode: request.matchCode });
 
   return c.json(
     {
@@ -46,6 +44,8 @@ authApi.post("/login-requests/:id/poll", async (c) => {
       return c.json({ error: "not_found" }, 404);
     case "expired":
       return c.json({ error: "expired" }, 410);
+    case "already_collected":
+      return c.json({ error: "already_collected" }, 410);
     case "pending":
       return c.json({ status: "pending" }, 202);
     case "confirmed":

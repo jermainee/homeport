@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BASE_URL,
   call,
@@ -9,6 +9,10 @@ import {
   tokenFrom,
   uniqueEmail,
 } from "./helpers";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("POST /v1/auth/login-requests", () => {
   it("returns a login request and, in dev email mode, logs the sign-in link", async () => {
@@ -29,7 +33,6 @@ describe("POST /v1/auth/login-requests", () => {
     expect(link.origin).toBe(BASE_URL);
     expect(link.pathname).toBe("/auth/confirm");
     expect(link.searchParams.get("token")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    log.mockRestore();
   });
 });
 
@@ -124,5 +127,28 @@ describe("login request validation", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "invalid_install_id" });
+  });
+});
+
+describe("request limits", () => {
+  it("rejects bodies over 16 KB with 413", async () => {
+    const response = await postJson("/v1/auth/login-requests", {
+      email: uniqueEmail(),
+      padding: "x".repeat(17 * 1024),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "payload_too_large" });
+  });
+
+  it("refuses to send links when PUBLIC_BASE_URL is not set", async () => {
+    const response = await postJson(
+      "/v1/auth/login-requests",
+      { email: uniqueEmail() },
+      { PUBLIC_BASE_URL: "" },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "email_unavailable" });
   });
 });

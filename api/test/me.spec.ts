@@ -26,6 +26,14 @@ describe("GET /v1/me", () => {
     expect(response.status).toBe(401);
   });
 
+  it("accepts the Bearer scheme in any case", async () => {
+    const { sessionToken } = await signIn(uniqueEmail());
+
+    const response = await call("/v1/me", { headers: { authorization: `bearer ${sessionToken}` } });
+
+    expect(response.status).toBe(200);
+  });
+
   it("returns the same member for every sign-in with the same email, in any case", async () => {
     const email = uniqueEmail();
     const first = await signIn(email);
