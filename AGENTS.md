@@ -16,7 +16,7 @@ Everything is in one git repository. Each piece of software lives in its own top
 | `relay-protocol/` | Go wire format shared by `gateway/` and `agent/` | CI only |
 | `desktop-app/` | Share and Use app for Linux, macOS and Windows, built with Wails v3 | Release workflow attaches the installers to a GitHub Release |
 | `contracts/` | OpenAPI spec and examples for the API that `gateway/` and `desktop-app/` call | CI only |
-| `e2e/` | Cross-folder end-to-end tests and dev tools (planned) | CI only |
+| `e2e/` | Cross-folder end-to-end tests and dev tools | CI only |
 | `landing-page/` | Public website (later) | Deploy workflow to Cloudflare Pages |
 
 New web parts run on Cloudflare (Pages, Workers, D1) and ship through a deploy workflow. New installable apps ship through a release workflow. When you create a folder, add its row to the table above, or remove "(planned)" from it.
