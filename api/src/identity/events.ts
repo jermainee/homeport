@@ -26,8 +26,13 @@ export function isIdentityEvent(type: string): boolean {
  *   In live mode it stores the identity hash, unless another member already
  *   has it: then the member stays at requires_input (one person, one
  *   account). Test mode skips the hash, as every test document is the same.
- * - The other events apply only while the member is not verified, and only
- *   if no newer event was applied already (Stripe does not keep order).
+ * - The other events apply only while the member is not verified, only for
+ *   the member's newest check (an abandoned check that ends later says
+ *   nothing about the current one), and only if no newer event was applied
+ *   already (Stripe does not keep order).
+ *
+ * members.identity_event_created holds the newest applied event's `created`
+ * in epoch milliseconds, like every other timestamp.
  */
 export async function identityEventStatements(
   db: D1Database,
@@ -44,6 +49,7 @@ export async function identityEventStatements(
     .first();
   if (!known) return [];
 
+  const created = event.created * 1000;
   const status = STATUS_BY_EVENT[event.type];
   if (status) {
     return [
@@ -51,16 +57,20 @@ export async function identityEventStatements(
         .prepare(
           `UPDATE members SET identity_status = ?1, identity_failure = NULL, identity_event_created = ?2
             WHERE id = ?3 AND identity_status <> 'verified'
-              AND (identity_event_created IS NULL OR identity_event_created <= ?2)`,
+              AND (identity_event_created IS NULL OR identity_event_created <= ?2)
+              AND ?4 = (SELECT s.id FROM identity_sessions s WHERE s.member_id = ?3
+                         ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1)`,
         )
-        .bind(status, event.created, memberId),
+        .bind(status, created, memberId, session.id),
     ];
   }
   if (event.type !== VERIFIED) return [];
 
-  const identity = await stripeIdentity.retrieveVerifiedIdentity(session.id);
-  const hash = event.livemode ? await identityHash(env.IDENTITY_HASH_KEY, identity) : null;
-  if (event.livemode && hash === null) return [notVerified(db, memberId, event.created, "identity_data_missing")];
+  // Test mode skips the hash, so it reads nothing sensitive.
+  const hash = event.livemode
+    ? await identityHash(env.IDENTITY_HASH_KEY, await stripeIdentity.retrieveVerifiedIdentity(session.id))
+    : null;
+  if (event.livemode && hash === null) return [notVerified(db, memberId, created, "identity_data_missing")];
 
   return [
     db
@@ -70,7 +80,7 @@ export async function identityEventStatements(
           WHERE id = ?3 AND identity_status <> 'verified'
             AND (?1 IS NULL OR NOT EXISTS (SELECT 1 FROM members other WHERE other.identity_hash = ?1 AND other.id <> ?3))`,
       )
-      .bind(hash, event.created, memberId),
+      .bind(hash, created, memberId),
     // Runs after the statement above: it matches only if that one did not verify the member.
     db
       .prepare(
@@ -79,7 +89,7 @@ export async function identityEventStatements(
           WHERE id = ?3 AND identity_status <> 'verified'
             AND EXISTS (SELECT 1 FROM members other WHERE other.identity_hash = ?1 AND other.id <> ?3)`,
       )
-      .bind(hash, event.created, memberId),
+      .bind(hash, created, memberId),
   ];
 }
 

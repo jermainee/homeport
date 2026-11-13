@@ -1,5 +1,6 @@
+import { every } from "hono/combine";
 import { createMiddleware } from "hono/factory";
-import type { SessionVariables } from "./auth/middleware";
+import { requireSession, type SessionVariables } from "./auth/middleware";
 import { sha256Hex } from "./crypto";
 import { apiError, invalidRequest, readJsonObject } from "./http";
 
@@ -29,8 +30,8 @@ export interface IdempotentVariables {
  * retry with the same body gets it again. The same request_id with another
  * body, on another endpoint, or from another member, gets 409: behind
  * requireSession the member is part of the request, so no member ever sees
- * another member's response. 5xx responses are not kept, so a retry runs
- * again.
+ * another member's response (use memberIdempotent there, which fixes that
+ * order). 5xx responses are not kept, so a retry runs again.
  */
 export const idempotent = createMiddleware<{
   Bindings: Env;
@@ -105,6 +106,13 @@ export const idempotent = createMiddleware<{
       .run();
   },
 );
+
+/**
+ * requireSession, then idempotent: the order that makes the member part of
+ * the request. Use this on every member endpoint that takes a request_id;
+ * `idempotent` alone is for endpoints without a session.
+ */
+export const memberIdempotent = every(requireSession, idempotent);
 
 /**
  * SHA-256 of method, path, the signed-in member (if any) and canonical body:

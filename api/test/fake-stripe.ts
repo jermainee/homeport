@@ -21,8 +21,15 @@ export class FakeStripeIdentity implements StripeIdentityApi {
     return Promise.resolve(session);
   }
 
+  /** Set to make the next retrieval fail, as a Stripe outage would. */
+  failNextRetrieval = false;
+
   retrieveVerifiedIdentity(sessionId: string) {
     this.retrieved.push(sessionId);
+    if (this.failNextRetrieval) {
+      this.failNextRetrieval = false;
+      return Promise.reject(new Error("Stripe is unavailable"));
+    }
     return Promise.resolve(
       this.identities.get(sessionId) ?? {
         documentNumber: `D${crypto.randomUUID().slice(0, 8)}`,

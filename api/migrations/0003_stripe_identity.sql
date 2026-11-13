@@ -9,8 +9,8 @@ ALTER TABLE members ADD COLUMN identity_hash TEXT;
 -- Why the last check did not verify the member, when Homeport decided it
 -- (for example 'duplicate_identity'). Internal; members see requires_input.
 ALTER TABLE members ADD COLUMN identity_failure TEXT;
--- `created` (epoch seconds) of the newest Stripe Identity event applied to
--- the member, so an older event that arrives late changes nothing.
+-- When Stripe created the newest Identity event applied to the member, so an
+-- older event that arrives late changes nothing.
 ALTER TABLE members ADD COLUMN identity_event_created INTEGER;
 
 CREATE UNIQUE INDEX members_identity_hash ON members (identity_hash) WHERE identity_hash IS NOT NULL;

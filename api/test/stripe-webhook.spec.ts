@@ -29,6 +29,19 @@ async function memberWithCheck(app: App, stripe: FakeStripeIdentity) {
   return { sessionToken, memberId, sessionId };
 }
 
+/** Starts one more identity check for a member and returns its Stripe session id. */
+async function startAnotherCheck(app: App, sessionToken: string, memberId: string): Promise<string> {
+  const before = await sessionIdsOf(memberId);
+  await callWith(app, "/v1/identity/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${sessionToken}` },
+    body: JSON.stringify({ request_id: uuidv7() }),
+  });
+  const added = (await sessionIdsOf(memberId)).find((id) => !before.includes(id));
+  if (!added) throw new Error("no second identity session created");
+  return added;
+}
+
 async function sessionIdsOf(memberId: string): Promise<string[]> {
   const { results } = await env.DB.prepare(`SELECT id FROM identity_sessions WHERE member_id = ? ORDER BY created_at`)
     .bind(memberId)
@@ -171,6 +184,47 @@ describe("POST /v1/stripe/webhook: identity events", () => {
     expect(await identityStatus(sessionToken, app)).toBe("processing");
   });
 
+  it("keeps the status of the member's newest check when an older check ends later", async () => {
+    const stripe = new FakeStripeIdentity();
+    const app = appWith(stripe);
+    const older = await memberWithCheck(app, stripe);
+    const { sessionToken } = older;
+    // The member abandons the first check and starts a second one.
+    const newer = await startAnotherCheck(app, sessionToken, older.memberId);
+    const now = Math.floor(Date.now() / 1000);
+    await deliver(app, identityEvent("processing", { sessionId: newer, memberId: older.memberId, created: now }));
+
+    await deliver(app, identityEvent("canceled", { sessionId: older.sessionId, memberId: older.memberId, created: now + 60 }));
+
+    expect(await identityStatus(sessionToken, app)).toBe("processing");
+  });
+
+  it("still verifies the member when an older check is the one that passes", async () => {
+    const stripe = new FakeStripeIdentity();
+    const app = appWith(stripe);
+    const older = await memberWithCheck(app, stripe);
+    await startAnotherCheck(app, older.sessionToken, older.memberId);
+
+    await deliver(app, identityEvent("verified", { sessionId: older.sessionId, memberId: older.memberId }));
+
+    expect(await identityStatus(older.sessionToken, app)).toBe("verified");
+  });
+
+  it("answers 500 and keeps the event unprocessed when handling fails, so Stripe's redelivery applies it", async () => {
+    const stripe = new FakeStripeIdentity();
+    const app = appWith(stripe);
+    const { sessionToken, memberId, sessionId } = await memberWithCheck(app, stripe);
+    const event = identityEvent("verified", { sessionId, memberId, livemode: true });
+    stripe.failNextRetrieval = true;
+
+    const failed = await deliver(app, event);
+    const redelivered = await deliver(app, event);
+
+    expect(failed.status).toBe(500);
+    expect(redelivered.status).toBe(200);
+    expect(await identityStatus(sessionToken, app)).toBe("verified");
+  });
+
   it("acknowledges event types it does not handle", async () => {
     const response = await deliver(appWith(new FakeStripeIdentity()), {
       id: `evt_test_${crypto.randomUUID()}`,
@@ -249,6 +303,28 @@ describe("one person, one account", () => {
     expect(await identityStatus(first.sessionToken, app)).toBe("verified");
     expect(await identityStatus(second.sessionToken, app)).toBe("verified");
     expect(await storedHash(first.memberId)).toBeNull();
+    // Nothing sensitive is read when it would not be used.
+    expect(stripe.retrieved).toEqual([]);
+  });
+
+  it("keeps the letters of other scripts in document numbers", async () => {
+    const stripe = new FakeStripeIdentity();
+    const app = appWith(stripe);
+    const digits = String(Date.now()).slice(-7);
+    // Cyrillic numbers that differ only in their letters, and a Latin look-alike.
+    const numbers = [`ПА ${digits}`, `ПБ${digits}`, `PA${digits}`];
+    const members = [];
+    for (const documentNumber of numbers) {
+      const member = await memberWithCheck(app, stripe);
+      stripe.identities.set(member.sessionId, { ...document, documentNumber });
+      members.push(member);
+    }
+
+    for (const member of members) {
+      await deliver(app, identityEvent("verified", { sessionId: member.sessionId, memberId: member.memberId, livemode: true }));
+    }
+
+    for (const member of members) expect(await identityStatus(member.sessionToken, app)).toBe("verified");
   });
 
   it("does not verify a live-mode member whose document lacks the hashed fields", async () => {

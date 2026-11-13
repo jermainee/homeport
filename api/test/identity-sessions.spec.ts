@@ -74,6 +74,22 @@ describe("POST /v1/identity/sessions", () => {
     expect(stripe.created).toEqual([]);
   });
 
+  it("allows 5 checks a day, then answers 429 with Retry-After", async () => {
+    const stripe = new FakeStripeIdentity();
+    const app = appWith(stripe);
+    const { sessionToken } = await signIn(uniqueEmail());
+    for (let check = 0; check < 5; check++) {
+      expect((await startCheck(app, sessionToken, { request_id: uuidv7() })).status).toBe(201);
+    }
+
+    const response = await startCheck(app, sessionToken, { request_id: uuidv7() });
+
+    expect(response.status).toBe(429);
+    expect(Number(response.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await expectContract("POST", "/v1/identity/sessions", response)).toMatchObject({ error: "rate_limited" });
+    expect(stripe.created).toHaveLength(5);
+  });
+
   it("returns 401 without a session", async () => {
     const response = await startCheck(appWith(new FakeStripeIdentity()), null, { request_id: uuidv7() });
 
