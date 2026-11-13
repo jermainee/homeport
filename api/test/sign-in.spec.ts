@@ -192,6 +192,23 @@ describe("request limits", () => {
     expect(await response.json()).toEqual({ error: "payload_too_large" });
   });
 
+  it.each(["/v1/gateway/usage", "/v1/gateway/line-events"])(
+    "lets gateway batches to %s reach 128 KB, as the contract's x-max-body-bytes says",
+    async (path) => {
+      const within = await call(path, { method: "POST", body: "x".repeat(128 * 1024) });
+      const over = await call(path, { method: "POST", body: "x".repeat(128 * 1024 + 1) });
+
+      expect(within.status).not.toBe(413);
+      expect(over.status).toBe(413);
+    },
+  );
+
+  it("caps every other route at 16 KB", async () => {
+    const response = await call("/v1/gateway/leases", { method: "POST", body: "x".repeat(16 * 1024 + 1) });
+
+    expect(response.status).toBe(413);
+  });
+
   it("refuses to send links when PUBLIC_BASE_URL is not set", async () => {
     const response = await postJson(
       "/v1/auth/login-requests",

@@ -73,7 +73,7 @@ sequenceDiagram
    - `404 not_found` for a token that doesn't match;
    - `410 login_request_expired` once the request has expired.
 5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. Credits are all 0 until the ledger lands.
-6. `DELETE /v1/auth/session` revokes the session it is called with.
+6. `DELETE /v1/auth/session` revokes the session it is called with: `204`, or `401`.
 
 No response carries a secret, so replaying one by `request_id` is harmless.
 
@@ -96,7 +96,7 @@ Every JSON POST under `/v1` carries a `request_id`, a UUIDv7 the client creates 
 - Sessions last 90 days from approval.
 - The match code is a six-digit number. It is not a secret, so it is stored as is.
 - Request schemas are closed: an unknown field gets `400 invalid_request`. Errors are `{error, message?}`.
-- Request bodies over 16 KB get `413 payload_too_large`.
+- Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says (`src/body-limits.ts`).
 - Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
 
 ## Dev-only routes
