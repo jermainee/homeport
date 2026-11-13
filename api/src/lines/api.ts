@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { every } from "hono/combine";
 import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
-import { type IdempotentVariables, idempotent } from "../idempotency";
+import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { requireVerifiedIdentity } from "../identity/require-verified";
 import { lineHasRoomSql, ownerIsLinkedSql } from "./rules";
 
@@ -12,8 +12,6 @@ import { lineHasRoomSql, ownerIsLinkedSql } from "./rules";
  */
 export const linesApi = new Hono<{ Bindings: Env; Variables: SessionVariables & IdempotentVariables }>();
 
-// The identity check runs before idempotent, so a 403 is not stored for the request_id.
-const verifiedRequest = every(requireSession, requireVerifiedIdentity, idempotent);
 const verified = every(requireSession, requireVerifiedIdentity);
 
 interface LineWithGateway {
@@ -23,7 +21,7 @@ interface LineWithGateway {
   quic_spki_sha256: string;
 }
 
-linesApi.post("/", verifiedRequest, async (c) => {
+linesApi.post("/", verifiedMemberIdempotent, async (c) => {
   const body = c.get("body");
   if (!hasOnlyFields(body, ["request_id", "device_id"])) return invalidRequest(c, "unknown field");
   const deviceId = body["device_id"];

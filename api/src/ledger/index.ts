@@ -1,9 +1,9 @@
 import { type Balances, type MemberAccountKind, bookStatements, memberAccount, platformAccount } from "./book";
-import { CONFLICT, guardedBatch, retryOnConflict } from "./guarded-batch";
+import { CONFLICT, type Guard, guardedBatch, retryOnConflict } from "./guarded-batch";
 import { memberLedgerFrom, memberLedgerStatement } from "./state";
 
 export type { Balances, MemberAccountKind } from "./book";
-export { LedgerBusyError } from "./guarded-batch";
+export { type Guard, LedgerBusyError } from "./guarded-batch";
 export { releaseReservation, reserveCredits, type ReservationResult } from "./reservations";
 export { chargeUsage, type UsageInput, type UsageResult } from "./usage";
 
@@ -28,6 +28,10 @@ export type GrantSource =
  * Gives a member credits from a platform source: `credits_issued` for sold
  * credit packs, `dev_grants` for development. They land in `purchased`
  * unless a dev grant names another account.
+ *
+ * `alsoWrite` adds statements to the booking's batch, so they commit
+ * together with it or not at all. Each must carry `guard.sql` in its WHERE
+ * clause. They do not run for a duplicate.
  */
 export async function grantCredits(
   db: D1Database,
@@ -36,6 +40,7 @@ export async function grantCredits(
     credits: number;
     idempotencyKey: string;
     now?: number;
+    alsoWrite?: (guard: Guard, transactionId: string) => D1PreparedStatement[];
   },
 ): Promise<BookingResult> {
   if (!Number.isSafeInteger(input.credits) || input.credits <= 0) {
@@ -66,8 +71,8 @@ export async function grantCredits(
     const member = memberLedgerFrom(memberResult);
 
     const transactionId = crypto.randomUUID();
-    const written = await guardedBatch(db, [{ memberId: input.memberId, version: member.version }], (guard) =>
-      bookStatements(db, guard, {
+    const written = await guardedBatch(db, [{ memberId: input.memberId, version: member.version }], (guard) => [
+      ...bookStatements(db, guard, {
         id: transactionId,
         idempotencyKey: input.idempotencyKey,
         kind,
@@ -78,7 +83,8 @@ export async function grantCredits(
           { accountId: memberAccount(input.memberId, account), amount: input.credits },
         ],
       }),
-    );
+      ...(input.alsoWrite?.(guard, transactionId) ?? []),
+    ]);
     return written === CONFLICT ? CONFLICT : ({ status: "booked", transactionId } as const);
   });
 }

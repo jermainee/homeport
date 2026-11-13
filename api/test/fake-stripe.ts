@@ -153,7 +153,8 @@ export function checkoutEvent(
         metadata: { member_id: input.memberId, pack: input.pack ?? "credits_1000000" },
         currency: "eur",
         amount_subtotal: 4000,
-        amount_total: 4760,
+        // Stripe Tax is not on yet, so no VAT is added.
+        amount_total: 4000,
         payment_status: paymentStatus,
         status: type === "expired" ? "expired" : "complete",
       },

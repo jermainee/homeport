@@ -1,6 +1,13 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
-import { CREDIT_PACK_CREDITS, CREDIT_PACK_CURRENCY, CREDIT_PACK_ID, CREDIT_PACK_NET_CENTS } from "../src/pricing";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  CHECKOUT_SESSION_WINDOW_MS,
+  CREDIT_PACK_CREDITS,
+  CREDIT_PACK_CURRENCY,
+  CREDIT_PACK_ID,
+  CREDIT_PACK_NET_CENTS,
+  MAX_CHECKOUT_SESSIONS_PER_WINDOW,
+} from "../src/pricing";
 import { expectContract } from "./contract";
 import { FakeStripeCheckout, FakeStripeIdentity, appWith } from "./fake-stripe";
 import { callWith, signIn, uniqueEmail, uuidv7 } from "./helpers";
@@ -149,6 +156,43 @@ describe("POST /v1/checkout/sessions", () => {
     expect(failed.status).toBe(500);
     expect(retry.status).toBe(201);
     expect(await paymentsOf(memberId)).toHaveLength(1);
+  });
+});
+
+describe("POST /v1/checkout/sessions: limit", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(`answers 429 with Retry-After after ${MAX_CHECKOUT_SESSIONS_PER_WINDOW} sessions in the window, without calling Stripe`, async () => {
+    const { app, checkout } = setup();
+    const { sessionToken, memberId } = await verifiedMember();
+    for (let i = 0; i < MAX_CHECKOUT_SESSIONS_PER_WINDOW; i++) {
+      expect((await buy(app, sessionToken, { request_id: uuidv7() })).status).toBe(201);
+    }
+
+    const limited = await buy(app, sessionToken, { request_id: uuidv7() });
+
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await expectContract("POST", "/v1/checkout/sessions", limited)).toMatchObject({ error: "rate_limited" });
+    expect(checkout.created).toHaveLength(MAX_CHECKOUT_SESSIONS_PER_WINDOW);
+    expect(await paymentsOf(memberId)).toHaveLength(MAX_CHECKOUT_SESSIONS_PER_WINDOW);
+  });
+
+  it("counts each member on their own and frees up once the window has passed", async () => {
+    const { app } = setup();
+    const busy = await verifiedMember();
+    const other = await verifiedMember();
+    for (let i = 0; i < MAX_CHECKOUT_SESSIONS_PER_WINDOW; i++) await buy(app, busy.sessionToken, { request_id: uuidv7() });
+
+    const otherMember = await buy(app, other.sessionToken, { request_id: uuidv7() });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + CHECKOUT_SESSION_WINDOW_MS + 1000);
+    const later = await buy(app, busy.sessionToken, { request_id: uuidv7() });
+
+    expect(otherMember.status).toBe(201);
+    expect(later.status).toBe(201);
   });
 });
 

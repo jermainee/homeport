@@ -92,7 +92,7 @@ describe("POST /v1/stripe/webhook: Checkout events", () => {
     expect(await platformBalance("credits_issued")).toBe(issuedBefore - 1_000_000);
     const [transaction] = await purchaseTransactions(memberId);
     expect(transaction?.idempotency_key).toBe(`purchase:${sessionId}`);
-    expect(await payment(sessionId)).toEqual({ status: "paid", transaction_id: transaction?.id, amount_total_cents: 4760 });
+    expect(await payment(sessionId)).toEqual({ status: "paid", transaction_id: transaction?.id, amount_total_cents: 4000 });
     expect(await unbalancedTransactions()).toEqual([]);
     expect(await driftedBalances()).toEqual([]);
   });
@@ -122,6 +122,17 @@ describe("POST /v1/stripe/webhook: Checkout events", () => {
     expect(response.status).toBe(200);
     expect(await purchased(app, sessionToken)).toBe(0);
     expect((await payment(sessionId))?.status).toBe("failed");
+  });
+
+  it("leaves a completed session with nothing to pay alone: it grants nothing and waits for no async event", async () => {
+    const { app } = setup();
+    const { sessionToken, memberId, sessionId } = await buyer(app);
+
+    const response = await deliver(app, checkoutEvent("completed", { sessionId, memberId, paymentStatus: "no_payment_required" }));
+
+    expect(response.status).toBe(200);
+    expect(await purchased(app, sessionToken)).toBe(0);
+    expect((await payment(sessionId))?.status).toBe("open");
   });
 
   it("records checkout.session.expired and grants nothing", async () => {
@@ -202,9 +213,13 @@ describe("POST /v1/stripe/webhook: Checkout events", () => {
       const event = checkoutEvent("completed", { sessionId, memberId });
 
       const failed = await deliver(app, event, { DB: dbFailingBatch(failingBatch) });
+      // The grant and the payment's status commit together, or neither does.
+      const grantedAfterFailure = (await purchased(app, sessionToken)) === 1_000_000;
+      const paidAfterFailure = (await payment(sessionId))?.status === "paid";
       const redelivered = await deliver(app, event);
 
       expect(failed.status).toBe(500);
+      expect(paidAfterFailure).toBe(grantedAfterFailure);
       expect(redelivered.status).toBe(200);
       expect(await purchased(app, sessionToken)).toBe(1_000_000);
       expect(await purchaseTransactions(memberId)).toHaveLength(1);
