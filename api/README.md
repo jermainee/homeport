@@ -42,7 +42,7 @@ npm run dev
 
 ## Sign-in
 
-The desktop app signs in by polling, so it needs no custom URL scheme. The endpoints follow the contract in `contracts/control-api.openapi.yaml` (operations `createLoginRequest`, `pollLoginRequest` and `getMe`; added in jermainee/homeport#7).
+The desktop app signs in by polling, so it needs no custom URL scheme. The endpoints follow the contract in `contracts/control-api.openapi.yaml` (operations `createLoginRequest`, `getLoginRequest`, `deleteSession` and `getMe`; added in jermainee/homeport#7).
 
 ```mermaid
 sequenceDiagram
@@ -58,7 +58,7 @@ sequenceDiagram
   Browser->>API: POST /auth/confirm (Confirm button)
   Note over API: approval activates the session token
   loop every few seconds
-    App->>API: POST /v1/auth/login-requests/{id}/poll {request_id, session_token}
+    App->>API: GET /v1/auth/login-requests/{id} (Authorization: Bearer session_token)
     API-->>App: 202 pending, then 200 {status: "approved", member_id, expires_at}
   end
   App->>API: GET /v1/me (Authorization: Bearer session_token)
@@ -67,10 +67,11 @@ sequenceDiagram
 1. The app creates its session token, `hpm_` plus 32 random bytes in base64url, and keeps it.
 2. `POST /v1/auth/login-requests` takes `{request_id, email, session_token_sha256}`. It returns `{login_request_id, match_code, expires_at}` and sends the link. The response is the same whether or not the email belongs to a member. The app shows the match code.
 3. Opening the link shows a confirm page with the same match code. Opening it changes nothing, so mail scanners that prefetch links cannot sign anyone in. The member checks that the codes agree and clicks Confirm. The form posts the code back, and the API approves only if it agrees with the request's code. Approval creates the member on first sign-in and activates the app's session token.
-4. `POST /v1/auth/login-requests/{id}/poll` takes `{request_id, session_token}`, with a new `request_id` for each poll. Responses:
+4. `GET /v1/auth/login-requests/{id}` with `Authorization: Bearer <session_token>` polls the sign-in. The token works here before approval and nowhere else. A poll only reads, so it carries no `request_id`, and every response has `Cache-Control: no-store`. Responses:
    - `202 {status: "pending"}` until the member approves;
    - `200 {status: "approved", member_id, expires_at}` on every poll after that, until the request expires (`expires_at` is when the session token stops working);
-   - `404 not_found` for a token that doesn't match;
+   - `401 unauthorized` for a missing or malformed token;
+   - `404 not_found` for a token that belongs to another request;
    - `410 login_request_expired` once the request has expired.
 5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. Credits are all 0 until the ledger lands.
 6. `DELETE /v1/auth/session` revokes the session it is called with: `204`, or `401`.
@@ -79,7 +80,7 @@ No response carries a secret, so replaying one by `request_id` is harmless.
 
 ### `request_id`
 
-Every JSON POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
+Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
 
 - A retry with the same `request_id` and body gets the first response again, status and body.
 - The same `request_id` with another body, or on another endpoint, gets `409 idempotency_conflict`.

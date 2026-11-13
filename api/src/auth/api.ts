@@ -3,7 +3,7 @@ import { signInMailer } from "../email";
 import { apiError, hasOnlyFields, invalidRequest } from "../http";
 import { idempotent, type IdempotentVariables } from "../idempotency";
 import { createLoginRequest, pollLoginRequest } from "./login-requests";
-import { requireSession, type SessionVariables } from "./middleware";
+import { bearerToken, requireSession, unauthorized, type SessionVariables } from "./middleware";
 import { SESSION_TOKEN, revokeSession } from "./sessions";
 
 export const authApi = new Hono<{
@@ -43,13 +43,15 @@ authApi.post("/login-requests", idempotent, async (c) => {
   );
 });
 
-authApi.post("/login-requests/:id/poll", idempotent, async (c) => {
-  const body = c.get("body");
-  if (!hasOnlyFields(body, ["request_id", "session_token"])) return invalidRequest(c, "unknown field");
-  const sessionToken = body["session_token"];
-  if (typeof sessionToken !== "string" || !SESSION_TOKEN.test(sessionToken)) {
-    return invalidRequest(c, "session_token must be hpm_ and 43 base64url characters");
-  }
+/**
+ * Polling a sign-in. The app sends the token it created as a Bearer token
+ * (the contract's `pendingSession`), so requireSession does not guard this
+ * route. A poll only reads: no request_id and nothing written.
+ */
+authApi.get("/login-requests/:id", async (c) => {
+  c.header("cache-control", "no-store");
+  const sessionToken = bearerToken(c.req.header("authorization"));
+  if (!sessionToken || !SESSION_TOKEN.test(sessionToken)) return unauthorized(c);
 
   const result = await pollLoginRequest(c.env.DB, {
     id: c.req.param("id"),

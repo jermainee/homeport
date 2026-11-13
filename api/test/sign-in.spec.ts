@@ -167,17 +167,50 @@ describe("login request validation", () => {
     expect(await response.json()).toMatchObject({ error: "invalid_request" });
   });
 
-  it.each([
-    ["a missing session_token", { request_id: uuidv7() }],
-    ["a session_token without the hpm_ prefix", { request_id: uuidv7(), session_token: "x".repeat(47) }],
-    ["an unknown field", { request_id: uuidv7(), session_token: newSessionToken(), extra: 1 }],
-  ])("rejects a poll with %s", async (_case, body) => {
+});
+
+describe("GET /v1/auth/login-requests/{id}", () => {
+  it("answers with Cache-Control: no-store", async () => {
+    const { request, sessionToken } = await startLogin(uniqueEmail());
+
+    const response = await poll(request.login_request_id, sessionToken);
+
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("answers 401 without an Authorization header", async () => {
     const { request } = await startLogin(uniqueEmail());
 
-    const response = await postJson(`/v1/auth/login-requests/${request.login_request_id}/poll`, body);
+    const response = await call(`/v1/auth/login-requests/${request.login_request_id}`);
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toMatch(/^Bearer/);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it.each([
+    ["a token without the hpm_ prefix", `Bearer ${"x".repeat(47)}`],
+    ["a token that is too short", "Bearer hpm_abc"],
+    ["another scheme", `Basic ${"x".repeat(47)}`],
+  ])("answers 401 for %s", async (_case, authorization) => {
+    const { request } = await startLogin(uniqueEmail());
+
+    const response = await call(`/v1/auth/login-requests/${request.login_request_id}`, {
+      headers: { authorization },
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it("does not answer POST any more", async () => {
+    const { request, sessionToken } = await startLogin(uniqueEmail());
+
+    const response = await postJson(`/v1/auth/login-requests/${request.login_request_id}/poll`, {
+      request_id: uuidv7(),
+      session_token: sessionToken,
+    });
+
+    expect(response.status).toBe(404);
   });
 });
 

@@ -106,18 +106,13 @@ export async function startLogin(
   }
 }
 
-/** Polls a login request with a fresh request_id, as the app does every few seconds. */
+/** Polls a login request the way the app does every few seconds: a GET with its token. */
 export function poll(
   loginRequestId: string,
   sessionToken: string,
-  requestId = uuidv7(),
   envOverrides: Partial<Env> = {},
 ): Promise<Response> {
-  return postJson(
-    `/v1/auth/login-requests/${loginRequestId}/poll`,
-    { request_id: requestId, session_token: sessionToken },
-    envOverrides,
-  );
+  return call(`/v1/auth/login-requests/${loginRequestId}`, bearer(sessionToken), envOverrides);
 }
 
 export function confirm(link: URL, matchCode: string): Promise<Response> {

@@ -2,12 +2,9 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestFingerprint } from "../src/idempotency";
 import {
-  confirm,
   loginRequestBody,
   newSessionToken,
-  poll,
   postJson,
-  startLogin,
   uniqueEmail,
   uuidv7,
 } from "./helpers";
@@ -43,27 +40,6 @@ describe("request_id", () => {
 
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ error: "idempotency_conflict" });
-  });
-
-  it("answers 409 when a request_id is reused on another endpoint", async () => {
-    const body = await loginRequestBody(uniqueEmail(), newSessionToken());
-    const created = await postJson("/v1/auth/login-requests", body);
-    const { login_request_id } = await created.json<{ login_request_id: string }>();
-
-    const conflict = await poll(login_request_id, newSessionToken(), body.request_id);
-
-    expect(conflict.status).toBe(409);
-  });
-
-  it("replays a poll, so the app sends a new request_id for each poll", async () => {
-    const { request, sessionToken, link } = await startLogin(uniqueEmail());
-    const requestId = uuidv7();
-    expect((await poll(request.login_request_id, sessionToken, requestId)).status).toBe(202);
-
-    await confirm(link, request.match_code);
-
-    expect((await poll(request.login_request_id, sessionToken, requestId)).status).toBe(202);
-    expect((await poll(request.login_request_id, sessionToken)).status).toBe(200);
   });
 
   it("does not keep a 5xx response, so a retry can succeed", async () => {

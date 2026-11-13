@@ -50,4 +50,16 @@ describe("secret storage", () => {
 
     expect(await dumpTables()).not.toContain(sessionToken);
   });
+
+  it("writes no idempotency record when the app polls", async () => {
+    const { request, sessionToken } = await startLogin(uniqueEmail());
+    const count = async () =>
+      (await env.DB.prepare(`SELECT COUNT(*) AS n FROM idempotency_records`).first<{ n: number }>())?.n;
+    const before = await count();
+
+    await poll(request.login_request_id, sessionToken);
+    await poll(request.login_request_id, sessionToken);
+
+    expect(await count()).toBe(before);
+  });
 });
