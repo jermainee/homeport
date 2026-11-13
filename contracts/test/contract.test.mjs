@@ -16,6 +16,7 @@ test("every example the spec references is valid for its operation", () => {
   }
 });
 
+/** @param {string} name */
 function readExample(name) {
   const example = contract.examples().find((candidate) => candidate.file.endsWith(`/${name}`));
   assert.ok(example, `the spec does not reference ${name}`);
@@ -34,15 +35,28 @@ test("a usage event that carries a destination is rejected", () => {
   );
 });
 
-// Paths ("/events/0/session_start") of every object inside a JSON value.
+/**
+ * Paths ("/events/0/session_start") of every object inside a JSON value.
+ * @param {unknown} value
+ * @param {string} at
+ * @returns {string[]}
+ */
 function objectPaths(value, at = "") {
   if (Array.isArray(value)) return value.flatMap((item, index) => objectPaths(item, `${at}/${index}`));
   if (value === null || typeof value !== "object") return [];
   return [at, ...Object.entries(value).flatMap(([key, child]) => objectPaths(child, `${at}/${key}`))];
 }
 
+/**
+ * @param {any} root
+ * @param {string} pointer
+ * @returns {any}
+ */
 function objectAt(root, pointer) {
-  return pointer.split("/").slice(1).reduce((node, key) => node[key], root);
+  return pointer
+    .split("/")
+    .slice(1)
+    .reduce((node, key) => node[key], root);
 }
 
 test("every request rejects an unknown field at any depth", () => {
@@ -80,6 +94,9 @@ test("only the first event of a session (seq 0) carries session_start", () => {
   const withoutStart = { ...first };
   delete withoutStart.session_start;
   const lateStart = { ...second, session_start: first.session_start };
+  const validate = (/** @type {unknown} */ event) => contract.validateRequest("POST", "/v1/gateway/usage", { events: [event] }).errors;
+  assert.deepEqual(validate(first), [], "a first event with session_start is valid");
+  assert.deepEqual(validate(second), [], "a later event without session_start is valid");
 
   for (const event of [withoutStart, lateStart]) {
     const { errors } = contract.validateRequest("POST", "/v1/gateway/usage", { events: [event] });
@@ -94,9 +111,10 @@ test("a rejected event result says why, and only a rejected one does", () => {
     { path: "/v1/gateway/line-events", reason: "unknown_line" },
   ];
   for (const { path: apiPath, reason } of batches) {
-    const validate = (result) => contract.validateResponse("POST", apiPath, 200, { results: [result] }).errors;
+    const validate = (/** @type {unknown} */ result) => contract.validateResponse("POST", apiPath, 200, { results: [result] }).errors;
 
     assert.deepEqual(validate({ event_id, status: "rejected", reason }), [], apiPath);
+    assert.deepEqual(validate({ event_id, status: "rejected", reason: "expired" }), [], `${apiPath}: expired`);
     assert.notDeepEqual(validate({ event_id, status: "rejected" }), [], `${apiPath}: rejected without reason`);
     assert.notDeepEqual(validate({ event_id, status: "applied", reason }), [], `${apiPath}: applied with reason`);
   }
@@ -162,4 +180,52 @@ test("validate-examples checks every example and exits 0", () => {
 test("the spec's version is the package version", () => {
   const { version } = JSON.parse(readFileSync(path.join(CONTRACTS_DIR, "package.json"), "utf8"));
   assert.equal(contract.spec.info.version, version);
+});
+
+// Responses are replayed to anyone who repeats a request_id, so none may
+// carry a secret.
+test("no response carries a secret", () => {
+  const secretKey = /secret|token/;
+  for (const example of contract.examples().filter((candidate) => candidate.part === "response")) {
+    const body = JSON.parse(readFileSync(example.file, "utf8"));
+    const keys = objectPaths(body).flatMap((at) => Object.keys(objectAt(body, at)));
+    assert.deepEqual(keys.filter((key) => secretKey.test(key)), [], example.file);
+  }
+
+  const loginResponses = [
+    { path: "/v1/auth/login-requests", status: 201, file: "login-request-created.json", secret: "poll_secret" },
+    {
+      path: "/v1/auth/login-requests/{login_request_id}/poll",
+      status: 200,
+      file: "login-approved.json",
+      secret: "session_token",
+    },
+  ];
+  for (const { path: apiPath, status, file, secret } of loginResponses) {
+    const { body } = readExample(file);
+    body[secret] = "hpm_1GEbwdQUxDUlGqViywnkPs3EcFvghd1PD81vUIt5x8s";
+    const { errors } = contract.validateResponse("POST", apiPath, status, body);
+    assert.ok(errors.includes(`/ must not have property "${secret}"`), `${apiPath} ${status} can carry ${secret}`);
+  }
+});
+
+test("a renewal of an already superseded lease gets that successor back", () => {
+  const { body } = readExample("lease-granted.json");
+  assert.deepEqual(contract.validateResponse("POST", "/v1/gateway/leases", 200, body).errors, []);
+});
+
+test("UUIDs are lowercase everywhere", () => {
+  const { body } = readExample("lease-request.json");
+  for (const field of ["request_id", "peer_id"]) {
+    const upper = { ...body, [field]: body[field].toUpperCase() };
+    const { errors } = contract.validateRequest("POST", "/v1/gateway/leases", upper);
+    assert.notDeepEqual(errors, [], `uppercase ${field} was accepted`);
+  }
+});
+
+test("an unreadable example is reported, not thrown", () => {
+  const [example] = contract.examples();
+  const { errors } = contract.validateExample({ ...example, file: path.join(CONTRACTS_DIR, "examples/missing.json") });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /missing\.json/);
 });

@@ -1,4 +1,5 @@
 {
   "request_id": "01a1d422-a250-7852-a64a-d4078fcb54e1",
-  "email": "member@example.com"
+  "email": "member@example.com",
+  "session_token_sha256": "5e9bcf150c88db7e0b823106db527bbf0b6f0c45126382a8b6e3c38fba1faeeb"
 }

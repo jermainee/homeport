@@ -1,5 +1,10 @@
 {
   "etag": "\"cfg-7f3a9c2e\"",
+  "topup_hostnames": [
+    "homeport.example",
+    "api.homeport.example",
+    "checkout.stripe.com"
+  ],
   "peers": [
     {
       "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",

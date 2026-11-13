@@ -11,8 +11,10 @@ info:
     - **Gateways** send `Authorization: Bearer hpgw_<gatewayId>.<secret>`.
       The token is provisioned with the gateway and works only on
       `/v1/gateway/*`.
-    - **Members** send `Authorization: Bearer <session_token>`, the token from
-      a login poll. It works on every path except `/v1/gateway/*`.
+    - **Members** send `Authorization: Bearer <session_token>`. The app
+      creates the token itself and the API activates it when the member
+      approves the sign-in (see `createLoginRequest`). It works on every path
+      except `/v1/gateway/*`.
 
     A token used outside its scope gets `401 unauthorized`, the same as a
     wrong token.
@@ -27,14 +29,23 @@ info:
       an `event_id` (UUIDv7) on every event instead, and answer each event as
       `applied`, `duplicate` or `rejected`.
     - A retry with the same `request_id` and the same body gets the first
-      response again, status and body.
+      response again, status and body. A `request_id` is not a secret, so no
+      response carries a secret: anyone who repeats a request may see its
+      response.
     - The same `request_id` with a different body gets
       `409 idempotency_conflict`.
-    - The API keeps `request_id`s for 24 hours, measured from the timestamp
-      inside the UUIDv7. An older `request_id` gets
-      `400 request_id_expired`.
+    - A `request_id` whose UUIDv7 timestamp is more than 24 hours in the past
+      gets `400 request_id_expired`; more than 1 hour in the future gets
+      `400 invalid_request`. The API keeps each `request_id` for 25 hours
+      after it first sees it, so a retry is either replayed or rejected as
+      expired, never run twice.
+    - Event IDs follow the same idea with longer windows: an event whose
+      `event_id` timestamp is more than 72 hours old is answered `rejected`
+      with reason `expired`, and the API keeps event IDs for 7 days.
 
     PUT, PATCH and DELETE are idempotent by their own semantics.
+
+    UUIDs are lowercase, in requests and responses.
 
     ## Schemas
 
@@ -101,10 +112,15 @@ paths:
       operationId: getGatewayConfig
       summary: Fetch the peers and lines this gateway serves
       description: |
-        The gateway polls this endpoint and sends the last `etag` as
-        `If-None-Match`. It accepts WireGuard handshakes only from the listed
-        peers and QUIC connections only from agents with a listed
-        `device_spki_sha256`.
+        The gateway polls this endpoint every 30 seconds and sends the body's
+        last `etag` as `If-None-Match`. It accepts WireGuard handshakes only
+        from the listed peers and QUIC connections only from agents with a
+        listed `device_spki_sha256`. A peer or line that is no longer listed
+        is dropped at once, open sessions included.
+
+        Use the body's `etag`, not the `ETag` header: Cloudflare turns the
+        header into a weak tag (`W/"..."`) when it compresses the response.
+        The API compares tags weakly, so either form matches.
       security:
         - gatewayToken: []
       parameters:
@@ -136,14 +152,22 @@ paths:
       operationId: createLease
       summary: Get a quota lease for a peer's session
       description: |
-        The gateway asks for a lease when a peer starts sending, and for the
-        next one once the session has used `renew_at_bytes` of the current
-        lease. The API reserves credits for the lease from the peer's member.
+        The gateway asks for a lease when a peer starts sending. Once the
+        session has used `renew_at_bytes` of its current lease, the gateway
+        asks for the next one with `supersedes_lease_id`. It keeps counting
+        against the current lease until all of `granted_bytes` are used or the
+        lease expires, then moves to the next lease. The API reserves credits
+        for each lease from the peer's member.
 
-        When no lease is granted (402, 403, or the API is unreachable after
-        the current lease is used up), the gateway stops forwarding the
-        peer's traffic except to the top-up page, and closes the session
-        after `grace_seconds`.
+        A lease can be superseded once. Renewing a lease that was already
+        superseded returns that successor with 200 instead of granting
+        another, so a gateway that lost a renewal response gets it back.
+
+        When the current lease is used up and there is no next lease:
+        - after a 402, or while the API is unreachable, the gateway forwards
+          only to the top-up hosts (`topup_hostnames` in the config) and
+          closes the session after `grace_seconds`;
+        - after a 403, the gateway closes the session at once.
       security:
         - gatewayToken: []
       requestBody:
@@ -157,6 +181,12 @@ paths:
                 summary: Renewal of the session's current lease
                 externalValue: examples/gateway/lease-request.json
       responses:
+        "200":
+          description: "`supersedes_lease_id` was already superseded. This is that successor lease."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lease"
         "201":
           description: Lease granted.
           content:
@@ -197,24 +227,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: |
-            `idempotency_conflict`, or `lease_superseded`: another lease
-            already superseded `supersedes_lease_id`.
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Error"
-                  - properties:
-                      error:
-                        enum: [idempotency_conflict, lease_superseded]
+          $ref: "#/components/responses/IdempotencyConflict"
   /v1/gateway/leases/{lease_id}/return:
     post:
       tags: [gateway]
       operationId: returnLease
       summary: Return the unused part of a lease
       description: |
-        Sent when a session ends, after the lease's last usage event has been
+        Sent when a session ends, for its current lease and for a next lease
+        it never used, after the session's last usage event has been
         reported. The API releases the credits reserved for bytes the
         session did not use. Returning a lease that is already returned or
         expired releases nothing and still gets 200.
@@ -332,11 +353,15 @@ paths:
       operationId: createLoginRequest
       summary: Start an email sign-in
       description: |
-        The API emails a sign-in link to `email`, creating the member on first
-        approval. The app shows `match_code` and polls with `poll_secret`. The
-        page behind the email link asks the member to confirm the match code
-        before it approves the login. The response is the same whether or not
-        the email belongs to a member.
+        The app creates a session token (`hpm_` and 32 random bytes in
+        base64url) and sends only its SHA-256. The API emails a sign-in link
+        to `email`, creating the member on first approval. The app shows
+        `match_code` and polls with the token. The page behind the email link
+        asks the member to confirm the match code before it approves the
+        login, which activates the token. The API stores only the hash and
+        never sends a secret, so replaying any of these responses is
+        harmless. The response is the same whether or not the email belongs
+        to a member.
       security: []
       requestBody:
         required: true
@@ -371,9 +396,11 @@ paths:
       operationId: pollLoginRequest
       summary: Poll a sign-in for its session token
       description: |
-        The app polls every few seconds with a new `request_id` per poll.
-        Once the login is approved, the next poll returns the session token
-        and ends the login request: later polls get 404.
+        The app polls every few seconds with a new `request_id` per poll and
+        the session token it created. A poll whose token does not match the
+        login request gets 404. Once the member approves, polls return 200
+        until the login request expires, and the token works as
+        `Authorization: Bearer <session_token>`.
       security: []
       parameters:
         - $ref: "#/components/parameters/LoginRequestId"
@@ -389,7 +416,7 @@ paths:
                 externalValue: examples/member/login-poll.json
       responses:
         "200":
-          description: Approved. The session token is shown only once.
+          description: Approved. The session token is now active.
           content:
             application/json:
               schema:
@@ -757,7 +784,10 @@ paths:
       tags: [use]
       operationId: deleteWireguardPeer
       summary: Delete a WireGuard peer
-      description: The gateway drops the peer at its next config sync and gets `peer_inactive` for its next lease.
+      description: |
+        Within about 30 seconds, at its next config poll, the gateway drops
+        the peer and ends its open sessions. A lease request for the peer
+        gets `peer_inactive` at once.
       security:
         - memberSession: []
       parameters:
@@ -780,15 +810,15 @@ components:
       type: http
       scheme: bearer
       bearerFormat: hpm_<secret>
-      description: Member session token from a login poll. Not valid on `/v1/gateway/*`.
+      description: Session token the app created and a sign-in activated. Not valid on `/v1/gateway/*`.
   parameters:
     IfNoneMatch:
       name: If-None-Match
       in: header
       required: false
-      description: The `etag` of the configuration the gateway already has.
+      description: The body's `etag` of the configuration the gateway already has.
       schema:
-        $ref: "#/components/schemas/ETag"
+        $ref: "#/components/schemas/EntityTag"
     LeaseId:
       name: lease_id
       in: path
@@ -815,9 +845,9 @@ components:
         $ref: "#/components/schemas/Id"
   headers:
     ETag:
-      description: Same value as the body's `etag`.
+      description: The body's `etag`, possibly weakened by Cloudflare's compression.
       schema:
-        $ref: "#/components/schemas/ETag"
+        $ref: "#/components/schemas/EntityTag"
   responses:
     BadRequest:
       description: |
@@ -890,9 +920,9 @@ components:
   schemas:
     # Scalars
     Id:
-      description: Resource ID, a UUID chosen by the API.
+      description: Resource ID, a lowercase UUID chosen by the API.
       type: string
-      format: uuid
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     UuidV7:
       description: UUID version 7, created by the sender. Its timestamp orders and expires it.
       type: string
@@ -931,9 +961,13 @@ components:
       type: string
       pattern: "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
     ETag:
-      description: A strong HTTP entity tag, quotes included.
+      description: A strong HTTP entity tag, quotes included. The API sends this in the body.
       type: string
       pattern: '^"[!#-~]+"$'
+    EntityTag:
+      description: An HTTP entity tag, weak (`W/"..."`) or strong.
+      type: string
+      pattern: '^(W/)?"[!#-~]+"$'
     Error:
       type: object
       additionalProperties: false
@@ -986,10 +1020,20 @@ components:
     GatewayConfig:
       type: object
       additionalProperties: false
-      required: [etag, peers, lines]
+      required: [etag, peers, lines, topup_hostnames]
       properties:
         etag:
           $ref: "#/components/schemas/ETag"
+        topup_hostnames:
+          description: |
+            Hosts a peer without credits can still reach: the gateway forwards
+            DNS queries, and TLS connections on port 443 whose ClientHello
+            names one of these hosts (SNI). Nothing else.
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: hostname
         peers:
           type: array
           items:
@@ -1047,7 +1091,7 @@ components:
           description: The gateway's session for this peer, as in usage events.
           $ref: "#/components/schemas/UuidV7"
         supersedes_lease_id:
-          description: The session's current lease, when this is a renewal. A lease can be superseded once.
+          description: The session's current lease, when this is a renewal.
           $ref: "#/components/schemas/Id"
     Lease:
       type: object
@@ -1170,9 +1214,13 @@ components:
             const: 0
       then:
         required: [session_start]
+        properties:
+          session_start: true
       else:
         not:
           required: [session_start]
+          properties:
+            session_start: true
     SessionStart:
       description: Present on the session's first event (`seq` 0) and only there.
       type: object
@@ -1213,6 +1261,7 @@ components:
             - lease_mismatch
             - invalid_period
             - seq_conflict
+            - expired
       if:
         required: [status]
         properties:
@@ -1220,9 +1269,13 @@ components:
             const: rejected
       then:
         required: [reason]
+        properties:
+          reason: true
       else:
         not:
           required: [reason]
+          properties:
+            reason: true
     EventStatus:
       description: |
         `applied`: counted now. `duplicate`: counted before, not again.
@@ -1281,7 +1334,7 @@ components:
         reason:
           description: Why the event was rejected. Present only when `status` is `rejected`.
           type: string
-          enum: [unknown_line]
+          enum: [unknown_line, expired]
       if:
         required: [status]
         properties:
@@ -1289,15 +1342,23 @@ components:
             const: rejected
       then:
         required: [reason]
+        properties:
+          reason: true
       else:
         not:
           required: [reason]
+          properties:
+            reason: true
 
     # Auth
+    SessionToken:
+      description: "`hpm_` and 32 random bytes in base64url, created by the app."
+      type: string
+      pattern: "^hpm_[A-Za-z0-9_-]{43}$"
     LoginRequestCreate:
       type: object
       additionalProperties: false
-      required: [request_id, email]
+      required: [request_id, email, session_token_sha256]
       properties:
         request_id:
           $ref: "#/components/schemas/UuidV7"
@@ -1305,17 +1366,16 @@ components:
           type: string
           format: email
           maxLength: 254
+        session_token_sha256:
+          description: SHA-256 of the UTF-8 session token, `hpm_` prefix included.
+          $ref: "#/components/schemas/Sha256Hex"
     LoginRequest:
       type: object
       additionalProperties: false
-      required: [login_request_id, poll_secret, match_code, expires_at]
+      required: [login_request_id, match_code, expires_at]
       properties:
         login_request_id:
           $ref: "#/components/schemas/Id"
-        poll_secret:
-          description: Proves the poller started this login. 32 random bytes, base64url.
-          type: string
-          pattern: "^[A-Za-z0-9_-]{43}$"
         match_code:
           description: Shown in the app. The page behind the email link asks the member to confirm it.
           type: string
@@ -1325,24 +1385,19 @@ components:
     LoginPoll:
       type: object
       additionalProperties: false
-      required: [request_id, poll_secret]
+      required: [request_id, session_token]
       properties:
         request_id:
           $ref: "#/components/schemas/UuidV7"
-        poll_secret:
-          type: string
-          pattern: "^[A-Za-z0-9_-]{43}$"
+        session_token:
+          $ref: "#/components/schemas/SessionToken"
     LoginApproved:
       type: object
       additionalProperties: false
-      required: [status, session_token, member_id, expires_at]
+      required: [status, member_id, expires_at]
       properties:
         status:
           const: approved
-        session_token:
-          description: "Send as `Authorization: Bearer <session_token>`."
-          type: string
-          pattern: "^hpm_[A-Za-z0-9_-]{43}$"
         member_id:
           $ref: "#/components/schemas/Id"
         expires_at:

@@ -17,18 +17,20 @@ The spec links each example to its operation with `externalValue`. The example f
 
 - **Two token scopes:**
   - Gateways send `Authorization: Bearer hpgw_<gatewayId>.<secret>`, which works only on `/v1/gateway/*`.
-  - Members send the session token from a login poll, which works everywhere else.
+  - Members send a session token that the app creates and a sign-in activates. It works everywhere else.
 - **Closed schemas:**
   - Every object schema sets `additionalProperties: false`, and the API rejects unknown request fields with `400 invalid_request`.
   - A usage event therefore cannot carry a destination or any content.
 - **Idempotent POSTs:**
   - Every POST body carries a `request_id` (UUIDv7) that the client reuses on retries.
   - The batch endpoints carry an `event_id` (UUIDv7) on every event instead, and answer each event as `applied`, `duplicate` or `rejected`.
+  - A retried request gets the first response again, so no response carries a secret. The app creates the session token itself and sends only its SHA-256 when it starts a sign-in.
+- **Lowercase UUIDs** everywhere.
 - **Bytes, not prices:**
   - Leases and usage are counted in bytes, and the gateway never sees a price.
   - Credits and euros stay in the API's pricing module.
 
-The spec's `info.description` has the details: the 24-hour `request_id` window, error codes and units.
+The spec's `info.description` has the details: the `request_id` and `event_id` windows, error codes and units.
 
 ## Commands
 
@@ -43,6 +45,10 @@ npm run lint
 ```
 
 ```bash
+npm run typecheck
+```
+
+```bash
 npm test
 ```
 
@@ -50,11 +56,12 @@ npm test
 npm run validate
 ```
 
-- `lint` runs Redocly with `recommended-strict`, so any warning fails. `.redocly.lint-ignore.yaml` lists known false positives, each with a reason.
+- `lint` runs Redocly with `recommended-strict`, so any warning fails.
+- `typecheck` runs TypeScript over the JavaScript (`checkJs`, strict), using the JSDoc types in `lib/contract.mjs`.
 - `test` runs the tests in `test/`, including `validate-examples.mjs`.
 - `validate` prints the result for each example.
 
-CI runs `npm ci`, `lint` and `test` on every pull request that touches this folder (`.github/workflows/contracts-ci.yml`).
+CI runs `npm ci`, `lint`, `typecheck` and `test` on every pull request that touches this folder (`.github/workflows/contracts-ci.yml`).
 
 ## Changing the contract
 
