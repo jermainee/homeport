@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "test": "vitest run",
     "test:watch": "vitest",
-    "migrate:local": "wrangler d1 migrations apply homeport --local"
+    "migrate:local": "wrangler d1 migrations apply homeport --local",
+    "seed:dev": "node scripts/seed-dev.ts"
   },
   "dependencies": {
     "hono": "^4.13.18",

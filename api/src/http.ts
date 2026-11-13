@@ -31,3 +31,10 @@ export function apiError(
 export function invalidRequest(c: Context, message: string): Response {
   return apiError(c, 400, "invalid_request", message);
 }
+
+/** `value` as an http(s) URL, or null if it is not one; for PUBLIC_BASE_URL. */
+export function httpOrigin(value: string): URL | null {
+  if (!URL.canParse(value)) return null;
+  const url = new URL(value);
+  return url.protocol === "https:" || url.protocol === "http:" ? url : null;
+}

@@ -3,7 +3,7 @@ import { CONFLICT, guardedBatch, retryOnConflict } from "./guarded-batch";
 import { memberLedgerFrom, memberLedgerStatement } from "./state";
 
 export type { Balances, MemberAccountKind } from "./book";
-export { LedgerBusyError } from "./guarded-batch";
+export { type Guard, LedgerBusyError } from "./guarded-batch";
 export { releaseReservation, reserveCredits, type ReservationResult } from "./reservations";
 export { chargeUsage, type UsageInput, type UsageResult } from "./usage";
 

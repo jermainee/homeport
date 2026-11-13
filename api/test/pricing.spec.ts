@@ -9,6 +9,7 @@ import {
   SHARE_CREDITS_PER_MB,
   USE_CREDITS_PER_MB,
   creditsForBytes,
+  leaseTerms,
 } from "../src/pricing";
 
 describe("pricing", () => {
@@ -45,5 +46,15 @@ describe("pricing", () => {
   it("sells 1,000,000 credits for €40 net", () => {
     expect(CREDIT_PACK_CREDITS).toBe(1_000_000);
     expect(CREDIT_PACK_NET_CENTS).toBe(4_000);
+  });
+
+  it("turns a lease's credits into bytes at the use rate, renewed at 80%", () => {
+    expect(leaseTerms(LEASE_CREDITS)).toEqual({ credits: 2_000, grantedBytes: LEASE_BYTES, renewAtBytes: LEASE_RENEW_AT_BYTES });
+    expect(leaseTerms(500)).toEqual({ credits: 500, grantedBytes: 50_000_000, renewAtBytes: 40_000_000 });
+    expect(leaseTerms(1)).toEqual({ credits: 1, grantedBytes: 100_000, renewAtBytes: 80_000 });
+  });
+
+  it("never grants a lease of no credits, of part of a credit, or larger than a full one", () => {
+    for (const credits of [0, -1, 1.5, LEASE_CREDITS + 1]) expect(() => leaseTerms(credits)).toThrow(RangeError);
   });
 });

@@ -19,7 +19,17 @@
     // Real email delivery comes in a later PR; until then other values return 503.
     "EMAIL_MODE": "disabled",
     // Origin used to build the links in sign-in emails. Empty means no links are sent (503).
-    "PUBLIC_BASE_URL": ""
+    "PUBLIC_BASE_URL": "",
+    // Hosts a peer without credits can still reach through the gateway
+    // (comma-separated), besides the API's own host from PUBLIC_BASE_URL:
+    // Stripe Checkout and what its page loads. They must not offer ECH, or
+    // the gateway cannot read the SNI.
+    "TOPUP_HOSTNAMES": "checkout.stripe.com,js.stripe.com,api.stripe.com,hooks.stripe.com,m.stripe.network,m.stripe.com,b.stripe.com,q.stripe.com,r.stripe.com,files.stripe.com"
+  },
+  // Hourly: deletes raw usage and line events after 7 days, and expired
+  // idempotency records (src/prune.ts).
+  "triggers": {
+    "crons": ["17 * * * *"]
   },
   // Keeps `wrangler types` independent of a local .dev.vars file. Set them
   // with `wrangler secret put`, and locally in .dev.vars.
