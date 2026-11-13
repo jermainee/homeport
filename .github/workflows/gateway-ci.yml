@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "gateway/**"
+      - "relay-protocol/**"
       - ".github/workflows/gateway-ci.yml"
   push:
     branches: [main]
     paths:
       - "gateway/**"
+      - "relay-protocol/**"
       - ".github/workflows/gateway-ci.yml"
 
 permissions:
