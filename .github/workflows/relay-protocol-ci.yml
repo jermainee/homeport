@@ -1,0 +1,74 @@
+name: relay-protocol-ci
+
+on:
+  pull_request:
+    paths:
+      - "relay-protocol/**"
+      - ".github/workflows/relay-protocol-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "relay-protocol/**"
+      - ".github/workflows/relay-protocol-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOWORK: "off"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: relay-protocol
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: relay-protocol/go.mod
+          cache-dependency-path: relay-protocol/go.sum
+      - name: Verify modules
+        run: go mod verify
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: relay-protocol
+      - name: Test
+        run: go test -race -count=1 ./...
+      # go test -fuzz takes one target per run, so fuzz each target in turn.
+      - name: Fuzz
+        run: |
+          for pkg in $(go list ./...); do
+            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
+              echo "::group::$target"
+              go test -run='^$' -fuzz="^${target}\$" -fuzztime=20s "$pkg"
+              echo "::endgroup::"
+            done
+          done
+      - name: Upload failing fuzz inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failures
+          path: relay-protocol/testdata/fuzz
+          if-no-files-found: ignore
