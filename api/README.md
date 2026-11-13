@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, buying credits through Stripe Checkout, sharing devices, lines and WireGuard peers. A later PR adds the gateway endpoints.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, buying credits through Stripe Checkout, sharing devices, lines and WireGuard peers, and the endpoints edge gateways call: config, quota leases, usage and line events.
 
 ## Requirements
 
@@ -30,6 +30,7 @@ npm run dev
 | `npm run typecheck` | `tsc` for `src/` and `test/` |
 | `npm run types` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc`; CI fails if it is stale |
 | `npm run migrate:local` | Applies `migrations/` to the local D1 database |
+| `npm run seed:dev` | Applies the migrations locally, adds a dev gateway to the local database and prints its token (`HOMEPORT_GATEWAY_TOKEN=hpgw_...`) for the gateway binary |
 
 ## Configuration
 
@@ -37,7 +38,8 @@ npm run dev
 | --- | --- | --- |
 | `ENVIRONMENT` | `dev` enables the `/dev` routes and email log mode; anything else is production | `production` |
 | `EMAIL_MODE` | `log` writes sign-in links to the log, and works only when `ENVIRONMENT=dev`. Real delivery comes in a later PR; until then, other values return `503 email_unavailable` | `disabled` |
-| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails and Checkout's return pages. Without a valid http(s) URL no link is sent (`503 email_unavailable`) and no Checkout Session is created (500) | empty |
+| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails and Checkout's return pages, and the first top-up host. Without a valid http(s) URL no link is sent (`503 email_unavailable`) and no Checkout Session is created (500) | empty |
+| `TOPUP_HOSTNAMES` | Comma-separated hosts a peer without credits can still reach through the gateway, besides the API's own host. They must not offer ECH (on Cloudflare, turn it off for those zones), since the gateway reads the clear SNI | Stripe Checkout's hosts |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
 | `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions and Checkout Sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions and Checkout Sessions | |
 | `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with read access to Identity verification results and detailed results; reads document number and birth date for the identity hash | |
@@ -115,7 +117,7 @@ All prices, billing constants and product limits live in `src/pricing.ts`; no ot
 - **Idempotent.** Each transaction has a unique `idempotency_key` naming the business event (`usage:<usage_key>`, `dev_grant:<id>`, ...). A retry finds it and books nothing.
 - **One guarded batch per change.** D1 has no interactive transactions. A change reads the `ledger_version` of every member whose balance it changes, with the balances it decides on, then writes everything in one `db.batch`. The batch's first statement bumps those versions, guarded by the values read, and sets a fresh `ledger_nonce`; every later statement runs only while that nonce is still there for every claimed member. If another change committed first, the batch writes nothing and the change reads again and retries (`src/ledger/guarded-batch.ts`). A usage charge claims both the user and the line's owner, because the owner's own spend splits its debit by the balances it read.
 - **Spend order.** Usage takes `purchased` first, then `earned_pending`, then `earned_cashable`. Metered usage is always booked, even past the balance; the shortfall makes `purchased` negative. `GET /v1/me` shows a negative account as 0.
-- **Usage charges.** `chargeUsage` adds bytes to a meter's running total (`meter_totals`, for example per WireGuard peer). The user pays `floor(total × 10 / 10^6)` minus what the meter already charged, and the line's owner earns `floor(total × 5 / 10^6)` minus what it already paid into `earned_pending`; the platform keeps the difference. Rounding therefore never adds up across usage events. Each piece of usage is recorded once in `usage_charges` by its `usage_key`, even when it books less than a credit. A meter never changes payer or payee (a trigger aborts it). `usage_charges` rows are not ledger rows: they can be deleted once a retry of their usage can no longer arrive, which the cleanup job for expired rows will do.
+- **Usage charges.** `chargeUsage` adds bytes to a meter's running total (`meter_totals`, for example per WireGuard peer). The user pays `floor(total × 10 / 10^6)` minus what the meter already charged, and the line's owner earns `floor(total × 5 / 10^6)` minus what it already paid into `earned_pending`; the platform keeps the difference. Rounding therefore never adds up across usage events. Each piece of usage is recorded once in `usage_charges` by its `usage_key`, even when it books less than a credit. A meter never changes payer or payee (a trigger aborts it). `usage_charges` rows are not ledger rows: the hourly cleanup deletes them after 7 days, when a retry of their usage is rejected as expired anyway.
 - **Reservations.** A quota lease reserves credits (`credit_reservations`) without booking anything: available credits are the balance minus what open, unexpired reservations still hold. Usage charged against a reservation reduces what it holds, and releasing it frees the rest. The check and the insert run behind the member's guard, so concurrent leases never reserve more than the member has. Reserving an id again returns `reserved` and holds nothing more.
 - **Sold credits stay purchased.** `grantCredits` with source `credits_issued` lands only in `purchased`, so bought credits can never become cashable.
 
@@ -165,13 +167,27 @@ All endpoints follow the contract (`registerDevice`, `createLine`, `updateLine`,
 - **Shared lines** serve at most 3 members besides their owner (`MAX_USERS_PER_LINE` in `src/pricing.ts`); a fourth gets `409 line_full`, while a member already on the line can add devices.
 - **Identity.** Lines, the available list and new peers answer `403 identity_required` until the member passed Stripe Identity (`src/identity/require-verified.ts`). The check runs before `request_id` handling, so a 403 is not stored for a `request_id`. Listing and deleting one's own peers work without it.
 
+## Gateway endpoints
+
+Edge gateways (`gateway/`) call `/v1/gateway/*` (contract tag `gateway`, `src/gateway/`). The gateway never sees a price: it counts bytes, and `src/pricing.ts` turns them into credits.
+
+- **Token.** `Authorization: Bearer hpgw_<gatewayId>.<secret>`, the secret 32 random bytes in base64url. `gateway_credentials` stores only the secret's SHA-256, compared in constant time; a credential can be revoked (`revoked_at`). Member session tokens get `401` here, and gateway tokens get `401` everywhere else. Provisioning is `npm run seed:dev` locally; production provisioning comes with the deploy.
+- **`PUT /v1/gateway/self`** stores the gateway's endpoints and keys under the token's gateway id (`204`). New lines go to the gateway that announced itself last.
+- **`GET /v1/gateway/config`** lists the gateway's lines whose sharing is on and whose owner is active and verified, with the agent's SPKI pin (`device_spki_sha256`, lowercase hex), and the peers it may accept on them: not deleted, member active and verified, and no self-dealing (`ownerIsLinkedSql`). `topup_hostnames` is the API's own host, then `TOPUP_HOSTNAMES`. The body's `etag` hashes the rest; `If-None-Match` with it, weak or strong, gets `304`.
+- **`POST /v1/gateway/leases`** reserves credits for a peer's session and grants what they buy: 2,000 credits = 200,000,000 bytes, renewed at 160,000,000, for an hour, with 300 grace seconds. A member with fewer credits gets a smaller last lease; one with none gets `402 insufficient_credits` with `grace_seconds`. A peer the config would not list gets `403 peer_inactive`. A renewal names `supersedes_lease_id`; a lease is superseded once (a unique index), and renewing it again returns that successor with `200`. A lease the gateway never got is `404`, one from another session `400`. The reservation and the lease row commit in one guarded batch.
+- **`POST /v1/gateway/leases/{id}/return`** releases what the lease still holds (`released_credits`); a lease returned before or expired releases `0`.
+- **`POST /v1/gateway/usage`** applies up to 100 events in order, each once by `event_id`: `applied`, `duplicate` (the same event again) or `rejected` with `unknown_peer`, `unknown_line`, `unknown_lease`, `lease_mismatch` (another session's, peer's or line's lease), `seq_conflict` (a gap, a repeat, after the final event, or an `event_id` reused for other bytes), `invalid_period` (not starting where the last period ended, or ending before it starts) or `expired` (an `event_id` over 72 hours old). An applied event is charged to the peer's meter with `chargeUsage`, against its lease; the event and the session log are written in the same guarded batch. Usage past a lease's bytes, after it expired, or of a peer deleted since is still charged: the gateway is the meter of record. A body that breaks the contract (an unknown field, such as a destination) gets `400` for the whole batch.
+- **Session log.** `usage_sessions` holds, per session: member, line, owner, the line's exit IP at the start, start, end, bytes up and down. Nothing about destinations or content is ever received or stored.
+- **`POST /v1/gateway/line-events`** marks the gateway's lines online or offline, each event once; an event older than the line's newest applied one changes nothing.
+- **Cleanup.** An hourly cron (`src/prune.ts`) deletes `usage_events`, `line_events` and `usage_charges` 7 days after they arrived, and expired `idempotency_records`. The ledger, `meter_totals`, `leases` and `usage_sessions` stay.
+
 ## Dev-only routes
 
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
 - `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines without a Checkout payment.
-- `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway, so lines and WireGuard configs can be created locally before gateways authenticate (`PUT /v1/gateway/self`, a later PR).
+- `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway under any id without a token, for tests. A real gateway sends `PUT /v1/gateway/self` with the token from `npm run seed:dev`.
 
 ## Database
 
@@ -180,5 +196,6 @@ Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 - `migrations/0003_stripe_identity.sql` adds `members.identity_hash` (unique), `identity_failure` and `identity_event_created`, and creates `identity_sessions` and `stripe_events`.
 - `migrations/0004_lines_and_peers.sql` creates `gateways`, `devices`, `lines`, `wireguard_peers` and `member_links`, and indexes `auth_sessions.install_id`.
 - `migrations/0005_credit_checkout.sql` creates `payments`, one row per Checkout Session.
+- `migrations/0006_gateway_billing.sql` creates `gateway_credentials`, `leases`, `usage_sessions`, `usage_events` and `line_events`, and adds `lines.online_changed_at`.
 
 Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
