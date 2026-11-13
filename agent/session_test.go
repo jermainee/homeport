@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,4 +124,32 @@ func assertGoingAway(t *testing.T, err error) {
 	if !errors.As(err, &appErr) || !appErr.Remote || appErr.ErrorCode != relayprotocol.CodeGoingAway.ApplicationErrorCode() {
 		t.Fatalf("connection ended with %v, want GOING_AWAY from the agent", err)
 	}
+}
+
+func TestQuickPauseAndResumeIsNotAConnectionFailure(t *testing.T) {
+	g := newFakeGateway(t)
+	a := startAgent(t, g, nil)
+	first := g.nextConn(t)
+
+	a.Pause()
+	a.Resume()
+	assertGoingAway(t, first.waitClosed(t))
+	g.nextConn(t)
+	waitState(t, a.Agent, StateConnected)
+	if logs := a.logs.String(); strings.Contains(logs, "reconnecting") {
+		t.Fatalf("a pause was logged as a failed connection:\n%s", logs)
+	}
+}
+
+func TestAgentWaitsLongAfterTheGatewayRejectsIt(t *testing.T) {
+	g := newFakeGateway(t)
+	startAgent(t, g, func(c *Config) {
+		c.ReconnectMin = 10 * time.Millisecond
+		c.ReconnectMax = 2 * time.Second // the wait after a rejection: 1 to 2 s
+	})
+	c := g.nextConn(t)
+	_ = c.conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
+
+	g.noConnFor(t, 700*time.Millisecond)
+	g.nextConn(t)
 }

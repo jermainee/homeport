@@ -87,3 +87,22 @@ func TestUDPStreamThatEndsInsideAFrameIsAProtocolError(t *testing.T) {
 		t.Fatalf("stream ended with %v, want PROTOCOL_ERROR", err)
 	}
 }
+
+func TestIdleUDPFlowsEnd(t *testing.T) {
+	restore := udpIdleTimeout
+	udpIdleTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { udpIdleTimeout = restore })
+	origin := startUDPEcho(t)
+	g := newFakeGateway(t)
+	startAgent(t, g, allowOrigins(origin))
+	c := g.nextConn(t)
+
+	s := c.mustDial(t, relayprotocol.KindUDP, origin)
+	_ = s.SetReadDeadline(time.Now().Add(waitFor))
+	_, err := io.ReadAll(s)
+	var streamErr *quic.StreamError
+	if !errors.As(err, &streamErr) || streamErr.ErrorCode != relayprotocol.CodeFlowCancelled.StreamErrorCode() {
+		t.Fatalf("idle flow ended with %v, want FLOW_CANCELLED", err)
+	}
+	c.waitStats(t, func(st relayprotocol.Stats) bool { return st.FlowsTotal == 1 && st.FlowsActive == 0 })
+}

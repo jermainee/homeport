@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"syscall"
 	"testing"
 
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
@@ -133,6 +136,55 @@ func TestPolicyRefusesTheNetworksOfTheMachinesInterfaces(t *testing.T) {
 		var polErr *policyError
 		if refused := errors.As(err, &polErr); refused != wantRefused {
 			t.Errorf("check(%s) = %v, want refused %v", dst, err, wantRefused)
+		}
+	}
+}
+
+func TestAnIPv4MappedTestOriginIsAllowedToo(t *testing.T) {
+	origin := startTCPOrigin(t, func(*net.TCPConn) {})
+	mapped := netip.AddrPortFrom(netip.AddrFrom16(origin.Addr().As16()), origin.Port())
+	g := newFakeGateway(t)
+	startAgent(t, g, allowOrigins(mapped))
+	g.nextConn(t).mustDial(t, relayprotocol.KindTCP, origin)
+}
+
+func TestANewSessionSeesTheMachinesCurrentNetworks(t *testing.T) {
+	// A laptop that moves to another home network reconnects; its new
+	// home /64 must be refused from the first flow on.
+	current := "2a02:8070:aaaa:1::/64"
+	restore := interfaceAddrs
+	t.Cleanup(func() { interfaceAddrs = restore })
+	interfaceAddrs = func() ([]net.Addr, error) {
+		_, n, err := net.ParseCIDR(current)
+		return []net.Addr{n}, err
+	}
+	p := newPolicy(testObservedIP, nil)
+	if err := p.check(netip.MustParseAddrPort("[2a02:8070:aaaa:1::9]:443")); err == nil {
+		t.Fatal("the first network's address was allowed")
+	}
+
+	current = "2a02:8070:bbbb:1::/64"
+	p = newPolicy(testObservedIP, nil)
+	if err := p.check(netip.MustParseAddrPort("[2a02:8070:bbbb:1::9]:443")); err == nil {
+		t.Fatal("the new network's address was allowed right after the session started")
+	}
+}
+
+func TestDialErrorsMapToFlowStatuses(t *testing.T) {
+	opErr := func(err error) error { return &net.OpError{Op: "dial", Net: "tcp", Err: err} }
+	for _, tc := range []struct {
+		err  error
+		want relayprotocol.Status
+	}{
+		{opErr(&policyError{rule: ruleSpecialRange}), relayprotocol.StatusPolicy},
+		{opErr(os.NewSyscallError("connect", syscall.ECONNREFUSED)), relayprotocol.StatusRefused},
+		{opErr(os.ErrDeadlineExceeded), relayprotocol.StatusTimeout},
+		{context.DeadlineExceeded, relayprotocol.StatusTimeout},
+		{opErr(os.NewSyscallError("connect", syscall.EHOSTUNREACH)), relayprotocol.StatusUnreachable},
+		{opErr(os.NewSyscallError("connect", syscall.ENETUNREACH)), relayprotocol.StatusUnreachable},
+	} {
+		if got, _ := dialStatus(tc.err); got != tc.want {
+			t.Errorf("dialStatus(%v) = %s, want %s", tc.err, got, tc.want)
 		}
 	}
 }

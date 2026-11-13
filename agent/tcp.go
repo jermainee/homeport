@@ -7,8 +7,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-
-	"github.com/quic-go/quic-go"
+	"time"
 
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
 )
@@ -51,16 +50,19 @@ type tcpRelay struct {
 // what the destination sends. The gateway's own bytes still reach the
 // destination, up to its FIN.
 func (r *tcpRelay) gatewayStoppedReading() {
-	var streamErr *quic.StreamError
-	if !errors.As(context.Cause(r.flow.stream.Context()), &streamErr) || !streamErr.Remote {
-		return // the agent closed or cancelled it, or the connection ended
-	}
-	if streamErr.ErrorCode == relayprotocol.CodeFlowReset.StreamErrorCode() {
+	cancelled, reset := gatewayCancelled(context.Cause(r.flow.stream.Context()))
+	switch {
+	case !cancelled:
+		// The agent closed or cancelled it, or the connection ended.
+	case reset:
 		r.abort(relayprotocol.CodeFlowReset)
-		return
+	default:
+		r.readStopped.Store(true)
+		// A deadline in the past wakes down's Read on every OS. Unlike
+		// CloseRead, it never makes Windows reset the connection when
+		// the destination sends more.
+		_ = r.conn.SetReadDeadline(time.Now())
 	}
-	r.readStopped.Store(true)
-	_ = r.conn.CloseRead()
 }
 
 // abort ends the flow in both directions. With FLOW_RESET the socket is
@@ -114,9 +116,7 @@ func (r *tcpRelay) down() {
 		if n > 0 {
 			r.cnt.bytesIn.Add(uint64(n))
 			if _, werr := r.flow.stream.Write(buf[:n]); werr != nil {
-				var streamErr *quic.StreamError
-				if errors.As(werr, &streamErr) && streamErr.Remote &&
-					streamErr.ErrorCode != relayprotocol.CodeFlowReset.StreamErrorCode() {
+				if cancelled, reset := gatewayCancelled(werr); cancelled && !reset {
 					return // the gateway stopped reading; gatewayStoppedReading takes over
 				}
 				r.abort(remoteCode(werr))

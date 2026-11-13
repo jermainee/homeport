@@ -139,12 +139,21 @@ func dialStatus(err error) (relayprotocol.Status, string) {
 	}
 }
 
+// gatewayCancelled reports whether err is the gateway cancelling the stream
+// (RESET_STREAM or STOP_SENDING), and whether it did so with FLOW_RESET, the
+// code for a TCP reset.
+func gatewayCancelled(err error) (cancelled, reset bool) {
+	var streamErr *quic.StreamError
+	if !errors.As(err, &streamErr) || !streamErr.Remote {
+		return false, false
+	}
+	return true, streamErr.ErrorCode == relayprotocol.CodeFlowReset.StreamErrorCode()
+}
+
 // remoteCode is the code to end a flow with after a stream error: FLOW_RESET
 // if the gateway reset the flow as a TCP reset, FLOW_CANCELLED otherwise.
 func remoteCode(err error) relayprotocol.Code {
-	var streamErr *quic.StreamError
-	if errors.As(err, &streamErr) && streamErr.Remote &&
-		streamErr.ErrorCode == relayprotocol.CodeFlowReset.StreamErrorCode() {
+	if _, reset := gatewayCancelled(err); reset {
 		return relayprotocol.CodeFlowReset
 	}
 	return relayprotocol.CodeFlowCancelled

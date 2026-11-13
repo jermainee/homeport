@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
@@ -46,6 +47,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	printPin := flags.Bool("print-pin", false, "print the agent's pin and exit")
 	verbose := flags.Bool("v", false, "log each flow's kind and status (never its destination)")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 
@@ -113,6 +117,10 @@ func loadOrCreateKey(path string) (ed25519.PrivateKey, bool, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // The path is the operator's own flag.
 	if errors.Is(err, fs.ErrNotExist) {
 		key, err := createKey(path)
+		if errors.Is(err, fs.ErrExist) {
+			// Another agent created it first; use that key.
+			return loadOrCreateKey(path)
+		}
 		return key, err == nil, err
 	}
 	if err != nil {
@@ -133,6 +141,9 @@ func loadOrCreateKey(path string) (ed25519.PrivateKey, bool, error) {
 	return key, false, nil
 }
 
+// createKey writes a new key to path. It writes a temporary file first and
+// links it into place, so path never holds half a key, and the link fails
+// with fs.ErrExist instead of replacing a key another agent already uses.
 func createKey(path string) (ed25519.PrivateKey, error) {
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -142,15 +153,22 @@ func createKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // The path is the operator's own flag.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".homeport-agent-key-*") // mode 0600
 	if err != nil {
 		return nil, err
 	}
-	if err := pem.Encode(f, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
-		_ = f.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := pem.Encode(tmp, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
+		_ = tmp.Close()
 		return nil, err
 	}
-	return key, f.Close()
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func envOr(name, fallback string) string {

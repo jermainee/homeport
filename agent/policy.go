@@ -23,7 +23,13 @@ type policy struct {
 	testOrigins []netip.AddrPort
 }
 
+// newPolicy returns the policy for one connection. It drops the cached
+// interface networks, so a machine that moved to another network refuses the
+// new home network from the connection's first flow on.
 func newPolicy(ownIP netip.Addr, testOrigins []netip.AddrPort) *policy {
+	ifNets.mu.Lock()
+	ifNets.fetched = time.Time{} // refetch, but keep the last answer if that fails
+	ifNets.mu.Unlock()
 	return &policy{ownIP: ownIP.Unmap(), localNets: interfaceNets, testOrigins: testOrigins}
 }
 
@@ -186,6 +192,9 @@ func mustPrefixes(ss ...string) []netip.Prefix {
 // change rarely, and flows open often.
 const interfaceNetsTTL = 10 * time.Second
 
+// interfaceAddrs lists the machine's interface addresses. Tests replace it.
+var interfaceAddrs = net.InterfaceAddrs
+
 var ifNets struct {
 	mu      sync.Mutex
 	nets    []netip.Prefix
@@ -203,7 +212,7 @@ func interfaceNets() []netip.Prefix {
 	if ifNets.nets != nil && time.Since(ifNets.fetched) < interfaceNetsTTL {
 		return ifNets.nets
 	}
-	addrs, err := net.InterfaceAddrs()
+	addrs, err := interfaceAddrs()
 	if err != nil {
 		// Keep the last answer; the fixed ranges still apply.
 		return ifNets.nets

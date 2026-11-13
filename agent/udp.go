@@ -14,7 +14,8 @@ import (
 
 // udpIdleTimeout ends a UDP flow that carried nothing in either direction
 // for this long, so a flow the gateway forgot cannot hold a socket forever.
-const udpIdleTimeout = 2 * time.Minute
+// Tests shorten it.
+var udpIdleTimeout = 2 * time.Minute
 
 // udpFrameBufSize fits the datagrams a WireGuard tunnel can carry. Larger
 // frames still work; ReadUDPFrame allocates for them.

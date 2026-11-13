@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
@@ -65,4 +66,45 @@ func pinOf(t *testing.T, key ed25519.PrivateKey) relayprotocol.Pin {
 		t.Fatal(err)
 	}
 	return pin
+}
+
+func TestHelpIsNotAnError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-h"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+}
+
+func TestAgentsStartingTogetherShareOneKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.key")
+	const n = 8
+	pins := make(chan relayprotocol.Pin, n)
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			key, _, err := loadOrCreateKey(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			pin, _ := relayprotocol.PinOfPublicKey(key.Public())
+			pins <- pin
+		})
+	}
+	wg.Wait()
+	close(errs)
+	close(pins)
+	for err := range errs {
+		t.Fatalf("loadOrCreateKey: %v", err)
+	}
+	first := <-pins
+	for pin := range pins {
+		if pin != first {
+			t.Fatal("agents that started together got different keys")
+		}
+	}
+	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*")); len(matches) != 1 {
+		t.Fatalf("directory holds %v, want only the key", matches)
+	}
 }

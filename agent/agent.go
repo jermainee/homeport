@@ -166,11 +166,15 @@ func New(cfg Config) (*Agent, error) {
 	case len(cfg.Certificate.Certificate) == 0 || cfg.Certificate.PrivateKey == nil:
 		return nil, errors.New("agent: Config.Certificate is empty")
 	}
-	for _, o := range cfg.testOrigins {
+	origins := make([]netip.AddrPort, len(cfg.testOrigins))
+	for i, o := range cfg.testOrigins {
 		if !o.Addr().IsLoopback() {
 			return nil, errors.New("agent: test origins must be loopback addresses")
 		}
+		// The policy compares unmapped addresses.
+		origins[i] = netip.AddrPortFrom(o.Addr().Unmap(), o.Port())
 	}
+	cfg.testOrigins = origins
 	if cfg.Version == "" {
 		cfg.Version = Version
 	}
@@ -230,8 +234,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if !a.retrying(res.err) {
-			retry.reset() // paused; Resume reconnects right away
+		if errors.Is(res.err, errPaused) || !a.retrying(res.err) {
+			// Paused, and maybe resumed already: not a failure, and
+			// Resume reconnects right away.
+			retry.reset()
 			continue
 		}
 		if res.stable() {
