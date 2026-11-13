@@ -1,0 +1,19 @@
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets (commit only *.example files)
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.wrangler/
+coverage/
