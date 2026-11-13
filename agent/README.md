@@ -30,7 +30,12 @@ DNS answers get the same address rules: an answer that points into the home netw
 
 The policy reads the machine's interface networks again at every connection, so a laptop that moved to another network protects the new one from the first flow.
 
-Builds with the `e2e` build tag have `AllowTestOrigin`, which lets the end-to-end tests in `e2e/` reach a loopback test server. `cmd/homeport-agent` does not compile with that tag, and CI checks that. The tag guard covers this command only: a program that embeds the library, such as the desktop app, must refuse the tag in its own release build too.
+Builds with the `e2e` build tag have two test hooks for the end-to-end tests in `e2e/`:
+
+- `AllowTestOrigin` lets the agent dial a loopback test server.
+- `RouteTestOrigin` sends flows for a public-looking destination, such as `203.0.113.10:80`, to a loopback test server. A real gateway drops packets addressed to loopback, so tests that run through it need this. A route covers TCP and UDP alike and skips the policy for its own port; DNS answers may name the routed address, and its other ports get the normal policy.
+
+`cmd/homeport-agent` does not compile with that tag, and CI checks that. The tag guard covers this command only: a program that embeds the library, such as the desktop app, must refuse the tag in its own release build too.
 
 ## Pausing
 

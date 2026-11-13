@@ -79,7 +79,7 @@ func (a *Agent) runSession(ctx context.Context) sessionResult {
 	cnt := a.connected(ack.LineID)
 	a.log.Info("connected to gateway", "gateway", a.cfg.GatewayAddr, "line_id", ack.LineID)
 
-	pol := newPolicy(ack.ObservedIP, a.cfg.testOrigins)
+	pol := newPolicy(ack.ObservedIP, a.cfg.testOrigins, a.cfg.testRoutes)
 	var wg sync.WaitGroup
 	wg.Go(func() { a.readControl(ctx, end, ctl) })
 	wg.Go(func() { a.sendStats(ctx, end, ctl, cnt) })

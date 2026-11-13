@@ -16,7 +16,7 @@ import (
 // directions. A FIN in either direction becomes a half-close on the other
 // side, and a reset becomes a reset.
 func (a *Agent) relayTCP(ctx context.Context, f *flow, open relayprotocol.FlowOpen, pol *policy, cnt *counters) {
-	c := a.dial(ctx, f, "tcp", open.Dst.String(), pol)
+	c := a.dial(ctx, f, "tcp", open.Dst, pol)
 	if c == nil {
 		return
 	}

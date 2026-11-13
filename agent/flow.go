@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -105,8 +106,8 @@ func (a *Agent) answer(f *flow, status relayprotocol.Status, rule string) bool {
 
 // dial opens a socket to dst through the policy's dialer and answers the
 // flow. It returns nil if the flow ended with its answer.
-func (a *Agent) dial(ctx context.Context, f *flow, network string, dst string, pol *policy) net.Conn {
-	c, err := pol.dialer().DialContext(ctx, network, dst)
+func (a *Agent) dial(ctx context.Context, f *flow, network string, dst netip.AddrPort, pol *policy) net.Conn {
+	c, err := pol.dialer().DialContext(ctx, network, pol.target(dst).String())
 	if err != nil {
 		// err names the destination, so only its status is kept.
 		status, rule := dialStatus(err)
