@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger and the Stripe Identity check. Later PRs add Checkout, lines, WireGuard peers and the gateway endpoints.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, sharing devices, lines and WireGuard peers. Later PRs add Checkout and the gateway endpoints.
 
 ## Requirements
 
@@ -108,7 +108,7 @@ Every POST under `/v1`, except Stripe's webhook, carries a `request_id`, a UUIDv
 
 ## Credits ledger
 
-All prices and billing constants live in `src/pricing.ts`; no other file holds a price. The ledger is in `src/ledger/`.
+All prices, billing constants and product limits live in `src/pricing.ts`; no other file holds a price. The ledger is in `src/ledger/`.
 
 - **Double-entry, append-only.** Every booking is a `ledger_transactions` row with at least two `ledger_entries` (signed whole credits) that sum to zero. Triggers abort every `UPDATE` and `DELETE` of either table, so a correction is a new, reversing transaction. Each booking ends by inserting its id into the `ledger_balance_checks` view, whose trigger aborts the whole batch if the entries do not balance.
 - **Accounts.** Each member has `purchased`, `earned_pending` and `earned_cashable`, created by a trigger when the member is created. The platform has `platform_revenue`, `credits_issued` (the source of sold credits) and `dev_grants`. Each account caches its balance, which a trigger moves with every entry.
@@ -133,11 +133,23 @@ Every member passes Stripe Identity (ID document and live selfie) before Share o
    - `verified`: verifies the member. It always applies, since verification is final.
    - `processing`: `processing`. `requires_input` and `canceled`: `requires_input`. These apply only while the member is not verified, only for the member's newest check (an abandoned check that ends later says nothing about the current one), and only if no newer event was applied (Stripe does not keep order).
 4. **One person, one account.** In the `verified` handler, inside Stripe's 48-hour window, the restricted key reads the document number, issuing country and birth date. Their HMAC (`IDENTITY_HASH_KEY`) is stored as `members.identity_hash`, which is unique. A member whose hash another member already has stays at `requires_input` (`identity_failure = 'duplicate_identity'`), as does a live-mode document without those fields. Test mode (`livemode: false`) skips the hash and the check, since every test document is the same, and reads nothing sensitive. Document numbers are compared after Unicode NFKC normalization, without case, spaces or punctuation; letters and digits of every script count. Only the result and the hash are stored; the document data stays with Stripe.
-5. `requireVerifiedIdentity` (`src/identity/require-verified.ts`) answers `403 identity_required` until the member is verified. Devices, lines and WireGuard peers sit behind it.
+5. `requireVerifiedIdentity` (`src/identity/require-verified.ts`) answers `403 identity_required` until the member is verified. Lines, the available list and new WireGuard peers sit behind it.
 
 Locally: `stripe listen --forward-to localhost:8787/v1/stripe/webhook` prints the signing secret for `.dev.vars`.
 
 Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` checks the real adapter's requests with a recording `fetch`.
+
+## Sharing and using lines
+
+All endpoints follow the contract (`registerDevice`, `createLine`, `updateLine`, `listAvailableLines`, `createWireguardPeer`, `listWireguardPeers`, `deleteWireguardPeer`).
+
+- **Devices.** `POST /v1/devices` stores a sharing agent's raw Ed25519 key and returns `spki_sha256`, the SHA-256 of its SubjectPublicKeyInfo (DER), which the gateway checks during mutual TLS. Registering a key again returns the same device with 200; a key another member registered gets `409 agent_key_taken`. A member can register 10 new devices a day; more get `429 rate_limited` with `Retry-After`. Devices need no identity check, as the contract has none for them: the app registers its key when it is installed.
+- **Lines.** `POST /v1/lines {device_id}` creates the device's line on the newest gateway and returns where the agent dials out to; a device has one line (a second call returns it with 200). Its country, city and ISP come from Cloudflare's view of that request (`request.cf`), since the device is at home then; line tests will replace them. A line starts with sharing off; `PATCH /v1/lines/{id} {sharing_enabled}` switches it.
+- **Available lines.** `GET /v1/lines/available` lists sharing lines with a known country, minus the member's own lines, lines of linked members, lines of suspended owners and full lines.
+- **WireGuard peers.** The client creates the device's X25519 key pair and sends only the public key, so the API never sees a private key; `config_text` holds `{{PRIVATE_KEY}}` where the client puts it. Each peer gets one host number used in both tunnel networks: `10.77.a.b` (host = a × 256 + b, from 2 to 65534; `10.77.0.1` is the gateway) and `fd77::<host in hex>` in `fd77::/64`. One atomic insert takes the lowest free number. The config sets `DNS = 10.77.0.1`, `MTU = 1280`, `AllowedIPs = 0.0.0.0/0, ::/0`, `PersistentKeepalive = 25` and the line's gateway as `Endpoint` and `PublicKey`. A key in use by another peer gets `409 public_key_taken`. A member can have 20 active peers (`MAX_PEERS_PER_MEMBER` in `src/pricing.ts`), so no account can use up the shared address pool; the 21st gets `429 rate_limited` until one is deleted. Names count characters (code points), as the contract does. Deleting a peer keeps its row (`deleted_at`), so late usage still finds its member, and frees its key and address.
+- **No self-dealing.** A member never uses their own line, or a line whose owner is linked to them: a `member_links` row in either direction (household, device, card, Connect account), or sessions from the same app install (`auth_sessions.install_id`). Such a line is missing from the available list, and a peer for it gets `403 line_not_allowed`.
+- **Shared lines** serve at most 3 members besides their owner (`MAX_USERS_PER_LINE` in `src/pricing.ts`); a fourth gets `409 line_full`, while a member already on the line can add devices.
+- **Identity.** Lines, the available list and new peers answer `403 identity_required` until the member passed Stripe Identity (`src/identity/require-verified.ts`). The check runs before `request_id` handling, so a 403 is not stored for a `request_id`. Listing and deleting one's own peers work without it.
 
 ## Dev-only routes
 
@@ -145,11 +157,13 @@ Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
 - `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines before credit packs can be bought.
+- `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway, so lines and WireGuard configs can be created locally before gateways authenticate (`PUT /v1/gateway/self`, a later PR).
 
 ## Database
 
 - `migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`.
 - `migrations/0002_credit_ledger.sql` adds `members.ledger_version` and `members.ledger_nonce`, and creates `ledger_accounts`, `ledger_transactions`, `ledger_entries`, the `ledger_balance_checks` view, `meter_totals`, `usage_charges` and `credit_reservations`, with their triggers.
 - `migrations/0003_stripe_identity.sql` adds `members.identity_hash` (unique), `identity_failure` and `identity_event_created`, and creates `identity_sessions` and `stripe_events`.
+- `migrations/0004_lines_and_peers.sql` creates `gateways`, `devices`, `lines`, `wireguard_peers` and `member_links`, and indexes `auth_sessions.install_id`.
 
 Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.

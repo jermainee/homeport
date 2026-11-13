@@ -4,10 +4,13 @@ import { authApi } from "./auth/api";
 import { confirmPages } from "./auth/confirm";
 import { limitBodySize } from "./body-limits";
 import { devRoutes } from "./dev";
+import { devicesApi } from "./devices";
 import { identityApi } from "./identity/api";
+import { linesApi } from "./lines/api";
 import { meApi } from "./me";
 import { type StripeIdentityApi, stripeIdentityApi } from "./stripe/identity-api";
 import { stripeWebhook } from "./stripe/webhook";
+import { wireguardApi } from "./wireguard/api";
 
 /** What the Worker talks to outside Cloudflare. Tests pass fakes. */
 export interface Dependencies {
@@ -26,6 +29,9 @@ export function createApp(dependencies: Dependencies = productionDependencies) {
   app.route("/v1/auth", authApi);
   app.route("/v1/me", meApi);
   app.route("/v1/identity", identityApi(dependencies.stripeIdentity));
+  app.route("/v1/devices", devicesApi);
+  app.route("/v1/lines", linesApi);
+  app.route("/v1/wireguard", wireguardApi);
   app.route("/v1/stripe/webhook", stripeWebhook(dependencies.stripeIdentity));
   app.route("/auth", confirmPages);
   app.route("/dev", devRoutes);
