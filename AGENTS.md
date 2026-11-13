@@ -2,6 +2,8 @@
 
 Homeport (working title) is a residential line marketplace. Members share their home internet line and use other members' lines over WireGuard or SOCKS5, and pay in credits through Stripe.
 
+Everything Homeport installs on a member's device supports the latest releases of Linux, macOS and Windows. Older OS releases are out of scope.
+
 ## Repository layout
 
 Everything is in one git repository. Each piece of software lives in its own top-level folder that works like a standalone repo, with its own manifest, lockfile, tests, README and GitHub workflows. Code that two or more folders need moves into its own folder, which follows the same rules.
@@ -9,7 +11,7 @@ Everything is in one git repository. Each piece of software lives in its own top
 | Folder | What it is | How it ships |
 | --- | --- | --- |
 | `landing-page/` | Public website | Deploy workflow to Cloudflare Pages |
-| `desktop-app/` | Share and Use app for macOS and Windows | Release workflow attaches the installers to a GitHub Release |
+| `desktop-app/` | Share and Use app for Linux, macOS and Windows | Release workflow attaches the installers to a GitHub Release |
 
 New web parts run on Cloudflare (Pages, Workers, D1) and ship through a deploy workflow. New installable apps ship through a release workflow. When you create a folder, add a row to the table above.
 
@@ -30,12 +32,14 @@ Work test-first. Start with a failing test (red), make it pass, then refactor. A
 - Workflows live in `.github/workflows/` and are named `<folder>-<purpose>.yml`, for example `landing-page-ci.yml`, `landing-page-deploy.yml` and `desktop-app-release.yml`.
 - Each workflow runs only for changes under its own folder (`<folder>/**`) and to its own workflow file, so a change ships only the folder it touches.
 - `<folder>-ci.yml` runs lint, type checks and tests on every PR.
-- **Apps:** on merge into `main`, the release workflow builds each platform on its native runner. macOS gets a signed and notarized `.dmg`, Windows an installer. Both are published as a GitHub Release tagged `<folder>-v<version>`. The version comes from the app's manifest, so any PR that changes an app also bumps its version.
+- **Apps:** on merge into `main`, the release workflow builds each platform on its native runner. Linux gets an AppImage, macOS a signed and notarized `.dmg`, and Windows an installer. All three are published as a GitHub Release tagged `<folder>-v<version>`. The version comes from the app's manifest, so any PR that changes an app also bumps its version.
 - **Landing page:** on merge into `main`, `landing-page-deploy.yml` deploys to Cloudflare Pages with Wrangler.
 - **Workers and D1:** schema changes ship as D1 migration files, and the deploy workflow applies them.
 - **Secrets:** Cloudflare tokens, Stripe keys and Apple signing certificates are stored in GitHub Actions secrets and Cloudflare secrets. The repo holds only example files such as `.dev.vars.example`.
 
 ## Product rules the code enforces
+
+The full product concept, with the reasoning behind these rules, is in [docs/concept.md](docs/concept.md). When a change alters a rule, update that file and this list in the same PR.
 
 These are the current values. Keep them in one pricing module, and have all other code read them from there.
 
