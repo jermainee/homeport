@@ -12,6 +12,7 @@ The wire format is [`relay-protocol/`](../relay-protocol/README.md).
   - **TCP:** the agent connects and relays the byte stream. A FIN becomes a half-close on the other side, and a reset (`FLOW_RESET`) becomes a reset.
   - **UDP:** the agent connects a UDP socket and relays one frame per datagram. A UDP flow idle for 2 minutes ends with `FLOW_CANCELLED`.
   - **DNS:** each frame is a query, answered through the system resolver, so websites see the home ISP's resolver. The agent answers A and AAAA queries, answers HTTPS and SVCB queries with no records, and returns NOTIMP for other types. It never dials the virtual resolver address in the header.
+  - **Gateway close:** STOP_SENDING from the gateway on a TCP flow means the client is gone. The agent stops reading the socket but still delivers the gateway's remaining bytes up to its FIN; with `FLOW_RESET` it resets the socket.
   - A malformed header resets the stream with `PROTOCOL_ERROR`, or `UNSUPPORTED_VERSION` for an unknown version.
 - **Reconnects:** after a failure the agent retries after 1 s, doubling up to 1 minute, with jitter. After `UNAUTHORIZED` (for example, a removed device) it waits the full minute.
 - **Open files:** each flow holds a socket, so the agent raises its open-file limit to 2,048 where the hard limit allows it.
@@ -25,9 +26,11 @@ The policy runs in the dialer's `Control` hook, on the address the socket is abo
 - the destination is on a network of one of the machine's own interfaces, which keeps an IPv6 home `/64` or a LAN with public IPv4 addresses out of reach;
 - the port is 25, 465 or 587 (mail).
 
-DNS answers get the same address rules: an answer that points into the home network is dropped, so nobody can map the home network through the agent's resolver.
+DNS answers get the same address rules: an answer that points into the home network is dropped. Names that exist only inside a network (`.local`, `localhost`, `home.arpa`, `.internal`, `.lan`, `.home`, `.localdomain`, `fritz.box` and single-label names) get NXDOMAIN without a lookup. A lookup would send mDNS or router queries into the home network, and its timing would reveal which devices exist there.
 
-Builds with the `e2e` build tag have `AllowTestOrigin`, which lets the end-to-end tests in `e2e/` reach a loopback test server. `cmd/homeport-agent` does not compile with that tag, and CI checks that it does not, so no release can carry it.
+The policy reads the machine's interface networks again at every connection, so a laptop that moved to another network protects the new one from the first flow.
+
+Builds with the `e2e` build tag have `AllowTestOrigin`, which lets the end-to-end tests in `e2e/` reach a loopback test server. `cmd/homeport-agent` does not compile with that tag, and CI checks that. The tag guard covers this command only: a program that embeds the library, such as the desktop app, must refuse the tag in its own release build too.
 
 ## Pausing
 
