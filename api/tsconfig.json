@@ -13,7 +13,10 @@
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    // Lets vitest.config.ts read the JSDoc types of @homeport/contracts/lib/contract.mjs.
+    "allowJs": true,
+    "maxNodeModuleJsDepth": 1
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts", "contract-module.d.ts"]
+  "include": ["src/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"]
 }
