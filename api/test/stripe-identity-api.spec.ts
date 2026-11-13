@@ -1,25 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { stripeIdentityApi } from "../src/stripe/identity-api";
-
-interface Recorded {
-  method: string;
-  url: URL;
-  headers: Headers;
-  body: string;
-}
-
-/** A fetch that records each request and answers with `reply`'s JSON, as Stripe's API would. */
-function recordingFetch(reply: (request: Recorded) => unknown) {
-  const requests: Recorded[] = [];
-  const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init);
-    const recorded = { method: request.method, url: new URL(request.url), headers: request.headers, body: await request.text() };
-    requests.push(recorded);
-    return Response.json(reply(recorded), { headers: { "request-id": "req_test" } });
-  };
-  return { fetcher: fetcher, requests };
-}
+import { recordingFetch } from "./recording-fetch";
 
 const keys = { ...env, STRIPE_SECRET_KEY: "sk_test_create", STRIPE_IDENTITY_RESTRICTED_KEY: "rk_test_sensitive" };
 

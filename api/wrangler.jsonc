@@ -18,7 +18,8 @@
     // "log" writes sign-in links to the log instead of sending them (dev only).
     // Real email delivery comes in a later PR; until then other values return 503.
     "EMAIL_MODE": "disabled",
-    // Origin used to build the links in sign-in emails. Empty means no links are sent (503).
+    // Origin used to build the links in sign-in emails and Checkout's return
+    // pages. Empty means no sign-in links are sent (503) and no Checkout (500).
     "PUBLIC_BASE_URL": "",
     // Hosts a peer without credits can still reach through the gateway
     // (comma-separated), besides the API's own host from PUBLIC_BASE_URL:
@@ -35,8 +36,8 @@
   // with `wrangler secret put`, and locally in .dev.vars.
   "secrets": {
     "required": [
-      // Creates Identity verification sessions. A restricted key (rk_) with
-      // Identity write access is enough.
+      // Creates Identity verification sessions and Checkout Sessions. A
+      // restricted key (rk_) with write access to both is enough.
       "STRIPE_SECRET_KEY",
       // Restricted key (rk_) with read access to Identity verification results
       // and detailed results; reads document number and birth date.

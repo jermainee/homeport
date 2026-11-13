@@ -5,6 +5,7 @@ import { sha256Hex } from "./crypto";
 import { UUID_V7, uuidV7Timestamp } from "./formats";
 import type { GatewayVariables } from "./gateway/auth";
 import { apiError, invalidRequest, readJsonObject } from "./http";
+import { requireVerifiedIdentity } from "./identity/require-verified";
 
 const HOUR_MS = 60 * 60 * 1000;
 /** A request_id older than this is rejected as expired. */
@@ -121,6 +122,13 @@ export const idempotent = createMiddleware<{
  * `idempotent` alone is for endpoints without a session.
  */
 export const memberIdempotent = every(requireSession, idempotent);
+
+/**
+ * requireSession, requireVerifiedIdentity, then idempotent: for member
+ * endpoints behind the identity gate. The identity check runs before
+ * idempotent, so a 403 is not stored for the request_id.
+ */
+export const verifiedMemberIdempotent = every(requireSession, requireVerifiedIdentity, idempotent);
 
 /**
  * SHA-256 of method, path, the caller (signed-in member or gateway, if any)

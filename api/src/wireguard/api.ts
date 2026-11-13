@@ -1,9 +1,7 @@
 import { Hono } from "hono";
-import { every } from "hono/combine";
 import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest } from "../http";
-import { type IdempotentVariables, idempotent } from "../idempotency";
-import { requireVerifiedIdentity } from "../identity/require-verified";
+import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { KEY32, isName } from "../keys";
 import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
 import { MAX_PEERS_PER_MEMBER } from "../pricing";
@@ -15,8 +13,6 @@ import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfi
  */
 export const wireguardApi = new Hono<{ Bindings: Env; Variables: SessionVariables & IdempotentVariables }>();
 
-// The identity check runs before idempotent, so a 403 is not stored for the request_id.
-const verifiedRequest = every(requireSession, requireVerifiedIdentity, idempotent);
 
 interface PeerRow {
   id: string;
@@ -39,7 +35,7 @@ function peerBody(peer: PeerRow) {
   };
 }
 
-wireguardApi.post("/peers", verifiedRequest, async (c) => {
+wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
   const body = c.get("body");
   if (!hasOnlyFields(body, ["request_id", "line_id", "name", "public_key"])) return invalidRequest(c, "unknown field");
   const { line_id: lineId, name, public_key: publicKey } = body;

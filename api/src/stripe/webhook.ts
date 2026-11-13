@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import Stripe from "stripe";
+import { checkoutEventStatements, isCheckoutEvent } from "../checkout/events";
 import { apiError } from "../http";
 import { identityEventStatements, isIdentityEvent } from "../identity/events";
 import type { StripeIdentityApi } from "./identity-api";
@@ -37,7 +38,9 @@ export function stripeWebhook(stripeIdentity: (env: Env) => StripeIdentityApi) {
     if (!seen) {
       const effects = isIdentityEvent(event.type)
         ? await identityEventStatements(db, c.env, stripeIdentity(c.env), event)
-        : [];
+        : isCheckoutEvent(event.type)
+          ? await checkoutEventStatements(db, event)
+          : [];
       await db.batch([
         ...effects,
         db
