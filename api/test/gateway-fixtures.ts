@@ -1,17 +1,10 @@
 import { env } from "cloudflare:workers";
 import { newGatewayCredential } from "../src/gateway/auth";
 import { call, uuidv7 } from "./helpers";
-import { randomKey, send, sharingLine, verifiedMember } from "./share-fixtures";
+import { GATEWAY, randomKey, send, sharingLine, verifiedMember } from "./share-fixtures";
 
 /** The Frankfurt gateway's announcement from the contract's examples. */
-export const GATEWAY_SELF = {
-  wg_public_key: "YND9Jx2S347AP/Ywks3VrMciTOYivx8pQxgWoPy1HHY=",
-  wg_endpoint: "fra1.gw.homeport.example:51820",
-  quic_endpoint: "fra1.gw.homeport.example:443",
-  quic_server_name: "fra1.gw.homeport.example",
-  quic_spki_sha256: "2ca04a183e495439c9a77a4ce5f11babba2758321eb6db8d31e85b3980aea90a",
-  version: "0.1.0",
-};
+export const GATEWAY_SELF = GATEWAY;
 
 /** Sends a request with a gateway token. */
 export function gatewayCall(

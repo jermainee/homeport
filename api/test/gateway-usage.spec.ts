@@ -218,6 +218,16 @@ describe("POST /v1/gateway/usage", () => {
     });
   });
 
+  it("answers a batch sent again while the first is still running without rejecting what the first applied", async () => {
+    const { gateway, user, event } = await session();
+    const events = [event({ seq: 0, bytesUp: 0, bytesDown: 1_000_000 }), event({ seq: 1, bytesUp: 0, bytesDown: 2_000_000 })];
+
+    const [first, second] = await Promise.all([report(gateway.token, events), report(gateway.token, events)]);
+
+    expect([...statuses(first), ...statuses(second)].filter((status) => status.startsWith("rejected"))).toEqual([]);
+    expect((await balancesOf(user.memberId)).purchased).toBe(1_000_000 - 30);
+  });
+
   it("rejects a batch that does not match the contract with 400", async () => {
     const { gateway, event } = await session();
     const valid = event({ seq: 0, bytesUp: 0, bytesDown: 1 });
@@ -230,6 +240,8 @@ describe("POST /v1/gateway/usage", () => {
       { events: [{ ...valid, destination: "203.0.113.9:443" }] },
       { events: [withoutStart] },
       { events: [{ ...valid, bytes_up: -1 }] },
+      // Each count is a safe integer, but their sum is not.
+      { events: [{ ...valid, bytes_up: 2 ** 52, bytes_down: 2 ** 52 }] },
       { events: [valid], extra: true },
     ];
 

@@ -60,20 +60,21 @@ export async function createLease(c: GatewayContext): Promise<Response> {
 
   const db = c.env.DB;
   const gatewayId = c.get("gateway").id;
-  const peer = await db
-    .prepare(
-      `SELECT p.member_id, p.line_id FROM ${PEER_JOINS}
-        WHERE p.id = ? AND l.gateway_id = ? AND ${SERVED_PEER_SQL}`,
-    )
-    .bind(peerId, gatewayId)
-    .first<{ member_id: string; line_id: string }>();
+  // One round trip: the peer, and for a renewal the current lease and its successor.
+  const [peerResult, currentResult, successorResult] = await db.batch([
+    db
+      .prepare(
+        `SELECT p.member_id, p.line_id FROM ${PEER_JOINS}
+          WHERE p.id = ? AND l.gateway_id = ? AND ${SERVED_PEER_SQL}`,
+      )
+      .bind(peerId, gatewayId),
+    db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE id = ? AND gateway_id = ?`).bind(supersedes ?? null, gatewayId),
+    db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE supersedes_lease_id = ?`).bind(supersedes ?? null),
+  ]);
+  const peer = peerResult?.results[0] as { member_id: string; line_id: string } | undefined;
   if (!peer) return c.json({ error: "peer_inactive" }, 403);
 
   if (supersedes !== undefined) {
-    const [currentResult, successorResult] = await db.batch([
-      db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE id = ? AND gateway_id = ?`).bind(supersedes, gatewayId),
-      db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE supersedes_lease_id = ?`).bind(supersedes),
-    ]);
     const current = currentResult?.results[0] as LeaseRow | undefined;
     if (!current) return apiError(c, 404, "not_found");
     if (current.peer_id !== peerId || current.session_id !== sessionId) {
@@ -158,7 +159,9 @@ export async function returnLease(c: GatewayContext): Promise<Response> {
   if (!lease) return apiError(c, 404, "not_found");
 
   const now = Date.now();
-  const { releasedCredits } = await releaseReservation(db, { reservationId: leaseId, now });
+  // Marked first: if the release then fails, the retry still releases, and
+  // the gateway gets the released credits rather than 0.
   await db.prepare(`UPDATE leases SET returned_at = ? WHERE id = ? AND returned_at IS NULL`).bind(now, leaseId).run();
+  const { releasedCredits } = await releaseReservation(db, { reservationId: leaseId, now });
   return c.json({ released_credits: releasedCredits }, 200);
 }

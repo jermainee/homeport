@@ -2,7 +2,7 @@ import type { Context } from "hono";
 import { ID, SEMVER, UUID_V7, isIpAddress, parseDateTime, uuidV7Timestamp } from "../formats";
 import { hasOnlyFields, invalidRequest } from "../http";
 import type { GatewayVariables } from "./auth";
-import { EVENT_MAX_AGE_MS, readEventBatch } from "./usage";
+import { EVENT_MAX_AGE_MS, readEventBatch } from "./events";
 
 type GatewayContext = Context<{ Bindings: Env; Variables: GatewayVariables }>;
 
@@ -41,7 +41,8 @@ type Result =
  * POST /v1/gateway/line-events (contract reportLineEvents). Marks this
  * gateway's lines online or offline, each event once. An event older than
  * the line's newest applied one is recorded but changes nothing, since
- * events can arrive out of order.
+ * events can arrive out of order. The agent's IP (observed_ip) is checked
+ * but not stored: nothing needs it yet.
  */
 export async function reportLineEvents(c: GatewayContext): Promise<Response> {
   const batch = await readEventBatch(c.req.raw, parseLineEvent);
@@ -77,10 +78,10 @@ export async function reportLineEvents(c: GatewayContext): Promise<Response> {
       statements.push(
         db
           .prepare(
-            `INSERT INTO line_events (event_id, gateway_id, line_id, type, observed_ip, agent_version, at, received_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO line_events (event_id, gateway_id, line_id, type, agent_version, at, received_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
           )
-          .bind(event.event_id, gatewayId, event.line_id, event.type, event.observed_ip, event.agent_version, event.at, now),
+          .bind(event.event_id, gatewayId, event.line_id, event.type, event.agent_version, event.at, now),
         db
           .prepare(
             `UPDATE lines SET online = ?, online_changed_at = ?

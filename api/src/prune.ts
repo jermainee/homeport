@@ -17,18 +17,21 @@ const CHUNK = 5_000;
  */
 export async function prune(db: D1Database, now: number): Promise<Record<string, number>> {
   const cutoff = now - RAW_EVENT_RETENTION_MS;
-  const targets: [string, string, number][] = [
-    ["usage_events", `SELECT event_id FROM usage_events WHERE received_at < ? LIMIT ${CHUNK}`, cutoff],
-    ["usage_charges", `SELECT usage_key FROM usage_charges WHERE created_at < ? LIMIT ${CHUNK}`, cutoff],
-    ["line_events", `SELECT event_id FROM line_events WHERE received_at < ? LIMIT ${CHUNK}`, cutoff],
-    ["idempotency_records", `SELECT request_id FROM idempotency_records WHERE expires_at < ? LIMIT ${CHUNK}`, now],
+  // Table, key column, time column, and the time before which rows go.
+  const targets: [string, string, string, number][] = [
+    ["usage_events", "event_id", "received_at", cutoff],
+    ["usage_charges", "usage_key", "created_at", cutoff],
+    ["line_events", "event_id", "received_at", cutoff],
+    ["idempotency_records", "request_id", "expires_at", now],
   ];
   const deleted: Record<string, number> = {};
-  for (const [table, select, before] of targets) {
-    const key = select.split(" ")[1] ?? "";
+  for (const [table, key, time, before] of targets) {
     deleted[table] = 0;
     for (;;) {
-      const result = await db.prepare(`DELETE FROM ${table} WHERE ${key} IN (${select})`).bind(before).run();
+      const result = await db
+        .prepare(`DELETE FROM ${table} WHERE ${key} IN (SELECT ${key} FROM ${table} WHERE ${time} < ? LIMIT ${CHUNK})`)
+        .bind(before)
+        .run();
       deleted[table] += result.meta.changes;
       if (result.meta.changes < CHUNK) break;
     }

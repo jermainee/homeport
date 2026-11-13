@@ -1,14 +1,9 @@
 import type { Context } from "hono";
 import { ID, UUID_V7, isCount, isIpAddress, parseDateTime, uuidV7Timestamp } from "../formats";
-import { hasOnlyFields, invalidRequest, readJsonObject } from "../http";
+import { hasOnlyFields, invalidRequest } from "../http";
 import { chargeUsage } from "../ledger";
 import type { GatewayVariables } from "./auth";
-
-/** An event whose event_id is older than this is rejected as expired (contract). */
-export const EVENT_MAX_AGE_MS = 72 * 60 * 60 * 1000;
-
-/** Events per batch (contract UsageBatch, LineEventBatch). */
-export const MAX_EVENTS_PER_BATCH = 100;
+import { EVENT_MAX_AGE_MS, readEventBatch } from "./events";
 
 type GatewayContext = Context<{ Bindings: Env; Variables: GatewayVariables }>;
 
@@ -54,29 +49,6 @@ const EVENT_FIELDS = [
   "session_start",
 ];
 
-/**
- * The events of a batch body (`{events: [...]}`), or a message saying why
- * the body does not match the contract. `parse` checks one event.
- */
-export async function readEventBatch<T>(
-  request: Request,
-  parse: (event: unknown) => T | string,
-): Promise<{ events: T[] } | { error: string }> {
-  const body = await readJsonObject(request);
-  if (!body || !hasOnlyFields(body, ["events"])) return { error: "body must be {events: [...]}" };
-  const events = body["events"];
-  if (!Array.isArray(events) || events.length === 0 || events.length > MAX_EVENTS_PER_BATCH) {
-    return { error: `events must hold 1 to ${MAX_EVENTS_PER_BATCH} events` };
-  }
-  const parsed: T[] = [];
-  for (const [index, event] of events.entries()) {
-    const result = parse(event);
-    if (typeof result === "string") return { error: `event ${index}: ${result}` };
-    parsed.push(result);
-  }
-  return { events: parsed };
-}
-
 function parseUsageEvent(value: unknown): UsageEvent | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "not an object";
   const event = value as Record<string, unknown>;
@@ -88,6 +60,7 @@ function parseUsageEvent(value: unknown): UsageEvent | string {
     if (typeof id !== "string" || !ID.test(id)) return `${name} must be an id`;
   }
   if (!isCount(seq) || !isCount(bytes_up) || !isCount(bytes_down)) return "seq and byte counts must be whole numbers from 0";
+  if (!isCount(bytes_up + bytes_down)) return "bytes_up + bytes_down is too large";
   if (typeof final !== "boolean") return "final must be a boolean";
   const periodStart = parseDateTime(event["period_start"]);
   const periodEnd = parseDateTime(event["period_end"]);
@@ -343,20 +316,21 @@ async function applyUsageEvent(
               now,
               ...guard.binds,
             )
-        : db
+        : // The view's trigger aborts the batch, charge included, unless the
+          // session still expects this seq: the log never misses a charge.
+          db
             .prepare(
-              `UPDATE usage_sessions SET next_seq = next_seq + 1, last_period_end = ?, bytes_up = bytes_up + ?,
-                      bytes_down = bytes_down + ?, ended = ?, updated_at = ?
-                WHERE session_id = ? AND next_seq = ? AND ${guard.sql}`,
+              `INSERT INTO usage_session_steps (session_id, seq, period_end, bytes_up, bytes_down, final, updated_at)
+               SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`,
             )
             .bind(
+              event.session_id,
+              event.seq,
               event.period_end,
               event.bytes_up,
               event.bytes_down,
               event.final ? 1 : 0,
               now,
-              event.session_id,
-              event.seq,
               ...guard.binds,
             ),
     ],
@@ -375,7 +349,8 @@ async function applyUsageEvent(
     period_end: event.period_end,
     final: event.final ? 1 : 0,
   });
-  if (charged.status === "duplicate") return "duplicate";
+  // A duplicate here was applied by a concurrent request since this one
+  // read: the session moved on all the same.
   known.sessions.set(event.session_id, {
     session_id: event.session_id,
     peer_id: event.peer_id,
@@ -384,5 +359,5 @@ async function applyUsageEvent(
     last_period_end: event.period_end,
     ended: event.final ? 1 : 0,
   });
-  return "applied";
+  return charged.status === "duplicate" ? "duplicate" : "applied";
 }

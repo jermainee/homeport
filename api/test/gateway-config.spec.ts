@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { expectContract } from "./contract";
 import { announcedGateway, gatewayCall, lineOn, peerOn } from "./gateway-fixtures";
-import { link, registerDevice, send } from "./share-fixtures";
+import { link, registerDevice, send, sharingLine, verifiedMember } from "./share-fixtures";
 
 interface Config {
   etag: string;
@@ -139,5 +139,20 @@ describe("GET /v1/gateway/config", () => {
     const second = await configBody(token);
 
     expect(second.etag).toBe(first.etag);
+  });
+
+  it("is closed to a revoked gateway, and new lines go to another gateway", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const other = await announcedGateway();
+    await env.DB.prepare(`UPDATE gateways SET updated_at = ? WHERE id = ?`).bind(Date.now() + 60_000, gatewayId).run();
+
+    await env.DB.prepare(`UPDATE gateway_credentials SET revoked_at = ? WHERE gateway_id = ?`).bind(Date.now(), gatewayId).run();
+    const owner = await verifiedMember();
+    const lineId = await sharingLine(owner.sessionToken);
+
+    expect((await config(token)).status).toBe(401);
+    const line = await env.DB.prepare(`SELECT gateway_id FROM lines WHERE id = ?`).bind(lineId).first<{ gateway_id: string }>();
+    expect(line?.gateway_id).not.toBe(gatewayId);
+    expect(other.gatewayId).toBeTruthy();
   });
 });

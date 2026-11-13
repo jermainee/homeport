@@ -206,6 +206,23 @@ describe("POST /v1/gateway/leases", () => {
       expect(await reservations(user.memberId)).toHaveLength(2);
     });
 
+    it("grants one successor when two renewals of a lease race, and a retry of the loser gets it", async () => {
+      const { gateway, user, peer } = await servedPeer();
+      const current = await grantedLease(gateway.token, peer.peer_id);
+      const renewal = (requestId: string) =>
+        requestLease(gateway.token, { peerId: peer.peer_id, sessionId: current.sessionId, supersedes: current.lease_id, requestId });
+      const ids = [uuidv7(), uuidv7()];
+
+      const raced = await Promise.all(ids.map(renewal));
+      // A renewal that lost the race answers 500 and is not stored, so its retry runs again.
+      const answers = await Promise.all(raced.map((response, i) => (response.status >= 500 ? renewal(ids[i] ?? "") : Promise.resolve(response))));
+
+      expect(answers.map((response) => response.status).sort()).toEqual([200, 201]);
+      const leaseIds = await Promise.all(answers.map(async (response) => (await response.json<LeaseBody>()).lease_id));
+      expect(leaseIds[0]).toBe(leaseIds[1]);
+      expect(await reservations(user.memberId)).toHaveLength(2);
+    });
+
     it("answers 404 for a lease the API never granted to this gateway", async () => {
       const { gateway, peer } = await servedPeer();
       const other = await servedPeer();

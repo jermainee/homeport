@@ -67,6 +67,26 @@ CREATE TABLE usage_sessions (
 CREATE INDEX usage_sessions_member ON usage_sessions (member_id, started_at);
 CREATE INDEX usage_sessions_line ON usage_sessions (line_id, started_at);
 
+-- Inserting into this view adds one usage event to its session's log, and
+-- aborts the whole batch (the event's charge included) unless the session
+-- is open and expects exactly that seq. So the log never misses a charged
+-- event, even when two requests race. Nothing is stored in the view.
+CREATE VIEW usage_session_steps AS
+  SELECT NULL AS session_id, NULL AS seq, NULL AS period_end, NULL AS bytes_up, NULL AS bytes_down,
+         NULL AS final, NULL AS updated_at
+   WHERE 0;
+
+CREATE TRIGGER usage_session_step INSTEAD OF INSERT ON usage_session_steps
+BEGIN
+  SELECT RAISE(ABORT, 'usage event out of step with its session')
+   WHERE NOT EXISTS (SELECT 1 FROM usage_sessions
+                      WHERE session_id = NEW.session_id AND next_seq = NEW.seq AND ended = 0);
+  UPDATE usage_sessions
+     SET next_seq = next_seq + 1, last_period_end = NEW.period_end, bytes_up = bytes_up + NEW.bytes_up,
+         bytes_down = bytes_down + NEW.bytes_down, ended = NEW.final, updated_at = NEW.updated_at
+   WHERE session_id = NEW.session_id;
+END;
+
 -- Raw usage events, kept 7 days after they arrive so a retry is answered
 -- duplicate (the contract keeps event ids 7 days). The cron deletes them.
 CREATE TABLE usage_events (
@@ -95,8 +115,6 @@ CREATE TABLE line_events (
   line_id TEXT NOT NULL REFERENCES lines (id),
   -- online | offline
   type TEXT NOT NULL CHECK (type IN ('online', 'offline')),
-  -- The agent's public IP as the gateway saw it.
-  observed_ip TEXT NOT NULL,
   agent_version TEXT NOT NULL,
   at INTEGER NOT NULL,
   received_at INTEGER NOT NULL
