@@ -1,3 +1,5 @@
+import { httpOrigin } from "./http";
+
 export interface SignInEmail {
   to: string;
   token: string;
@@ -36,8 +38,3 @@ export function signInMailer(env: Env): SignInMailer | null {
   };
 }
 
-function httpOrigin(value: string): URL | null {
-  if (!URL.canParse(value)) return null;
-  const url = new URL(value);
-  return url.protocol === "https:" || url.protocol === "http:" ? url : null;
-}
