@@ -158,13 +158,13 @@ func TestANewSessionSeesTheMachinesCurrentNetworks(t *testing.T) {
 		_, n, err := net.ParseCIDR(current)
 		return []net.Addr{n}, err
 	}
-	p := newPolicy(testObservedIP, nil)
+	p := newPolicy(testObservedIP, nil, nil)
 	if err := p.check(netip.MustParseAddrPort("[2a02:8070:aaaa:1::9]:443")); err == nil {
 		t.Fatal("the first network's address was allowed")
 	}
 
 	current = "2a02:8070:bbbb:1::/64"
-	p = newPolicy(testObservedIP, nil)
+	p = newPolicy(testObservedIP, nil, nil)
 	if err := p.check(netip.MustParseAddrPort("[2a02:8070:bbbb:1::9]:443")); err == nil {
 		t.Fatal("the new network's address was allowed right after the session started")
 	}

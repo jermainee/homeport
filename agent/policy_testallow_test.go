@@ -95,3 +95,31 @@ func TestTestOriginsMustBeLoopback(t *testing.T) {
 		t.Fatal("New accepted a test origin in the home network")
 	}
 }
+
+func TestRoutedTestOriginsMustBeLoopback(t *testing.T) {
+	cert, err := relayprotocol.GenerateSelfSigned("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{GatewayAddr: "gateway.test:443", GatewayPin: relayprotocol.PinOf(cert.Leaf), Certificate: cert}
+	RouteTestOrigin(&cfg, testDst, netip.MustParseAddrPort("192.168.1.1:80"))
+	if _, err := New(cfg); err == nil {
+		t.Fatal("New accepted a route into the home network")
+	}
+}
+
+func TestRoutesAddedToACopyStayInTheCopy(t *testing.T) {
+	var base Config
+	for port := uint16(8000); port < 8003; port++ { // leaves spare capacity in the slice
+		RouteTestOrigin(&base, netip.AddrPortFrom(testDst.Addr(), port), netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port))
+	}
+	other := base
+	RouteTestOrigin(&other, netip.MustParseAddrPort("203.0.113.11:80"), netip.MustParseAddrPort("127.0.0.1:8081"))
+	if len(base.testRoutes) != 3 {
+		t.Fatalf("base has %d routes after a route was added to its copy, want 3", len(base.testRoutes))
+	}
+	RouteTestOrigin(&base, netip.MustParseAddrPort("203.0.113.12:80"), netip.MustParseAddrPort("127.0.0.1:8082"))
+	if !slices.Contains(other.testOrigins, netip.MustParseAddrPort("127.0.0.1:8081")) {
+		t.Fatalf("a route added to base overwrote its copy's origin: %v", other.testOrigins)
+	}
+}

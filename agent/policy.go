@@ -28,11 +28,11 @@ type policy struct {
 // newPolicy returns the policy for one connection. It drops the cached
 // interface networks, so a machine that moved to another network refuses the
 // new home network from the connection's first flow on.
-func newPolicy(ownIP netip.Addr, testOrigins []netip.AddrPort) *policy {
+func newPolicy(ownIP netip.Addr, testOrigins []netip.AddrPort, testRoutes map[netip.AddrPort]netip.AddrPort) *policy {
 	ifNets.mu.Lock()
 	ifNets.fetched = time.Time{} // refetch, but keep the last answer if that fails
 	ifNets.mu.Unlock()
-	return &policy{ownIP: ownIP.Unmap(), localNets: interfaceNets, testOrigins: testOrigins}
+	return &policy{ownIP: ownIP.Unmap(), localNets: interfaceNets, testOrigins: testOrigins, testRoutes: testRoutes}
 }
 
 // target is the address a flow to dst connects to: dst itself, or in tests
