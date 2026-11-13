@@ -27,6 +27,7 @@ type flowHandler func(open relayprotocol.FlowOpen, s *quic.Stream)
 // fakeAgent is a sharing agent built from relay-protocol, as the real one is.
 type fakeAgent struct {
 	conn  *quic.Conn
+	ctl   *quic.Stream
 	ack   relayprotocol.HelloAck
 	opens chan relayprotocol.FlowOpen
 }
@@ -54,7 +55,7 @@ func startAgent(t *testing.T, gw *gateway.Server, cert tls.Certificate, handle f
 	if err != nil {
 		return nil, err
 	}
-	t.Cleanup(func() { conn.CloseWithError(0, "") })
+	t.Cleanup(func() { _ = conn.CloseWithError(0, "") })
 	ctl, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
@@ -70,7 +71,7 @@ func startAgent(t *testing.T, gw *gateway.Server, cert tls.Certificate, handle f
 	if !ok {
 		return nil, errors.New("first control message was not hello_ack")
 	}
-	a := &fakeAgent{conn: conn, ack: ack, opens: make(chan relayprotocol.FlowOpen, 64)}
+	a := &fakeAgent{conn: conn, ctl: ctl, ack: ack, opens: make(chan relayprotocol.FlowOpen, 64)}
 	go func() {
 		for {
 			s, err := conn.AcceptStream(context.Background())
@@ -99,22 +100,22 @@ func relayTo(origin string) flowHandler {
 	return func(_ relayprotocol.FlowOpen, s *quic.Stream) {
 		c, err := net.Dial("tcp", origin)
 		if err != nil {
-			relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusRefused})
-			s.Close()
+			_ = relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusRefused})
+			_ = s.Close()
 			return
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		if err := relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusOK}); err != nil {
 			return
 		}
 		done := make(chan struct{})
 		go func() {
-			io.Copy(c, s)
-			c.(*net.TCPConn).CloseWrite()
+			_, _ = io.Copy(c, s)
+			_ = c.(*net.TCPConn).CloseWrite()
 			close(done)
 		}()
-		io.Copy(s, c)
-		s.Close()
+		_, _ = io.Copy(s, c)
+		_ = s.Close()
 		<-done
 	}
 }
@@ -131,7 +132,7 @@ func relayGateway(t *testing.T) *gateway.Server {
 
 func TestFlowsAreRelayedToTheLinesAgent(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello from home"))
+		_, _ = w.Write([]byte("hello from home"))
 	}))
 	t.Cleanup(origin.Close)
 	gw := relayGateway(t)
@@ -165,8 +166,8 @@ func TestFlowsAreRelayedToTheLinesAgent(t *testing.T) {
 // answer makes the agent answer every flow with status and end it.
 func answer(status relayprotocol.Status) flowHandler {
 	return func(_ relayprotocol.FlowOpen, s *quic.Stream) {
-		relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: status})
-		s.Close()
+		_ = relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: status})
+		_ = s.Close()
 	}
 }
 
@@ -181,7 +182,7 @@ func echoFrames(prefix string) flowHandler {
 		for {
 			payload, err := relayprotocol.ReadUDPFrame(s, buf)
 			if err != nil {
-				s.Close()
+				_ = s.Close()
 				return
 			}
 			if err := relayprotocol.WriteUDPFrame(s, append([]byte(prefix), payload...)); err != nil {
@@ -228,7 +229,7 @@ func assertResetQuickly(t *testing.T, c *testClient) {
 	start := time.Now()
 	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("the connection opened; it should have been refused")
 	}
 	if took := time.Since(start); took > 2*time.Second {
@@ -284,7 +285,7 @@ func TestMemberCannotUseTheirOwnLine(t *testing.T) {
 
 func TestNewAgentConnectionReplacesTheOld(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("from the new agent"))
+		_, _ = w.Write([]byte("from the new agent"))
 	}))
 	t.Cleanup(origin.Close)
 	f := newRelayFixture(t, answer(relayprotocol.StatusPolicy), "member-user")
@@ -339,5 +340,71 @@ func TestUDPFlowsAreRelayedAsFrames(t *testing.T) {
 	open := <-f.agent.opens
 	if open.Kind != relayprotocol.KindUDP || open.Dst != netip.MustParseAddrPort("203.0.113.10:7") {
 		t.Fatalf("agent got %+v, want UDP to 203.0.113.10:7", open)
+	}
+}
+
+func TestAgentIsDisconnectedWhenItsControlStreamEnds(t *testing.T) {
+	f := newRelayFixture(t, answer(relayprotocol.StatusOK), "member-user")
+
+	_ = f.agent.ctl.Close()
+
+	// A closed connection makes the agent reconnect; an open one would
+	// leave it connected to a gateway that no longer routes to it.
+	waitClosed(t, f.agent.conn)
+}
+
+func TestDNSFlowsCloseSoonAfterTheAnswer(t *testing.T) {
+	ended := make(chan struct{}, 8)
+	f := newRelayFixture(t, func(open relayprotocol.FlowOpen, s *quic.Stream) {
+		echoFrames("answer:")(open, s)
+		ended <- struct{}{}
+	}, "member-user")
+
+	f.client.udpRoundTrip(t, netip.MustParseAddrPort("10.77.0.1:53"), []byte("query"))
+
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the DNS flow still held an agent stream 10 s after its answer")
+	}
+}
+
+func TestAgentResetReachesTheClientAsAReset(t *testing.T) {
+	f := newRelayFixture(t, func(_ relayprotocol.FlowOpen, s *quic.Stream) {
+		_ = relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusOK})
+		_, _ = s.Write([]byte("partial"))
+		time.Sleep(100 * time.Millisecond)
+		s.CancelWrite(relayprotocol.CodeFlowReset.StreamErrorCode())
+	}, "member-user")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := f.client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	if _, err := io.ReadAll(conn); err == nil {
+		t.Fatal("the client saw an orderly close; a reset must stay a reset, or a truncated response looks complete")
+	}
+}
+
+func TestAnAgentPinCannotServeTwoLines(t *testing.T) {
+	gw := relayGateway(t)
+	_, pin := newAgentCert(t)
+	if err := gw.AddLine(gateway.Line{ID: "line-1", OwnerMemberID: "member-a", AgentPin: pin}); err != nil {
+		t.Fatalf("add line-1: %v", err)
+	}
+	if err := gw.AddLine(gateway.Line{ID: "line-2", OwnerMemberID: "member-b", AgentPin: pin}); err == nil {
+		t.Fatal("a second line was given an agent pin that already serves line-1")
+	}
+}
+
+func TestPeerOnALineNeedsItsMember(t *testing.T) {
+	gw := relayGateway(t)
+	err := gw.AddPeer(gateway.Peer{PublicKey: newKey(t).PublicKey(), IPv4: netip.MustParseAddr("10.77.0.2"), LineID: "line-1"})
+	if err == nil {
+		t.Fatal("a peer with a line but no member was accepted; the self-dealing check needs the member")
 	}
 }

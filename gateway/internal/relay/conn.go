@@ -21,6 +21,12 @@ func (c *streamConn) Write(b []byte) (int, error) { return c.stream.Write(b) }
 // CloseWrite passes a FIN on: it closes the send side of the stream.
 func (c *streamConn) CloseWrite() error { return c.stream.Close() }
 
+// Reset ends the flow as a TCP reset would, so the agent resets its socket.
+func (c *streamConn) Reset() {
+	c.stream.CancelWrite(relayprotocol.CodeFlowReset.StreamErrorCode())
+	c.stream.CancelRead(relayprotocol.CodeFlowReset.StreamErrorCode())
+}
+
 // Close ends the flow in both directions.
 func (c *streamConn) Close() error {
 	c.stream.CancelRead(relayprotocol.CodeFlowCancelled.StreamErrorCode())

@@ -78,25 +78,25 @@ func (m *Meter) Usage(addr netip.Addr) (up, down uint64) {
 }
 
 // countUp records a packet from a peer. It reports false for unknown sources.
-func (m *Meter) countUp(src netip.Addr, n int) bool {
+func (m *Meter) countUp(src netip.Addr, n uint64) bool {
 	m.mu.RLock()
 	c := m.byAddr[src]
 	m.mu.RUnlock()
 	if c == nil {
 		return false
 	}
-	c.up.Add(uint64(n))
+	c.up.Add(n)
 	return true
 }
 
 // countDown records a packet to a peer. It reports false for unknown destinations.
-func (m *Meter) countDown(dst netip.Addr, n int) bool {
+func (m *Meter) countDown(dst netip.Addr, n uint64) bool {
 	m.mu.RLock()
 	c := m.byAddr[dst]
 	m.mu.RUnlock()
 	if c == nil {
 		return false
 	}
-	c.down.Add(uint64(n))
+	c.down.Add(n)
 	return true
 }

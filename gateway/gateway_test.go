@@ -20,7 +20,7 @@ type counters struct {
 func TestFetchThroughGatewayIsMeteredExactly(t *testing.T) {
 	body := randomBytes(1 << 20)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(origin.Close)
 
@@ -53,7 +53,7 @@ func TestFetchThroughGatewayIsMeteredExactly(t *testing.T) {
 
 func TestRemovedPeerIsCutOff(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	}))
 	t.Cleanup(origin.Close)
 	gw := newGateway(t, toOrigin{tcp: origin.Listener.Addr().String()})
@@ -90,7 +90,7 @@ func TestRefusedFlowResetsTheClientAtOnce(t *testing.T) {
 	defer cancel()
 	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("the handshake completed; a refused flow must be reset before it opens")
 	}
 	if took := time.Since(start); took > 2*time.Second {
@@ -106,7 +106,7 @@ func TestNewRejectsAMissingPrivateKey(t *testing.T) {
 
 func TestReAddingAPeerKeepsItsUsage(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	}))
 	t.Cleanup(origin.Close)
 	gw := newGateway(t, toOrigin{tcp: origin.Listener.Addr().String()})
@@ -141,7 +141,7 @@ func TestAddPeerRejectsATunnelAddressInUse(t *testing.T) {
 
 func TestRemovePeerReturnsItsFinalUsage(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(randomBytes(64 << 10))
+		_, _ = w.Write(randomBytes(64 << 10))
 	}))
 	t.Cleanup(origin.Close)
 	gw := newGateway(t, toOrigin{tcp: origin.Listener.Addr().String()})
@@ -180,14 +180,16 @@ func TestPendingFlowsAreCappedPerPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	for port := uint16(1); port <= 2; port++ {
-		go client.net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), port))
+		go func() {
+			_, _ = client.net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), port))
+		}()
 	}
 	waitUntil(t, func() bool { return dialer.parked.Load() == 2 })
 
 	start := time.Now()
 	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:3"))
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("a third pending flow was accepted")
 	}
 	if took := time.Since(start); took > 2*time.Second {
@@ -200,7 +202,7 @@ func TestCloseClosesUpstreamConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	gotByte := make(chan struct{}, 1)
 	go func() {
 		for {
@@ -208,7 +210,7 @@ func TestCloseClosesUpstreamConnections(t *testing.T) {
 			if err != nil {
 				return
 			}
-			t.Cleanup(func() { c.Close() })
+			t.Cleanup(func() { _ = c.Close() })
 			go func() {
 				// A silent origin: reads what the client sends, never writes, never closes.
 				if _, err := c.Read(make([]byte, 1)); err == nil {
@@ -231,7 +233,7 @@ func TestCloseClosesUpstreamConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial through gateway: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("x")); err != nil {
 		t.Fatalf("write through gateway: %v", err)
 	}
@@ -241,7 +243,7 @@ func TestCloseClosesUpstreamConnections(t *testing.T) {
 		t.Fatal("the origin never received the client's byte")
 	}
 
-	gw.Close()
+	_ = gw.Close()
 
 	deadline := time.Now().Add(3 * time.Second)
 	for !dialer.allClosed() {

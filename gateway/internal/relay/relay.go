@@ -82,16 +82,20 @@ func (r *Relay) Addr() net.Addr { return r.ln.Addr() }
 func (r *Relay) Pin() relayprotocol.Pin { return r.pin }
 
 // SetLine adds a line or changes its agent pin. A changed pin disconnects the
-// agent that used the old one.
-func (r *Relay) SetLine(l Line) {
+// agent that used the old one. A pin can serve only one line.
+func (r *Relay) SetLine(l Line) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if other, ok := r.byPin[l.Pin]; ok && other != l.ID {
+		return fmt.Errorf("relay: the agent pin of line %s already serves another line", l.ID)
+	}
 	if old, ok := r.lines[l.ID]; ok && old.Pin != l.Pin {
 		delete(r.byPin, old.Pin)
 		r.dropAgentLocked(l.ID, relayprotocol.CodeUnauthorized)
 	}
 	r.lines[l.ID] = l
 	r.byPin[l.Pin] = l.ID
+	return nil
 }
 
 // RemoveLine forgets a line and disconnects its agent.
@@ -167,14 +171,17 @@ func (r *Relay) openFlow(ctx context.Context, lineID string, kind relayprotocol.
 		s.CancelWrite(relayprotocol.CodeFlowCancelled.StreamErrorCode())
 		return nil, nil, fmt.Errorf("relay: write flow header: %w", err)
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		s.SetReadDeadline(deadline)
-	}
+	// Wait for the agent's answer until the context ends, by deadline or by
+	// cancellation (for example when the gateway closes).
+	stop := context.AfterFunc(ctx, func() { _ = s.SetReadDeadline(time.Now()) })
 	res, err := relayprotocol.ReadFlowResult(s)
-	s.SetReadDeadline(time.Time{})
+	if !stop() && err == nil {
+		err = ctx.Err()
+	}
+	_ = s.SetReadDeadline(time.Time{})
 	if err != nil || res.Status != relayprotocol.StatusOK {
 		s.CancelRead(relayprotocol.CodeFlowCancelled.StreamErrorCode())
-		s.Close()
+		_ = s.Close()
 		if err != nil {
 			return nil, nil, fmt.Errorf("relay: read flow result: %w", err)
 		}
@@ -205,14 +212,14 @@ func (r *Relay) acceptLoop() {
 func (r *Relay) serve(conn *quic.Conn) {
 	pin, err := relayprotocol.PeerPin(conn.ConnectionState().TLS)
 	if err != nil {
-		conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
 		return
 	}
 	r.mu.Lock()
 	lineID, ok := r.byPin[pin]
 	r.mu.Unlock()
 	if !ok {
-		conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
 		return
 	}
 
@@ -220,30 +227,33 @@ func (r *Relay) serve(conn *quic.Conn) {
 	ctl, err := conn.AcceptStream(ctx)
 	cancel()
 	if err != nil {
-		conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
 		return
 	}
-	ctl.SetReadDeadline(time.Now().Add(helloTimeout))
+	_ = ctl.SetReadDeadline(time.Now().Add(helloTimeout))
 	msg, err := relayprotocol.ReadControl(ctl)
-	ctl.SetReadDeadline(time.Time{})
+	_ = ctl.SetReadDeadline(time.Time{})
 	if _, isHello := msg.(relayprotocol.Hello); err != nil || !isHello {
-		conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
 		return
 	}
 	// Register before acknowledging, so an agent that has its hello_ack can
 	// already be sent flows.
 	if !r.register(lineID, pin, conn) {
-		conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
 		return
 	}
 	defer r.unregister(lineID, conn)
 	ack := relayprotocol.HelloAck{LineID: lineID, ObservedIP: remoteIP(conn)}
 	if err := relayprotocol.WriteControl(ctl, ack); err != nil {
-		conn.CloseWithError(relayprotocol.CodeInternalError.ApplicationErrorCode(), "")
+		_ = conn.CloseWithError(relayprotocol.CodeInternalError.ApplicationErrorCode(), "")
 		return
 	}
 	for {
 		if _, err := relayprotocol.ReadControl(ctl); err != nil && !errors.Is(err, relayprotocol.ErrUnknownMessage) {
+			// The control stream ended or broke. Close the connection so the
+			// agent reconnects instead of idling on a line nobody routes to.
+			_ = conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
 			return
 		}
 	}
@@ -254,11 +264,14 @@ func (r *Relay) serve(conn *quic.Conn) {
 func (r *Relay) register(lineID string, pin relayprotocol.Pin, conn *quic.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.ctx.Err() != nil {
+		return false // the relay is closing
+	}
 	if l, ok := r.lines[lineID]; !ok || l.Pin != pin {
 		return false
 	}
 	if old := r.agents[lineID]; old != nil {
-		old.CloseWithError(relayprotocol.CodeGoingAway.ApplicationErrorCode(), "replaced")
+		_ = old.CloseWithError(relayprotocol.CodeGoingAway.ApplicationErrorCode(), "replaced")
 	}
 	r.agents[lineID] = conn
 	return true
@@ -274,7 +287,7 @@ func (r *Relay) unregister(lineID string, conn *quic.Conn) {
 
 func (r *Relay) dropAgentLocked(lineID string, code relayprotocol.Code) {
 	if c := r.agents[lineID]; c != nil {
-		c.CloseWithError(code.ApplicationErrorCode(), "")
+		_ = c.CloseWithError(code.ApplicationErrorCode(), "")
 		delete(r.agents, lineID)
 	}
 }

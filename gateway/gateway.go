@@ -174,8 +174,10 @@ func (s *Server) AddLine(l Line) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.relay.SetLine(relay.Line{ID: l.ID, Pin: l.AgentPin}); err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
 	s.lines[l.ID] = l
-	s.relay.SetLine(relay.Line{ID: l.ID, Pin: l.AgentPin})
 	return nil
 }
 
@@ -233,7 +235,7 @@ func (s *Server) lineFor(addr netip.Addr) (string, error) {
 
 func (s *Server) closeRelay() {
 	if s.relay != nil {
-		s.relay.Close()
+		_ = s.relay.Close()
 	}
 }
 
@@ -249,6 +251,10 @@ func (s *Server) PublicKey() Key { return s.cfg.PrivateKey.PublicKey() }
 func (s *Server) AddPeer(p Peer) error {
 	if !p.IPv4.IsValid() && !p.IPv6.IsValid() {
 		return errors.New("gateway: peer needs a tunnel address")
+	}
+	if p.LineID != "" && p.MemberID == "" {
+		// The self-dealing check compares the peer's member with the line's owner.
+		return errors.New("gateway: a peer on a line needs its member ID")
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "public_key=%s\nreplace_allowed_ips=true\n", hex.EncodeToString(p.PublicKey[:]))
