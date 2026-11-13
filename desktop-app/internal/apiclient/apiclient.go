@@ -47,6 +47,9 @@ type Error struct {
 	Status  int
 	Code    string
 	Message string
+	// ServerTime is the API's clock from the response's Date header, or
+	// zero without one.
+	ServerTime time.Time
 }
 
 func (e *Error) Error() string {
@@ -132,6 +135,9 @@ func (c *Client) doStatus(ctx context.Context, method, path, token string, body,
 		return resp.StatusCode, nil
 	}
 	apiErr := &Error{Status: resp.StatusCode}
+	if t, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
+		apiErr.ServerTime = t
+	}
 	var payload struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`

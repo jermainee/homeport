@@ -221,7 +221,7 @@ input[aria-invalid="true"] {
   color: #fff;
 }
 
-.button.primary:hover:not(:disabled) {
+.button.primary:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--button-hover);
 }
 
@@ -232,12 +232,13 @@ input[aria-invalid="true"] {
   color: var(--enamel-ink);
 }
 
-.button.quiet:hover:not(:disabled) {
+.button.quiet:hover:not(:disabled, [aria-disabled="true"]) {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 
-.button:disabled {
+.button:disabled,
+.button[aria-disabled="true"] {
   cursor: default;
   opacity: 0.6;
 }
@@ -271,7 +272,8 @@ input:focus-visible {
 }
 
 /* The match code, on an enamel house-number plate: white rim, two screws,
-   a little gloss. It hangs into place once when the screen opens. */
+   a little gloss. It hangs into place when it first appears, not again
+   when only the status under it changes (ui.ts sets data-fresh). */
 
 .plate {
   position: relative;
@@ -288,8 +290,11 @@ input:focus-visible {
     inset 0 0 0 7px var(--rim),
     0 1px 1px rgb(12 22 38 / 0.25),
     0 10px 22px -12px rgb(12 22 38 / 0.55);
-  animation: hang 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
   transform-origin: 50% 0;
+}
+
+#app[data-fresh] .plate {
+  animation: hang 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .plate::before,
@@ -426,8 +431,12 @@ input:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.resend-error {
+  margin-top: 12px;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .plate,
+  #app[data-fresh] .plate,
   .beacon {
     animation: none;
   }

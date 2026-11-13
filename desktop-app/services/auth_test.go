@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jermainee/homeport/desktop-app/internal/apiclient"
 	"github.com/jermainee/homeport/desktop-app/internal/fakeapi"
@@ -303,5 +306,137 @@ func TestCancelForgetsTheSignIn(t *testing.T) {
 	var svcErr *services.Error
 	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrNoSignIn {
 		t.Errorf("Poll after Cancel = %v, want code %q", err, services.ErrNoSignIn)
+	}
+}
+
+func TestCancelDoesNotWaitForAPollAndDiscardsItsAnswer(t *testing.T) {
+	api := fakeapi.New(t)
+	dir := t.TempDir()
+	auth := newAuth(t, api, dir)
+	if _, err := auth.Start(t.Context(), email); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	release := api.HoldNext("GET /v1/auth/login-requests/")
+	defer release()
+	polled := make(chan error, 1)
+	go func() {
+		_, err := auth.Poll(t.Context())
+		polled <- err
+	}()
+	waitFor(t, func() bool { return len(api.Requests()) == 2 }) // the poll reached the API
+
+	// The member confirms in the browser just as they go back in the app.
+	api.Approve(t, email)
+	cancelled := make(chan struct{})
+	go func() { auth.Cancel(); close(cancelled) }()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Cancel waited for the poll in flight")
+	}
+	release()
+
+	err := <-polled
+	var svcErr *services.Error
+	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrNoSignIn {
+		t.Errorf("Poll = %v, want code %q", err, services.ErrNoSignIn)
+	}
+	if me, err := newAuth(t, api, dir).Current(t.Context()); err != nil || me != nil {
+		t.Errorf("the abandoned sign-in was saved: Current = %+v, %v", me, err)
+	}
+}
+
+func TestFailedResendKeepsTheFirstSignIn(t *testing.T) {
+	api := fakeapi.New(t)
+	auth := newAuth(t, api, t.TempDir())
+	first, err := auth.Start(t.Context(), email)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	api.FailNext("POST /v1/auth/login-requests", http.StatusTooManyRequests, "rate_limited")
+	if _, err := auth.Start(t.Context(), email); err == nil {
+		t.Fatal("resend succeeded, want rate_limited")
+	}
+
+	// The member opens the first email after all.
+	if got := api.MatchCode(t, email); got != first.MatchCode {
+		t.Fatalf("latest login has code %s, want the first one %s", got, first.MatchCode)
+	}
+	api.Approve(t, email)
+	if res, err := auth.Poll(t.Context()); err != nil || res.Status != services.LoginApproved {
+		t.Errorf("Poll = %+v, %v; want approved", res, err)
+	}
+}
+
+func TestPollGivesUpWhenTheAPIRefusesTheSignIn(t *testing.T) {
+	api := fakeapi.New(t)
+	auth := newAuth(t, api, t.TempDir())
+	if _, err := auth.Start(t.Context(), email); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	api.FailNext("GET /v1/auth/login-requests/", http.StatusNotFound, "not_found")
+
+	_, err := auth.Poll(t.Context())
+
+	var svcErr *services.Error
+	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrNoSignIn {
+		t.Errorf("Poll = %v, want code %q", err, services.ErrNoSignIn)
+	}
+}
+
+func TestStartExplainsAClockThatIsOff(t *testing.T) {
+	api := fakeapi.New(t)
+	auth := newAuth(t, api, t.TempDir())
+	// The API rejects request_ids from more than an hour in its future.
+	api.FailNextAt("POST /v1/auth/login-requests", http.StatusBadRequest, "invalid_request", time.Now().Add(-2*time.Hour))
+
+	_, err := auth.Start(t.Context(), email)
+
+	var svcErr *services.Error
+	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrClockSkew {
+		t.Errorf("Start = %v, want code %q", err, services.ErrClockSkew)
+	}
+}
+
+func TestStartRetriesAnExpiredRequestWithAFreshOne(t *testing.T) {
+	api := fakeapi.New(t)
+	auth := newAuth(t, api, t.TempDir())
+	api.FailNext("POST /v1/auth/login-requests", http.StatusBadRequest, "request_id_expired")
+
+	_, err := auth.Start(t.Context(), email)
+	var svcErr *services.Error
+	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrUnexpected {
+		t.Fatalf("Start = %v, want code %q", err, services.ErrUnexpected)
+	}
+	if _, err := auth.Start(t.Context(), email); err != nil {
+		t.Errorf("second Start: %v", err)
+	}
+}
+
+func TestCurrentTreatsAnUnreadableSessionAsSignedOut(t *testing.T) {
+	api := fakeapi.New(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte("{trunc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	me, err := newAuth(t, api, dir).Current(t.Context())
+
+	if err != nil || me != nil {
+		t.Errorf("Current = %+v, %v; want nil, nil", me, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "session.json")); !os.IsNotExist(err) {
+		t.Errorf("the unreadable session file is still there: %v", err)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

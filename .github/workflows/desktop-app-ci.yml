@@ -80,15 +80,12 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
-      # Assets.car is left out: actool writes different bytes for the same
-      # icon on every run.
-      - name: Check that the generated bindings are committed
+      - name: Check that generated files are committed
         run: |
-          generated="frontend/bindings go.mod go.sum frontend/package-lock.json"
-          if [ -n "$(git status --porcelain -- $generated)" ]; then
-            echo "::error::'wails3 build' changed generated files. Run it locally and commit the result."
-            git status --porcelain -- $generated
-            git diff -- $generated
+          if [ -n "$(git status --porcelain -- .)" ]; then
+            echo "::error::'wails3 build' changed files in desktop-app (bindings, lockfiles, go.mod). Run it locally and commit the result."
+            git status --porcelain -- .
+            git diff -- .
             exit 1
           fi
 
@@ -99,6 +96,20 @@ jobs:
         run: |
           # info.version, the only two-space-indented "version:" key.
           version() { sed -n 's/^  version: *"\{0,1\}\([^"#]*\)"\{0,1\} *$/\1/p' | head -n 1; }
+          # newer A B: whether B comes after A by semver precedence. Build
+          # metadata is ignored, and a release comes after its prereleases.
+          newer() {
+            a=${1%%+*}; b=${2%%+*}
+            ac=${a%%-*}; bc=${b%%-*}
+            if [ "$ac" != "$bc" ]; then
+              [ "$(printf '%s\n%s\n' "$ac" "$bc" | sort -V | tail -n 1)" = "$bc" ]
+              return
+            fi
+            ap=${a#"$ac"}; bp=${b#"$bc"}
+            [ -z "$bp" ] && [ -n "$ap" ] && return 0
+            [ -z "$ap" ] && return 1
+            [ "$ap" != "$bp" ] && [ "$(printf '%s\n%s\n' "$ap" "$bp" | sort -V | tail -n 1)" = "$bp" ]
+          }
           head=$(version < build/config.yml)
           if [ -z "$head" ]; then
             echo "::error::No info.version in desktop-app/build/config.yml."
@@ -110,7 +121,7 @@ jobs:
             echo "desktop-app has no version on $BASE_REF yet; starting at $head."
             exit 0
           fi
-          if [ "$head" = "$base" ] || [ "$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -n 1)" != "$head" ]; then
+          if ! newer "$base" "$head"; then
             echo "::error::Raise info.version in desktop-app/build/config.yml above $base (it is $head)."
             exit 1
           fi

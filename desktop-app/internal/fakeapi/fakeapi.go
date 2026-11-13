@@ -71,6 +71,8 @@ type failure struct {
 	status int
 	code   string // error code; empty drops the connection instead
 	lose   bool   // handle the request, then drop the connection
+	hold   chan struct{}
+	date   time.Time // Date header to send with the error, if set
 }
 
 var (
@@ -171,6 +173,25 @@ func (s *Server) Requests() []string {
 	return append([]string(nil), s.requests...)
 }
 
+// HoldNext makes the next request whose "METHOD path" starts with route
+// wait until release is called, then handles it normally.
+func (s *Server) HoldNext(route string) (release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := make(chan struct{})
+	s.failures = append(s.failures, failure{route: route, hold: ch})
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+// FailNextAt is FailNext with the API's clock at serverTime, as its Date
+// header shows.
+func (s *Server) FailNextAt(route string, status int, code string, serverTime time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = append(s.failures, failure{route: route, status: status, code: code, date: serverTime})
+}
+
 // LoseNextResponse makes the API handle the next request whose
 // "METHOD path" starts with route, then drop the connection before it
 // answers, as when the network fails mid-request.
@@ -218,6 +239,11 @@ func (s *Server) injectFailures(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if f.hold != nil {
+			<-f.hold
+			next.ServeHTTP(w, r)
+			return
+		}
 		if f.lose {
 			next.ServeHTTP(httptest.NewRecorder(), r)
 		}
@@ -227,6 +253,9 @@ func (s *Server) injectFailures(next http.Handler) http.Handler {
 				conn.Close()
 			}
 			return
+		}
+		if !f.date.IsZero() {
+			w.Header().Set("Date", f.date.UTC().Format(http.TimeFormat))
 		}
 		writeError(w, f.status, f.code)
 	})

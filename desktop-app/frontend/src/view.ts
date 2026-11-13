@@ -1,10 +1,12 @@
 // Renders the sign-in state machine into the window. Each state is one
-// screen; actions are buttons with data-action, handled in main.ts.
+// screen; actions are buttons with data-action, handled in ui.ts. Every
+// value from Go or the API goes through esc().
 
 import type { ErrorCode, Member, State } from "./signin";
 
 const errorText: Record<ErrorCode, string> = {
   invalid_email: "Enter a full email address, like name@example.com.",
+  clock_skew: "Your computer's clock is more than an hour off. Set the date and time automatically, then try again.",
   offline: "Homeport can't be reached. Check your internet connection and try again.",
   rate_limited: "Too many sign-in attempts. Wait a minute, then try again.",
   email_unavailable: "Sign-in emails can't be sent right now. Try again in a few minutes.",
@@ -47,36 +49,51 @@ function signedOut(email: string, error: ErrorCode | undefined, sending: boolean
     </section>`;
 }
 
+// The resend button stays focusable while a link is on its way
+// (aria-disabled, not disabled), so keyboard focus doesn't fall to the page.
+function resendButton(style: "primary" | "quiet", resending: boolean | undefined): string {
+  return `<button class="button ${style}" type="button" data-action="resend"
+    ${resending ? 'aria-disabled="true" aria-busy="true"' : ""}>
+    ${resending ? "Sending a new link…" : "Send a new link"}
+  </button>`;
+}
+
+function resendError(error: ErrorCode | undefined): string {
+  return error ? `<p class="field-error resend-error" role="alert">The new link wasn't sent. ${errorText[error]}</p>` : "";
+}
+
 function waiting(s: Extract<State, { kind: "waiting" }>): string {
   const until = new Date(s.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return `
     <section class="screen waiting" aria-labelledby="title">
       <h1 id="title">Check your inbox</h1>
       <p class="lede">We sent a sign-in link to <strong>${esc(s.email)}</strong>. Open it and check that the page shows this number:</p>
-      <figure class="plate" role="img" aria-label="Match code ${s.matchCode.split("").join(" ")}">
-        <span class="plate-digits" aria-hidden="true">${groupDigits(s.matchCode)}</span>
+      <figure class="plate" role="img" aria-label="Match code ${esc(s.matchCode.split("").join(" "))}">
+        <span class="plate-digits" aria-hidden="true">${esc(groupDigits(s.matchCode))}</span>
       </figure>
       <p class="status ${s.offline ? "is-offline" : ""}">
         <span class="beacon" aria-hidden="true"></span>
         ${s.offline ? "Homeport can't be reached. Trying again…" : "Waiting for you to confirm…"}
       </p>
       <div class="actions">
-        <button class="button quiet" type="button" data-action="resend">Send a new link</button>
+        ${resendButton("quiet", s.resending)}
         <button class="button quiet" type="button" data-action="change-email">Use a different email</button>
       </div>
+      ${resendError(s.error)}
       <p class="footnote">The link works until ${esc(until)}.</p>
     </section>`;
 }
 
-function expired(email: string): string {
+function expired(s: Extract<State, { kind: "expired" }>): string {
   return `
     <section class="screen expired" aria-labelledby="title">
       <h1 id="title">This link has expired</h1>
-      <p class="lede">Sign-in links work for 15 minutes. Send a new one to <strong>${esc(email)}</strong>.</p>
+      <p class="lede">Sign-in links work for 15 minutes. Send a new one to <strong>${esc(s.email)}</strong>.</p>
       <div class="actions stacked">
-        <button class="button primary" type="button" data-action="resend">Send a new link</button>
+        ${resendButton("primary", s.resending)}
         <button class="button quiet" type="button" data-action="change-email">Use a different email</button>
       </div>
+      ${resendError(s.error)}
     </section>`;
 }
 
@@ -118,14 +135,14 @@ function home(member: Member, signingOut: boolean): string {
         <li class="row">
           <div class="row-text">
             <h2>Share</h2>
-            <p>Let other members connect through this Mac's home line. You earn 5 credits per MB.</p>
+            <p>Let other members connect through this Mac's home line, and earn credits for what they use.</p>
           </div>
           <span class="soon">Coming soon</span>
         </li>
         <li class="row">
           <div class="row-text">
             <h2>Use</h2>
-            <p>Connect through a member's home line with the WireGuard app. It costs 10 credits per MB.</p>
+            <p>Connect through a member's home line with the WireGuard app, and pay in credits for what you use.</p>
           </div>
           <span class="soon">Coming soon</span>
         </li>
@@ -160,7 +177,7 @@ export function render(s: State): string {
     case "waiting":
       return waiting(s);
     case "expired":
-      return expired(s.email);
+      return expired(s);
     case "signedIn":
       return home(s.member, false);
     case "signingOut":

@@ -32,14 +32,18 @@ export interface AuthApi {
   signOut(): Promise<void>;
 }
 
-/** Error codes from services.ErrorCode in Go, plus a local "invalid_email". */
-export type ErrorCode =
-  | "offline"
-  | "invalid_email"
-  | "rate_limited"
-  | "email_unavailable"
-  | "no_sign_in"
-  | "unexpected";
+/** The codes of services.ErrorCode in Go. */
+export const ERROR_CODES = [
+  "offline",
+  "invalid_email",
+  "clock_skew",
+  "rate_limited",
+  "email_unavailable",
+  "no_sign_in",
+  "unexpected",
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export type State =
   | { kind: "checking" }
@@ -52,24 +56,17 @@ export type State =
       matchCode: string;
       expiresAt: string;
       offline: boolean;
+      resending: boolean;
+      error?: ErrorCode; // why the last "send a new link" failed
     }
-  | { kind: "expired"; email: string }
+  | { kind: "expired"; email: string; resending?: boolean; error?: ErrorCode }
   | { kind: "signedIn"; member: Member }
   | { kind: "signingOut"; member: Member };
-
-const errorCodes: readonly ErrorCode[] = [
-  "offline",
-  "invalid_email",
-  "rate_limited",
-  "email_unavailable",
-  "no_sign_in",
-  "unexpected",
-];
 
 /** errorCode reads the code a Go service error carries in its cause. */
 export function errorCode(err: unknown): ErrorCode {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
-  return errorCodes.includes(code as ErrorCode) ? (code as ErrorCode) : "unexpected";
+  return (ERROR_CODES as readonly unknown[]).includes(code) ? (code as ErrorCode) : "unexpected";
 }
 
 // A light check that catches typos before a round trip; the API decides.
@@ -86,6 +83,7 @@ export class SignIn {
   #listeners = new Set<(s: State) => void>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #run = 0; // bumped whenever polling stops, so late answers are dropped
+  #epoch = 0; // bumped when the member leaves a sign-in, so its answers are dropped
   #failures = 0;
 
   constructor(private readonly api: AuthApi) {}
@@ -124,27 +122,31 @@ export class SignIn {
     }
     this.#set({ kind: "sending", email });
     try {
-      const login = await this.api.start(email);
-      this.#set({
-        kind: "waiting",
-        email,
-        matchCode: login.matchCode,
-        expiresAt: login.expiresAt,
-        offline: false,
-      });
-      this.#failures = 0;
-      this.#schedule(POLL_EVERY_MS);
+      this.#wait(email, await this.api.start(email));
     } catch (err) {
       this.#set({ kind: "signedOut", email, error: errorCode(err) });
     }
   }
 
-  /** resend emails a new link to the same address. */
+  /**
+   * resend emails a new link to the same address. The screen stays put while
+   * it is sent; if sending fails, the first link keeps working and polling
+   * picks up where it left off.
+   */
   async resend(): Promise<void> {
     const s = this.#state;
-    if (s.kind !== "waiting" && s.kind !== "expired") return;
+    if ((s.kind !== "waiting" && s.kind !== "expired") || s.resending) return;
     this.#stop();
-    await this.submit(s.email);
+    const epoch = this.#epoch;
+    this.#set({ ...s, resending: true, error: undefined });
+    try {
+      const login = await this.api.start(s.email);
+      if (epoch === this.#epoch) this.#wait(s.email, login);
+    } catch (err) {
+      if (epoch !== this.#epoch) return;
+      this.#set({ ...s, resending: false, error: errorCode(err) });
+      if (s.kind === "waiting") this.#schedule(POLL_EVERY_MS);
+    }
   }
 
   /** useDifferentEmail abandons the sign-in and goes back to the email. */
@@ -152,8 +154,22 @@ export class SignIn {
     const s = this.#state;
     if (s.kind !== "waiting" && s.kind !== "expired") return;
     this.#stop();
+    this.#epoch++;
     this.#set({ kind: "signedOut", email: s.email });
     await this.api.cancel();
+  }
+
+  #wait(email: string, login: LoginStart): void {
+    this.#set({
+      kind: "waiting",
+      email,
+      matchCode: login.matchCode,
+      expiresAt: login.expiresAt,
+      offline: false,
+      resending: false,
+    });
+    this.#failures = 0;
+    this.#schedule(POLL_EVERY_MS);
   }
 
   /** signOut ends the session and goes back to the email. */
@@ -169,9 +185,10 @@ export class SignIn {
     }
   }
 
-  /** dispose stops polling. */
+  /** dispose stops polling and drops any answer still on its way. */
   dispose(): void {
     this.#stop();
+    this.#epoch++;
   }
 
   #stop(): void {

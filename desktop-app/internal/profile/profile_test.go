@@ -1,6 +1,8 @@
 package profile_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"uuid"
 
@@ -42,4 +44,20 @@ func open(t *testing.T, dir string) *profile.Profile {
 		t.Fatalf("Open: %v", err)
 	}
 	return p
+}
+
+func TestUnreadableInstallIDIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "install-id"), []byte("not a uuid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	id := open(t, dir).InstallID()
+
+	if _, err := uuid.Parse(id); err != nil {
+		t.Fatalf("install id %q is not a UUID: %v", id, err)
+	}
+	if again := open(t, dir).InstallID(); again != id {
+		t.Errorf("reopened install id = %q, want %q", again, id)
+	}
 }

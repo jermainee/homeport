@@ -4,6 +4,10 @@
 /**
  * AuthService signs the member in with an email link and keeps the session
  * in the profile.
+ * 
+ * No API call holds the lock, so Cancel and SignOut never wait for a slow
+ * network. A call that finishes after Cancel or a newer Start (gen changed)
+ * drops its answer.
  * @module
  */
 
@@ -16,7 +20,8 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * Cancel forgets the sign-in in progress, so the member can start over.
+ * Cancel forgets the sign-in in progress, so the member can start over. A
+ * poll already on its way is dropped, even if the member approved.
  */
 export function Cancel(): $CancellablePromise<void> {
     return $Call.ByID(469566002);
@@ -48,7 +53,9 @@ export function SignOut(): $CancellablePromise<void> {
 
 /**
  * Start emails a sign-in link to email and returns the match code the
- * member compares on the page behind the link.
+ * member compares on the page behind the link. Until the API accepts the
+ * new sign-in, an earlier one stays pending, so a failed "send a new link"
+ * leaves the first link working.
  */
 export function Start(email: string): $CancellablePromise<$models.LoginStart> {
     return $Call.ByID(527797636, email);

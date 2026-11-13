@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/jermainee/homeport/desktop-app/internal/apiclient"
 )
@@ -17,6 +18,9 @@ const (
 	ErrOffline ErrorCode = "offline"
 	// ErrInvalidEmail: the API rejected the email address.
 	ErrInvalidEmail ErrorCode = "invalid_email"
+	// ErrClockSkew: this computer's clock is more than an hour off, so the
+	// API rejects the request's timestamp.
+	ErrClockSkew ErrorCode = "clock_skew"
 	// ErrRateLimited: too many attempts; wait a moment.
 	ErrRateLimited ErrorCode = "rate_limited"
 	// ErrEmailUnavailable: the API can't send sign-in links right now.
@@ -44,9 +48,9 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.err }
 
-// serviceError turns an API client error into an *Error. A 400 from the
-// sign-in start can only be about the email: the app makes the other fields.
-func serviceError(err error, badRequest ErrorCode) error {
+// serviceError turns an error from the API client or the profile into an
+// *Error the frontend can explain.
+func serviceError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -60,8 +64,6 @@ func serviceError(err error, badRequest ErrorCode) error {
 	switch {
 	case errors.As(err, &apiErr):
 		switch {
-		case apiErr.Status == http.StatusBadRequest && badRequest != "":
-			code = badRequest
 		case apiErr.Status == http.StatusTooManyRequests:
 			code = ErrRateLimited
 		case apiErr.Code == "email_unavailable":
@@ -71,4 +73,22 @@ func serviceError(err error, badRequest ErrorCode) error {
 		code = ErrOffline
 	}
 	return &Error{Code: code, err: err}
+}
+
+// maxClockSkew is how far the API lets a request_id's UUIDv7 timestamp run
+// ahead of its clock.
+const maxClockSkew = time.Hour
+
+// startError explains why starting a sign-in failed. The app makes every
+// field but the email, so `invalid_request` is about the email, unless the
+// API's clock shows that ours is too far off for the request_id.
+func startError(err error) error {
+	var apiErr *apiclient.Error
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest && apiErr.Code == "invalid_request" {
+		if !apiErr.ServerTime.IsZero() && time.Since(apiErr.ServerTime).Abs() > maxClockSkew {
+			return &Error{Code: ErrClockSkew, err: err}
+		}
+		return &Error{Code: ErrInvalidEmail, err: err}
+	}
+	return serviceError(err)
 }

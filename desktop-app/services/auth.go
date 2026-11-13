@@ -22,20 +22,27 @@ import (
 
 // AuthService signs the member in with an email link and keeps the session
 // in the profile.
+//
+// No API call holds the lock, so Cancel and SignOut never wait for a slow
+// network. A call that finishes after Cancel or a newer Start (gen changed)
+// drops its answer.
 type AuthService struct {
 	api     *apiclient.Client
 	profile *profile.Profile
 
 	mu      sync.Mutex
-	pending *pendingLogin
+	gen     uint64        // bumped by Cancel and SignOut
+	attempt *pendingLogin // a Start whose outcome is unknown, reused on retry
+	pending *pendingLogin // the sign-in the API accepted, which Poll checks
 }
 
-// pendingLogin is a sign-in the member has started but not yet approved.
+// pendingLogin is one sign-in attempt and, once the API accepts it, the
+// sign-in the member has to approve.
 type pendingLogin struct {
 	email     string
 	requestID string
 	token     string
-	id        string // login_request_id, empty until the API accepted it
+	id        string // login_request_id, set once the API accepted it
 }
 
 // NewAuthService returns an AuthService that calls api and keeps the
@@ -52,27 +59,38 @@ type LoginStart struct {
 }
 
 // Start emails a sign-in link to email and returns the match code the
-// member compares on the page behind the link.
+// member compares on the page behind the link. Until the API accepts the
+// new sign-in, an earlier one stays pending, so a failed "send a new link"
+// leaves the first link working.
 func (s *AuthService) Start(ctx context.Context, email string) (LoginStart, error) {
 	email = strings.TrimSpace(email)
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
+	s.mu.Lock()
 	// A retry after an unknown outcome reuses the attempt, so the API
 	// replays its first answer instead of emailing a second link.
-	p := s.pending
-	if p == nil || p.id != "" || p.email != email {
+	p := s.attempt
+	if p == nil || p.email != email {
 		p = &pendingLogin{email: email, requestID: uuid.NewV7().String(), token: newSessionToken()}
 	}
-	s.pending = p
+	s.attempt = p
+	gen := s.gen
+	s.mu.Unlock()
+
 	lr, err := s.api.CreateLoginRequest(ctx, p.requestID, email, sha256Hex(p.token))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen || s.attempt != p {
+		return LoginStart{}, &Error{Code: ErrNoSignIn}
+	}
 	if err != nil {
 		if !retryable(err) {
-			s.pending = nil
+			s.attempt = nil
 		}
-		return LoginStart{}, serviceError(err, ErrInvalidEmail)
+		return LoginStart{}, startError(err)
 	}
-	p.id = lr.ID
+	s.attempt = nil
+	s.pending = &pendingLogin{email: email, requestID: p.requestID, token: p.token, id: lr.ID}
 	return LoginStart{Email: email, MatchCode: lr.MatchCode, ExpiresAt: lr.ExpiresAt}, nil
 }
 
@@ -89,10 +107,17 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Cancel forgets the sign-in in progress, so the member can start over.
+// Cancel forgets the sign-in in progress, so the member can start over. A
+// poll already on its way is dropped, even if the member approved.
 func (s *AuthService) Cancel() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.forgetLocked()
+}
+
+func (s *AuthService) forgetLocked() {
+	s.gen++
+	s.attempt = nil
 	s.pending = nil
 }
 
@@ -117,28 +142,35 @@ type PollResult struct {
 // they have, it saves the session in the profile.
 func (s *AuthService) Poll(ctx context.Context) (PollResult, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	p := s.pending
-	if p == nil || p.id == "" {
+	p, gen := s.pending, s.gen
+	s.mu.Unlock()
+	if p == nil {
 		return PollResult{}, &Error{Code: ErrNoSignIn}
 	}
+
 	st, err := s.api.GetLoginRequest(ctx, p.id, p.token)
-	if apiclient.IsStatus(err, http.StatusGone) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen || s.pending != p {
+		// Cancelled, or replaced by a newer sign-in, while asking.
+		return PollResult{}, &Error{Code: ErrNoSignIn}
+	}
+	switch {
+	case apiclient.IsStatus(err, http.StatusGone):
 		s.pending = nil
 		return PollResult{Status: LoginExpired}, nil
-	}
-	if err != nil {
-		if !retryable(err) {
-			s.pending = nil
-		}
-		return PollResult{}, serviceError(err, "")
-	}
-	if !st.Approved {
+	case err != nil && !retryable(err):
+		// The API refuses this sign-in for good (401, 404).
+		s.pending = nil
+		return PollResult{}, &Error{Code: ErrNoSignIn, err: err}
+	case err != nil:
+		return PollResult{}, serviceError(err)
+	case !st.Approved:
 		return PollResult{Status: LoginPending}, nil
 	}
 	if err := s.profile.SaveSession(profile.Session{Token: p.token, MemberID: st.MemberID, ExpiresAt: st.ExpiresAt}); err != nil {
-		return PollResult{}, serviceError(err, "")
+		return PollResult{}, serviceError(err)
 	}
 	s.pending = nil
 	return PollResult{Status: LoginApproved}, nil
@@ -162,16 +194,20 @@ type Credits struct {
 // Current returns the signed-in member, or nil when nobody is signed in.
 func (s *AuthService) Current(ctx context.Context) (*Member, error) {
 	sess, ok, err := s.profile.Session()
-	if err != nil || !ok {
-		return nil, serviceError(err, "")
+	if err != nil {
+		// An unreadable session file can't sign anyone in; start over.
+		return nil, serviceError(s.profile.ClearSession())
+	}
+	if !ok {
+		return nil, nil
 	}
 	m, err := s.api.Me(ctx, sess.Token)
 	if apiclient.IsStatus(err, http.StatusUnauthorized) {
 		// Signed out elsewhere, or the session ran out.
-		return nil, serviceError(s.profile.ClearSession(), "")
+		return nil, serviceError(s.profile.ClearSession())
 	}
 	if err != nil {
-		return nil, serviceError(err, "")
+		return nil, serviceError(err)
 	}
 	return &Member{
 		MemberID:       m.MemberID,
@@ -200,8 +236,8 @@ func retryable(err error) bool {
 // only in this profile, so nobody can use it afterwards.
 func (s *AuthService) SignOut(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pending = nil
+	s.forgetLocked()
+	s.mu.Unlock()
 
 	sess, ok, _ := s.profile.Session() // an unreadable file is cleared below
 	if ok {
@@ -209,7 +245,7 @@ func (s *AuthService) SignOut(ctx context.Context) error {
 		_ = s.api.DeleteSession(ctx, sess.Token) // best effort, see above
 		cancel()
 	}
-	return serviceError(s.profile.ClearSession(), "")
+	return serviceError(s.profile.ClearSession())
 }
 
 const signOutTimeout = 5 * time.Second

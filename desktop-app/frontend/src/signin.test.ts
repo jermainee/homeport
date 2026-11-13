@@ -1,59 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SignIn, type AuthApi, type LoginStart, type Member } from "./signin";
-
-const member: Member = {
-  memberId: "01a1c4af-8795-7a28-9249-adbd2ba1c04a",
-  email: "member@example.com",
-  identityStatus: "unverified",
-  credits: { purchased: 0, earnedPending: 0, earnedCashable: 0 },
-};
-
-// serviceError is how a Go service error reaches the webview: Wails rejects
-// the call with an Error whose cause is the marshalled *services.Error.
-function serviceError(code: string): Error {
-  return Object.assign(new Error(`${code}: details for the log`), { cause: { code } });
-}
-
-// FakeAuth stands in for the Go AuthService behind the Wails bindings.
-class FakeAuth implements AuthApi {
-  signedIn: Member | null = null;
-  currentError: Error | null = null;
-  startError: Error | null = null;
-  pollResults: Array<"pending" | "approved" | "expired" | Error> = [];
-  starts: string[] = [];
-  polls = 0;
-  cancels = 0;
-  signOuts = 0;
-  code = 482913;
-
-  async current() {
-    if (this.currentError) throw this.currentError;
-    return this.signedIn;
-  }
-  async start(email: string): Promise<LoginStart> {
-    this.starts.push(email);
-    if (this.startError) throw this.startError;
-    return {
-      email,
-      matchCode: String(this.code++),
-      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
-    };
-  }
-  async poll() {
-    this.polls++;
-    const next = this.pollResults.shift() ?? "pending";
-    if (next instanceof Error) throw next;
-    if (next === "approved") this.signedIn = member;
-    return { status: next };
-  }
-  async cancel() {
-    this.cancels++;
-  }
-  async signOut() {
-    this.signOuts++;
-    this.signedIn = null;
-  }
-}
+import { SignIn, errorCode, type LoginStart, type State } from "./signin";
+import { FakeAuth, member, serviceError } from "./test/fake-auth";
 
 let auth: FakeAuth;
 let signIn: SignIn;
@@ -235,5 +182,62 @@ describe("signed in", () => {
 
     expect(auth.signOuts).toBe(1);
     expect(signIn.state).toEqual({ kind: "signedOut", email: "member@example.com" });
+  });
+});
+
+describe("sending a new link", () => {
+  beforeEach(async () => {
+    await signIn.boot();
+    await signIn.submit("member@example.com");
+  });
+
+  it("stays on the waiting screen and shows the new code", async () => {
+    const seen: State[] = [];
+    signIn.subscribe((s) => seen.push(s));
+
+    await signIn.resend();
+
+    expect(seen.map((s) => s.kind)).toEqual(["waiting", "waiting"]);
+    expect(seen[0]).toMatchObject({ matchCode: "482913", resending: true });
+    expect(signIn.state).toMatchObject({ kind: "waiting", matchCode: "482914", resending: false });
+  });
+
+  it("keeps waiting for the first link when the new one can't be sent", async () => {
+    auth.startError = serviceError("rate_limited");
+
+    await signIn.resend();
+
+    expect(signIn.state).toMatchObject({
+      kind: "waiting",
+      matchCode: "482913",
+      resending: false,
+      error: "rate_limited",
+    });
+    auth.pollResults = ["approved"];
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(signIn.state).toEqual({ kind: "signedIn", member });
+  });
+
+  it("drops the answer when the member goes back meanwhile", async () => {
+    let answer!: (l: LoginStart) => void;
+    auth.start = (email) => {
+      auth.starts.push(email);
+      return new Promise((resolve) => (answer = resolve));
+    };
+    const resent = signIn.resend();
+
+    await signIn.useDifferentEmail();
+    answer({ email: "member@example.com", matchCode: "999999", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    await resent;
+
+    expect(signIn.state).toEqual({ kind: "signedOut", email: "member@example.com" });
+  });
+});
+
+describe("errorCode", () => {
+  it("reads the code from a Go service error and falls back to unexpected", () => {
+    expect(errorCode(serviceError("clock_skew"))).toBe("clock_skew");
+    expect(errorCode(serviceError("something_new"))).toBe("unexpected");
+    expect(errorCode(new TypeError("boom"))).toBe("unexpected");
   });
 });

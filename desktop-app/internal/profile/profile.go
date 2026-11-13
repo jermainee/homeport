@@ -62,9 +62,8 @@ func (p *Profile) loadInstallID() (string, error) {
 		if id, err := uuid.Parse(strings.TrimSpace(string(b))); err == nil {
 			return id.String(), nil
 		}
-		return "", fmt.Errorf("profile: %s is not a UUID", path)
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+		// Damaged: a new id is better than an app that won't start.
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("profile: %w", err)
 	}
 	id := uuid.NewV4().String()
