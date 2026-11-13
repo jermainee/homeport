@@ -53,14 +53,56 @@ type Config struct {
 	// MaxPendingFlowsPerPeer caps the flows one tunnel address may have
 	// waiting on the Dialer; more are refused with a reset. 0 means 64.
 	MaxPendingFlowsPerPeer int
+
+	// Access decides what each peer may reach. Nil allows everything.
+	Access AccessControl
+
+	// OnLineEvent, if set, is called when a line's agent connects or
+	// disconnects. It must return quickly and must not call the Server.
+	OnLineEvent func(LineEvent)
 }
 
 // Peer is a member device allowed to connect.
 type Peer struct {
+	ID         string // the control plane's peer ID, which usage reports name
 	PublicKey  Key
 	IPv4, IPv6 netip.Addr // tunnel addresses; at least one is required
 	MemberID   string     // the member who owns the device
 	LineID     string     // the line its traffic exits through
+}
+
+// Access is what a peer may reach with a new flow.
+type Access int
+
+const (
+	// AccessNone refuses every flow.
+	AccessNone Access = iota
+	// AccessFull allows any destination.
+	AccessFull
+	// AccessTopUp allows only DNS through the virtual resolver and TLS on
+	// port 443 to a host the AccessControl's TopUpHost accepts, judged by
+	// the server name in the ClientHello. A member without credits can
+	// still buy some.
+	AccessTopUp
+)
+
+// AccessControl decides what each peer may reach, for example from its
+// quota lease. Without one (Config.Access nil) every peer has AccessFull.
+type AccessControl interface {
+	// Access is asked before each new flow of the peer is dialed. It may
+	// block until ctx ends, for example while it asks for a lease.
+	Access(ctx context.Context, p Peer) Access
+	// TopUpHost reports whether a peer with AccessTopUp may open a TLS
+	// connection to host.
+	TopUpHost(host string) bool
+}
+
+// LineEvent tells that a line's agent connected (Online) or disconnected.
+type LineEvent struct {
+	LineID       string
+	Online       bool
+	ObservedIP   netip.Addr // the agent's public IP as the gateway sees it
+	AgentVersion string     // from the agent's hello
 }
 
 // Line is a member's shared line, served by the agent with AgentPin.
@@ -84,6 +126,7 @@ type Server struct {
 	cfg    Config
 	dev    *device.Device
 	meter  *wgstack.Meter
+	stack  *wgstack.Stack
 	relay  *relay.Relay // nil when Config.Dialer replaces it
 	port   uint16
 	mu     sync.Mutex
@@ -113,7 +156,11 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{cfg: cfg, peers: make(map[Key]Peer), byAddr: make(map[netip.Addr]Key), lines: make(map[string]Line)}
 	dialer := cfg.Dialer
 	if dialer == nil {
-		r, err := relay.Listen(cfg.QUICListen, cfg.Certificate, netip.AddrPortFrom(cfg.DNS, 53))
+		onEvent := func(relay.Event) {}
+		if cfg.OnLineEvent != nil {
+			onEvent = func(e relay.Event) { cfg.OnLineEvent(LineEvent(e)) }
+		}
+		r, err := relay.Listen(cfg.QUICListen, cfg.Certificate, netip.AddrPortFrom(cfg.DNS, 53), onEvent)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: %w", err)
 		}
@@ -121,11 +168,16 @@ func New(cfg Config) (*Server, error) {
 		dialer = router{s}
 	}
 	s.meter = wgstack.NewMeter()
-	st, err := wgstack.New(cfg.MTU, s.meter, dialer, cfg.MaxPendingFlowsPerPeer)
+	var pol wgstack.Policy
+	if cfg.Access != nil {
+		pol = policy{s}
+	}
+	st, err := wgstack.New(cfg.MTU, s.meter, dialer, pol, cfg.MaxPendingFlowsPerPeer)
 	if err != nil {
 		s.closeRelay()
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
+	s.stack = st
 	dev := device.NewDevice(st, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)
 	fail := func(err error) (*Server, error) {
@@ -217,6 +269,31 @@ func (r router) DialUDP(ctx context.Context, f Flow) (net.Conn, error) {
 	return r.s.relay.DialUDP(ctx, lineID, f.Dst)
 }
 
+// policy asks Config.Access what each new flow's peer may reach.
+type policy struct{ s *Server }
+
+func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
+	s := p.s
+	s.mu.Lock()
+	peer, ok := s.peers[s.byAddr[f.Peer]]
+	s.mu.Unlock()
+	if !ok {
+		return wgstack.Admission{}
+	}
+	switch s.cfg.Access.Access(ctx, peer) {
+	case AccessFull:
+		return wgstack.Admission{Allow: true}
+	case AccessTopUp:
+		if f.Dst == netip.AddrPortFrom(s.cfg.DNS, 53) {
+			return wgstack.Admission{Allow: true}
+		}
+		if f.Dst.Port() == 443 {
+			return wgstack.Admission{Allow: true, ServerName: s.cfg.Access.TopUpHost}
+		}
+	}
+	return wgstack.Admission{}
+}
+
 // lineFor returns the line a peer's flows exit through. A member never
 // exits through their own line.
 func (s *Server) lineFor(addr netip.Addr) (string, error) {
@@ -292,24 +369,49 @@ func sharesAddress(a, b Peer) bool {
 	return (a.IPv4.IsValid() && a.IPv4 == b.IPv4) || (a.IPv6.IsValid() && a.IPv6 == b.IPv6)
 }
 
-// RemovePeer disconnects a member device and returns its final usage, so
-// bytes counted since the last report can still be billed. Its packets are
-// refused from now on.
+// RemovePeer disconnects a member device, ends its open flows and returns
+// its final usage, so bytes counted since the last report can still be
+// billed. Its packets are refused from now on.
 func (s *Server) RemovePeer(publicKey Key) (Usage, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	p, ok := s.peers[publicKey]
 	if !ok {
+		s.mu.Unlock()
 		return Usage{}, nil
 	}
 	if err := s.dev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", hex.EncodeToString(publicKey[:]))); err != nil {
+		s.mu.Unlock()
 		return Usage{}, fmt.Errorf("gateway: remove peer: %w", err)
 	}
 	up, down := s.meter.Remove(wgstack.PeerID(publicKey))
 	delete(s.byAddr, p.IPv4)
 	delete(s.byAddr, p.IPv6)
 	delete(s.peers, publicKey)
+	s.mu.Unlock()
+	s.stack.ResetFlows(p.IPv4, p.IPv6)
 	return Usage{Up: up, Down: down}, nil
+}
+
+// ResetPeerFlows ends the peer's open flows. A TCP client gets a reset.
+func (s *Server) ResetPeerFlows(publicKey Key) {
+	s.mu.Lock()
+	p, ok := s.peers[publicKey]
+	s.mu.Unlock()
+	if ok {
+		s.stack.ResetFlows(p.IPv4, p.IPv6)
+	}
+}
+
+// SuspendPeer cuts a peer off (true) or lets it back (false). A suspended
+// peer's open flows end, and its packets are dropped without being counted:
+// once SuspendPeer(key, true) returns, its usage is final until it is let
+// back. The peer stays configured, so it can be let back without a new
+// WireGuard handshake.
+func (s *Server) SuspendPeer(publicKey Key, suspended bool) {
+	if suspended {
+		s.ResetPeerFlows(publicKey) // first, so the resets may still reach the client
+	}
+	s.meter.SetSuspended(wgstack.PeerID(publicKey), suspended)
 }
 
 // PeerUsage returns the bytes counted for the peer with this tunnel address.
