@@ -26,6 +26,7 @@ The spec links each example to its operation with `externalValue`. The example f
   - The batch endpoints carry an `event_id` (UUIDv7) on every event instead, and answer each event as `applied`, `duplicate` or `rejected`.
   - A retried request gets the first response again, so no response carries a secret. The app creates the session token itself and sends only its SHA-256 when it starts a sign-in.
 - **Lowercase UUIDs** everywhere.
+- **Body size limits:** each request body states its limit in `x-max-body-bytes`. The limit is 16 KB, or 128 KB for the gateway's batch endpoints, which fits 100 events at their largest. A larger body gets `413 payload_too_large`.
 - **Bytes, not prices:**
   - Leases and usage are counted in bytes, and the gateway never sees a price.
   - Credits and euros stay in the API's pricing module.
@@ -85,3 +86,5 @@ CI runs `npm ci`, `lint`, `typecheck` and `test` on every pull request that touc
      ```
 
   4. Add `contracts/**` to the folder's CI path filter.
+
+  ajv compiles schemas with `new Function`, which workerd forbids. Run the validation in Node, for example in `vitest.config.ts` behind a Miniflare service binding, not inside the Worker isolate.

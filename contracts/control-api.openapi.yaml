@@ -34,6 +34,9 @@ info:
       response.
     - The same `request_id` with a different body gets
       `409 idempotency_conflict`.
+    - A retry that arrives while the first request with that `request_id`
+      is still running gets `429 rate_limited` with `Retry-After: 1`.
+    - A 5xx response is not stored, so a retry after one runs again.
     - A `request_id` whose UUIDv7 timestamp is more than 24 hours in the past
       gets `400 request_id_expired`; more than 1 hour in the future gets
       `400 invalid_request`. The API keeps each `request_id` for 25 hours
@@ -46,6 +49,12 @@ info:
     PUT, PATCH and DELETE are idempotent by their own semantics.
 
     UUIDs are lowercase, in requests and responses.
+
+    ## Body size
+
+    Each request body states its limit in `x-max-body-bytes`: 16 KB, or
+    128 KB for the gateway's batch endpoints, which fits 100 events at their
+    largest. A larger body gets `413 payload_too_large`.
 
     ## Schemas
 
@@ -99,6 +108,7 @@ paths:
               self:
                 summary: Frankfurt gateway
                 externalValue: examples/gateway/self.json
+        x-max-body-bytes: 16384
       responses:
         "204":
           description: Stored.
@@ -106,6 +116,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
   /v1/gateway/config:
     get:
       tags: [gateway]
@@ -180,6 +192,7 @@ paths:
               renewal:
                 summary: Renewal of the session's current lease
                 externalValue: examples/gateway/lease-request.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: "`supersedes_lease_id` was already superseded. This is that successor lease."
@@ -228,6 +241,10 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/gateway/leases/{lease_id}/return:
     post:
       tags: [gateway]
@@ -253,6 +270,7 @@ paths:
               return:
                 summary: Return at session end
                 externalValue: examples/gateway/lease-return-request.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: Returned.
@@ -272,6 +290,10 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/gateway/usage:
     post:
       tags: [gateway]
@@ -297,6 +319,7 @@ paths:
               batch:
                 summary: Two events of one session and the last of another
                 externalValue: examples/gateway/usage-batch.json
+        x-max-body-bytes: 131072
       responses:
         "200":
           description: One result per event, in request order.
@@ -312,6 +335,10 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/gateway/line-events:
     post:
       tags: [gateway]
@@ -332,6 +359,7 @@ paths:
               events:
                 summary: A line reconnecting
                 externalValue: examples/gateway/line-events.json
+        x-max-body-bytes: 131072
       responses:
         "200":
           description: One result per event, in request order.
@@ -347,6 +375,10 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/auth/login-requests:
     post:
       tags: [auth]
@@ -373,6 +405,7 @@ paths:
               login:
                 summary: Sign-in from the desktop app
                 externalValue: examples/member/login-request.json
+        x-max-body-bytes: 16384
       responses:
         "201":
           description: Link sent.
@@ -390,6 +423,19 @@ paths:
           $ref: "#/components/responses/IdempotencyConflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          description: Sign-in links can't be sent in this environment. Nothing was stored, so a retry with the same `request_id` runs again.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        const: email_unavailable
   /v1/auth/login-requests/{login_request_id}/poll:
     post:
       tags: [auth]
@@ -414,6 +460,7 @@ paths:
               poll:
                 summary: Poll with the secret from the login request
                 externalValue: examples/member/login-poll.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: Approved. The session token is now active.
@@ -444,11 +491,27 @@ paths:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/Error"
-                  - properties:
+                  - type: object
+                    properties:
                       error:
                         const: login_request_expired
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /v1/auth/session:
+    delete:
+      tags: [auth]
+      operationId: deleteSession
+      summary: Sign out
+      description: Ends the session whose token the request carries. The member's other sessions stay signed in.
+      security:
+        - memberSession: []
+      responses:
+        "204":
+          description: Signed out. The token no longer works.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/me:
     get:
       tags: [member]
@@ -487,6 +550,7 @@ paths:
               start:
                 summary: Start the identity check
                 externalValue: examples/member/identity-session-request.json
+        x-max-body-bytes: 16384
       responses:
         "201":
           description: Verification session created.
@@ -505,9 +569,14 @@ paths:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/Error"
-                  - properties:
+                  - type: object
+                    properties:
                       error:
                         enum: [idempotency_conflict, identity_already_verified]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/checkout/sessions:
     post:
       tags: [member]
@@ -526,6 +595,7 @@ paths:
               buy:
                 summary: Buy one credit pack
                 externalValue: examples/member/checkout-session-request.json
+        x-max-body-bytes: 16384
       responses:
         "201":
           description: Checkout session created.
@@ -541,6 +611,10 @@ paths:
           $ref: "#/components/responses/IdentityRequired"
         "409":
           $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/devices:
     post:
       tags: [share]
@@ -562,6 +636,7 @@ paths:
               mac:
                 summary: The desktop app on a Mac
                 externalValue: examples/member/device-request.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: The key was already registered by this member.
@@ -590,9 +665,14 @@ paths:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/Error"
-                  - properties:
+                  - type: object
+                    properties:
                       error:
                         enum: [idempotency_conflict, agent_key_taken]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/lines:
     post:
       tags: [share]
@@ -614,6 +694,7 @@ paths:
               line:
                 summary: Line for the registered Mac
                 externalValue: examples/member/line-request.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: The device already has this line.
@@ -641,6 +722,10 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/lines/{line_id}:
     patch:
       tags: [share]
@@ -660,6 +745,7 @@ paths:
               share:
                 summary: Turn Share on
                 externalValue: examples/member/line-update.json
+        x-max-body-bytes: 16384
       responses:
         "200":
           description: Updated.
@@ -675,6 +761,8 @@ paths:
           $ref: "#/components/responses/IdentityRequired"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
   /v1/lines/available:
     get:
       tags: [use]
@@ -723,6 +811,7 @@ paths:
               phone:
                 summary: Config for a phone
                 externalValue: examples/member/wireguard-peer-request.json
+        x-max-body-bytes: 16384
       responses:
         "201":
           description: Created.
@@ -747,7 +836,8 @@ paths:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/Error"
-                  - properties:
+                  - type: object
+                    properties:
                       error:
                         enum: [identity_required, line_not_allowed]
         "404":
@@ -761,9 +851,14 @@ paths:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/Error"
-                  - properties:
+                  - type: object
+                    properties:
                       error:
                         enum: [idempotency_conflict, line_full, public_key_taken]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
     get:
       tags: [use]
       operationId: listWireguardPeers
@@ -859,7 +954,8 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     enum: [invalid_request, request_id_expired]
     Unauthorized:
@@ -869,7 +965,8 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     const: unauthorized
     IdentityRequired:
@@ -879,7 +976,8 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     const: identity_required
     NotFound:
@@ -889,7 +987,8 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     const: not_found
     IdempotencyConflict:
@@ -899,11 +998,23 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     const: idempotency_conflict
+    PayloadTooLarge:
+      description: The body is larger than the request body's `x-max-body-bytes`.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: payload_too_large
     TooManyRequests:
-      description: Too many requests. Retry after the `Retry-After` header's seconds.
+      description: Too many requests, or a retry that arrived while the first request with its `request_id` is still running. Retry after the `Retry-After` header's seconds.
       headers:
         Retry-After:
           schema:
@@ -914,7 +1025,8 @@ components:
           schema:
             allOf:
               - $ref: "#/components/schemas/Error"
-              - properties:
+              - type: object
+                properties:
                   error:
                     const: rate_limited
   schemas:

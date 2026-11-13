@@ -229,3 +229,86 @@ test("an unreadable example is reported, not thrown", () => {
   assert.equal(errors.length, 1);
   assert.match(errors[0], /missing\.json/);
 });
+
+/** @returns {{ method: string, path: string, status: string, operation: any }[]} */
+function jsonResponses() {
+  return operations().flatMap(({ method, path, operation }) =>
+    Object.keys(operation.responses).map((status) => ({ method, path, status, operation })),
+  );
+}
+
+test("every response with a JSON body can be validated", () => {
+  for (const { method, path, status, operation } of jsonResponses()) {
+    const response = operation.responses[status];
+    const ref = response.$ref?.replace("#/components/responses/", "");
+    const content = (ref ? contract.spec.components.responses[ref] : response).content;
+    if (!content) continue;
+    assert.doesNotThrow(() => contract.validateResponse(method, path, status, {}), `${method} ${path} ${status}`);
+  }
+});
+
+test("an error body must use a code its response lists", () => {
+  const validate = (/** @type {unknown} */ body) => contract.validateResponse("GET", "/v1/me", 401, body).errors;
+  assert.deepEqual(validate({ error: "unauthorized" }), []);
+  assert.deepEqual(validate({ error: "unauthorized", message: "token expired" }), []);
+  assert.notDeepEqual(validate({ error: "not_found" }), []);
+  assert.notDeepEqual(validate({ error: "unauthorized", detail: "x" }), []);
+});
+
+test("a member can sign out the session they hold", () => {
+  const signOut = contract.spec.paths["/v1/auth/session"]?.delete;
+  assert.ok(signOut, "DELETE /v1/auth/session is missing");
+  assert.deepEqual(Object.keys(signOut.responses).sort(), ["204", "401"]);
+});
+
+test("a login request can fail with 503 email_unavailable", () => {
+  const body = { error: "email_unavailable" };
+  assert.deepEqual(contract.validateResponse("POST", "/v1/auth/login-requests", 503, body).errors, []);
+});
+
+test("every request body has a size limit with a 413, and every POST can answer 429", () => {
+  for (const { method, path, operation } of operations()) {
+    const responses = Object.keys(operation.responses);
+    if (operation.requestBody) {
+      assert.ok(Number.isInteger(operation.requestBody["x-max-body-bytes"]), `${method} ${path}: x-max-body-bytes`);
+      assert.ok(responses.includes("413"), `${method} ${path}: 413`);
+    }
+    if (method === "post") assert.ok(responses.includes("429"), `${method} ${path}: 429`);
+  }
+  const body = { error: "payload_too_large" };
+  assert.deepEqual(contract.validateResponse("POST", "/v1/gateway/usage", 413, body).errors, []);
+});
+
+test("a batch of 100 events at their largest fits the body limit", () => {
+  const uuid = "01a1d422-9a80-71fd-82cf-7d6096776eeb";
+  const int64 = 9223372036854775807;
+  const at = "2026-11-13T09:00:00.000000+00:00";
+  const ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+  const usageEvent = {
+    event_id: uuid,
+    session_id: uuid,
+    peer_id: uuid,
+    line_id: uuid,
+    lease_id: uuid,
+    seq: 0,
+    bytes_up: int64,
+    bytes_down: int64,
+    period_start: at,
+    period_end: at,
+    final: false,
+    session_start: { started_at: at, exit_ip: ipv6 },
+  };
+  const lineEvent = { event_id: uuid, line_id: uuid, type: "offline", observed_ip: ipv6, agent_version: "10.20.30-rc.1", at };
+  /** @type {[string, object][]} */
+  const batches = [
+    ["/v1/gateway/usage", usageEvent],
+    ["/v1/gateway/line-events", lineEvent],
+  ];
+  for (const [path, event] of batches) {
+    const body = { events: Array.from({ length: 100 }, () => event) };
+    assert.deepEqual(contract.validateRequest("POST", path, body).errors, [], path);
+    const limit = contract.spec.paths[path].post.requestBody["x-max-body-bytes"];
+    const size = Buffer.byteLength(JSON.stringify(body, null, 2));
+    assert.ok(size <= limit, `${path}: ${size} bytes > ${limit}`);
+  }
+});
