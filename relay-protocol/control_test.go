@@ -17,7 +17,7 @@ import (
 // controlFrame builds a control message the way another implementation
 // would: a big-endian u32 length followed by the JSON text.
 func controlFrame(jsonText string) []byte {
-	return append(binary.BigEndian.AppendUint32(nil, uint32(len(jsonText))), jsonText...)
+	return append(binary.BigEndian.AppendUint32(nil, uint32(len(jsonText))), jsonText...) //nolint:gosec // Test messages are tiny.
 }
 
 func TestControlMessagesRoundTrip(t *testing.T) {
@@ -154,7 +154,7 @@ func TestWriteControlRejectsInvalidMessages(t *testing.T) {
 		{"nil", nil},
 		{"hello_ack without line", rp.HelloAck{ObservedIP: netip.MustParseAddr("203.0.113.9")}},
 		{"hello_ack without IP", rp.HelloAck{LineID: "line_7"}},
-		{"hello_ack with IPv4-mapped IP", rp.HelloAck{LineID: "line_7", ObservedIP: netip.MustParseAddr("::ffff:203.0.113.9")}},
+		{"nil pointer", (*rp.HelloAck)(nil)},
 		{"hello too large", rp.Hello{AgentVersion: strings.Repeat("9", rp.MaxControlLen)}},
 	}
 	for _, tt := range tests {
@@ -177,5 +177,43 @@ func TestControlMessageWrittenInOneWrite(t *testing.T) {
 	}
 	if w.writes != 1 {
 		t.Fatalf("WriteControl used %d writes, want 1", w.writes)
+	}
+}
+
+func TestWriteControlAcceptsPointers(t *testing.T) {
+	var buf bytes.Buffer
+	if err := rp.WriteControl(&buf, &rp.Stats{FlowsActive: 4}); err != nil {
+		t.Fatalf("WriteControl(&Stats): %v", err)
+	}
+	got, err := rp.ReadControl(&buf)
+	if err != nil {
+		t.Fatalf("ReadControl: %v", err)
+	}
+	if want := (rp.Stats{FlowsActive: 4}); got != want {
+		t.Fatalf("ReadControl = %#v, want %#v", got, want)
+	}
+}
+
+func TestWriteControlSendsIPv4MappedObservedIPAsIPv4(t *testing.T) {
+	// A gateway listening on a dual-stack socket sees IPv4 agents as
+	// ::ffff:a.b.c.d; the agent compares the IP with IPv4 destinations.
+	var buf bytes.Buffer
+	ack := rp.HelloAck{LineID: "line_7", ObservedIP: netip.MustParseAddr("::ffff:203.0.113.9")}
+	if err := rp.WriteControl(&buf, ack); err != nil {
+		t.Fatalf("WriteControl: %v", err)
+	}
+	got, err := rp.ReadControl(&buf)
+	if err != nil {
+		t.Fatalf("ReadControl: %v", err)
+	}
+	if ip := got.(rp.HelloAck).ObservedIP; ip != netip.MustParseAddr("203.0.113.9") {
+		t.Fatalf("observed_ip = %s, want 203.0.113.9", ip)
+	}
+}
+
+func TestControlErrorsNeverNameTheObservedIP(t *testing.T) {
+	r := bytes.NewReader(controlFrame(`{"type":"hello_ack","line_id":"line_7","observed_ip":"::ffff:203.0.113.9"}`))
+	if _, err := rp.ReadControl(r); err == nil || strings.Contains(err.Error(), "203.0.113.9") {
+		t.Fatalf("ReadControl error %q names the IP", err)
 	}
 }

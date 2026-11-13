@@ -19,7 +19,10 @@ const (
 	// UDP frames (see [WriteUDPFrame]) in both directions.
 	KindUDP Kind = 2
 	// KindDNS relays DNS queries that the agent answers through its system
-	// resolver. Each UDP frame holds one DNS message.
+	// resolver. Each UDP frame holds one DNS message. It carries both DNS
+	// over UDP and DNS over TCP to the virtual resolver: DNS over TCP's own
+	// 2-byte length prefix is the UDP frame format, so its byte stream
+	// passes through unchanged.
 	KindDNS Kind = 3
 )
 
@@ -87,18 +90,33 @@ func (f FlowOpen) AppendBinary(b []byte) ([]byte, error) {
 }
 
 func (f FlowOpen) validate() error {
-	addr := f.Dst.Addr()
+	if err := checkKindPort(f.Kind, f.Dst.Port()); err != nil {
+		return err
+	}
+	return checkAddr(f.Dst.Addr())
+}
+
+// checkKindPort checks the fixed-size fields of a FlowOpen.
+func checkKindPort(kind Kind, port uint16) error {
 	switch {
-	case !f.Kind.valid():
-		return fmt.Errorf("%w: unknown flow kind %d", ErrMalformed, f.Kind)
+	case !kind.valid():
+		return fmt.Errorf("%w: unknown flow kind %d", ErrMalformed, kind)
+	case port == 0:
+		return fmt.Errorf("%w: destination port 0", ErrMalformed)
+	}
+	return nil
+}
+
+// checkAddr checks a FlowOpen destination address. Its errors never contain
+// the address, because callers log them and logs never hold destinations.
+func checkAddr(addr netip.Addr) error {
+	switch {
 	case !addr.IsValid():
 		return fmt.Errorf("%w: flow has no destination address", ErrMalformed)
 	case addr.Is4In6():
-		return fmt.Errorf("%w: IPv4-mapped IPv6 address %s; send it as IPv4", ErrMalformed, addr)
+		return fmt.Errorf("%w: IPv4-mapped IPv6 destination; send it as IPv4", ErrMalformed)
 	case addr.Zone() != "":
-		return fmt.Errorf("%w: zoned address %s", ErrMalformed, addr)
-	case f.Dst.Port() == 0:
-		return fmt.Errorf("%w: destination port 0", ErrMalformed)
+		return fmt.Errorf("%w: destination address has a zone", ErrMalformed)
 	}
 	return nil
 }
@@ -143,23 +161,20 @@ func ReadFlowOpen(r io.Reader) (FlowOpen, error) {
 	default:
 		return FlowOpen{}, fmt.Errorf("%w: unknown address family %d", ErrMalformed, family)
 	}
-	switch {
-	case !kind.valid():
-		return FlowOpen{}, fmt.Errorf("%w: unknown flow kind %d", ErrMalformed, kind)
-	case flags != 0:
-		return FlowOpen{}, fmt.Errorf("%w: reserved flags %#02x set", ErrMalformed, flags)
-	case port == 0:
-		return FlowOpen{}, fmt.Errorf("%w: destination port 0", ErrMalformed)
+	if flags != 0 {
+		return FlowOpen{}, fmt.Errorf("%w: reserved flags %#04x set", ErrMalformed, flags)
+	}
+	if err := checkKindPort(kind, port); err != nil {
+		return FlowOpen{}, err
 	}
 	if err := readFull(r, buf[flowOpenFixedLen:flowOpenFixedLen+addrLen]); err != nil {
 		return FlowOpen{}, err
 	}
 	addr, _ := netip.AddrFromSlice(buf[flowOpenFixedLen : flowOpenFixedLen+addrLen])
-	f := FlowOpen{Kind: kind, Dst: netip.AddrPortFrom(addr, port)}
-	if err := f.validate(); err != nil {
+	if err := checkAddr(addr); err != nil {
 		return FlowOpen{}, err
 	}
-	return f, nil
+	return FlowOpen{Kind: kind, Dst: netip.AddrPortFrom(addr, port)}, nil
 }
 
 // Status is the agent's answer to a FlowOpen.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,13 +57,13 @@ func (p pair) gatewayTLS() *tls.Config {
 
 // handshakeTCP runs a TLS handshake between the two configs over loopback
 // TCP and returns each side's error.
-func handshakeTCP(t *testing.T, agentCfg, gatewayCfg *tls.Config) (agentErr, gatewayErr error, state tls.ConnectionState) {
+func handshakeTCP(t *testing.T, agentCfg, gatewayCfg *tls.Config) (state tls.ConnectionState, agentErr, gatewayErr error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	type result struct {
 		err   error
@@ -75,7 +76,7 @@ func handshakeTCP(t *testing.T, agentCfg, gatewayCfg *tls.Config) (agentErr, gat
 			done <- result{err: err}
 			return
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 		s := tls.Server(c, gatewayCfg)
 		err = s.Handshake()
@@ -86,7 +87,7 @@ func handshakeTCP(t *testing.T, agentCfg, gatewayCfg *tls.Config) (agentErr, gat
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	client := tls.Client(c, agentCfg)
 	agentErr = client.Handshake()
@@ -99,12 +100,12 @@ func handshakeTCP(t *testing.T, agentCfg, gatewayCfg *tls.Config) (agentErr, gat
 		}
 	}
 	r := <-done
-	return agentErr, r.err, r.state
+	return r.state, agentErr, r.err
 }
 
 func TestTLSHandshakeWithPinnedCertificates(t *testing.T) {
 	p := newPair(t)
-	agentErr, gatewayErr, state := handshakeTCP(t, p.agentTLS(), p.gatewayTLS())
+	state, agentErr, gatewayErr := handshakeTCP(t, p.agentTLS(), p.gatewayTLS())
 	if agentErr != nil || gatewayErr != nil {
 		t.Fatalf("handshake failed: agent %v, gateway %v", agentErr, gatewayErr)
 	}
@@ -128,7 +129,7 @@ func TestAgentRejectsGatewayWithAnotherKey(t *testing.T) {
 	impostor := p
 	impostor.gateway = mustGenerate(t, "gateway")
 
-	agentErr, _, _ := handshakeTCP(t, p.agentTLS(), impostor.gatewayTLS())
+	_, agentErr, _ := handshakeTCP(t, p.agentTLS(), impostor.gatewayTLS())
 	if !errors.Is(agentErr, rp.ErrPinMismatch) {
 		t.Fatalf("agent error = %v, want ErrPinMismatch", agentErr)
 	}
@@ -139,7 +140,7 @@ func TestGatewayRejectsUnknownAgent(t *testing.T) {
 	stranger := p
 	stranger.agent = mustGenerate(t, "agent")
 
-	agentErr, gatewayErr, _ := handshakeTCP(t, stranger.agentTLS(), p.gatewayTLS())
+	_, agentErr, gatewayErr := handshakeTCP(t, stranger.agentTLS(), p.gatewayTLS())
 	if !errors.Is(gatewayErr, rp.ErrPinMismatch) {
 		t.Fatalf("gateway error = %v, want ErrPinMismatch", gatewayErr)
 	}
@@ -153,7 +154,7 @@ func TestGatewayRejectsAgentWithoutCertificate(t *testing.T) {
 	anonymous := p.agentTLS()
 	anonymous.Certificates = nil
 
-	_, gatewayErr, _ := handshakeTCP(t, anonymous, p.gatewayTLS())
+	_, _, gatewayErr := handshakeTCP(t, anonymous, p.gatewayTLS())
 	if gatewayErr == nil {
 		t.Fatal("gateway accepted an agent without a certificate")
 	}
@@ -182,7 +183,7 @@ func quicPair(t *testing.T) (agent, gateway *quic.Conn, p pair) {
 	if err != nil {
 		t.Fatalf("ListenAddr: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	accepted := make(chan *quic.Conn, 1)
 	go func() {
@@ -197,12 +198,12 @@ func quicPair(t *testing.T) (agent, gateway *quic.Conn, p pair) {
 	if err != nil {
 		t.Fatalf("DialAddr: %v", err)
 	}
-	t.Cleanup(func() { agent.CloseWithError(rp.CodeNoError.ApplicationErrorCode(), "") })
+	t.Cleanup(func() { _ = agent.CloseWithError(rp.CodeNoError.ApplicationErrorCode(), "") })
 	gateway, ok := <-accepted
 	if !ok {
 		t.Fatal("gateway did not accept the agent")
 	}
-	t.Cleanup(func() { gateway.CloseWithError(rp.CodeNoError.ApplicationErrorCode(), "") })
+	t.Cleanup(func() { _ = gateway.CloseWithError(rp.CodeNoError.ApplicationErrorCode(), "") })
 	return agent, gateway, p
 }
 
@@ -357,5 +358,50 @@ func TestCodesHaveDistinctValuesAndNames(t *testing.T) {
 	}
 	if got := rp.Code(0xbeef).String(); got != "Code(0xbeef)" {
 		t.Fatalf("unknown code String() = %q", got)
+	}
+}
+
+func TestGatewayChecksPinOnResumedSessions(t *testing.T) {
+	// Even if a later change turns session tickets back on, an agent whose
+	// pin was removed must not get back in with an old ticket.
+	p := newPair(t)
+	var revoked atomic.Bool
+	agentPin := rp.PinOf(p.agent.Leaf)
+	gatewayCfg := rp.GatewayTLSConfig(p.gateway, func(pin rp.Pin) bool {
+		return pin == agentPin && !revoked.Load()
+	})
+	gatewayCfg.SessionTicketsDisabled = false
+	agentCfg := p.agentTLS()
+	agentCfg.SessionTicketsDisabled = false
+	agentCfg.ClientSessionCache = tls.NewLRUClientSessionCache(1)
+	// Each handshake listens on a new port; a fixed server name keeps the
+	// client's session cache key stable across them.
+	agentCfg.ServerName = "gateway"
+
+	for i, wantResume := range []bool{false, true} {
+		state, agentErr, gatewayErr := handshakeTCP(t, agentCfg, gatewayCfg)
+		if agentErr != nil || gatewayErr != nil {
+			t.Fatalf("handshake %d failed: agent %v, gateway %v", i+1, agentErr, gatewayErr)
+		}
+		if state.DidResume != wantResume {
+			t.Fatalf("handshake %d: DidResume = %v, want %v", i+1, state.DidResume, wantResume)
+		}
+	}
+
+	revoked.Store(true)
+	_, _, gatewayErr := handshakeTCP(t, agentCfg, gatewayCfg)
+	if !errors.Is(gatewayErr, rp.ErrPinMismatch) {
+		t.Fatalf("resumed handshake with a revoked pin: gateway error = %v, want ErrPinMismatch", gatewayErr)
+	}
+}
+
+func TestGatewayRejectsTLSClientWithoutALPN(t *testing.T) {
+	p := newPair(t)
+	noALPN := p.agentTLS()
+	noALPN.NextProtos = nil
+
+	_, _, gatewayErr := handshakeTCP(t, noALPN, p.gatewayTLS())
+	if gatewayErr == nil {
+		t.Fatal("gateway accepted a TLS client that did not offer the relay ALPN")
 	}
 }

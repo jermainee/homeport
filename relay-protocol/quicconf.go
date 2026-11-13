@@ -49,33 +49,34 @@ func GatewayQUICConfig() *quic.Config {
 }
 
 // AgentTLSConfig returns a new TLS config for the agent. The agent presents
-// cert as its client certificate and accepts the gateway only if
-// allowGateway accepts the pin of the gateway's certificate.
+// cert as its client certificate and accepts the gateway only if it
+// negotiates [ALPN] and allowGateway accepts the pin of its certificate.
 func AgentTLSConfig(cert tls.Certificate, allowGateway func(Pin) bool) *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{ALPN},
 		Certificates: []tls.Certificate{cert},
-		// Pinning replaces chain and hostname verification; see VerifyPinned.
-		InsecureSkipVerify:     true, //nolint:gosec // VerifyPeerCertificate checks the pin.
-		VerifyPeerCertificate:  VerifyPinned(allowGateway),
+		// Pinning replaces chain and hostname verification.
+		InsecureSkipVerify: true, //nolint:gosec // VerifyConnection checks the pin on every handshake.
+		VerifyConnection:   verifyRelayConnection(allowGateway),
+		// Nothing needs session resumption, so it stays off.
 		SessionTicketsDisabled: true,
 	}
 }
 
 // GatewayTLSConfig returns a new TLS config for the gateway. The gateway
-// presents cert and requires a client certificate whose pin allowAgent
-// accepts. allowAgent runs on every handshake, so it can read a pin list that
-// changes at run time; it must be safe for concurrent use.
+// presents cert and requires [ALPN] and a client certificate whose pin
+// allowAgent accepts. allowAgent runs on every handshake, so it can read a
+// pin list that changes at run time; it must be safe for concurrent use.
 func GatewayTLSConfig(cert tls.Certificate, allowAgent func(Pin) bool) *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{ALPN},
 		Certificates: []tls.Certificate{cert},
 		// RequireAnyClientCert skips chain verification, so
-		// VerifyPeerCertificate is the only check of the agent.
+		// VerifyConnection is the only check of the agent.
 		ClientAuth:             tls.RequireAnyClientCert,
-		VerifyPeerCertificate:  VerifyPinned(allowAgent),
+		VerifyConnection:       verifyRelayConnection(allowAgent),
 		SessionTicketsDisabled: true,
 	}
 }

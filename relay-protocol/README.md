@@ -27,10 +27,10 @@ replace github.com/jermainee/homeport/relay-protocol => ../relay-protocol
 | Setting | Value |
 | --- | --- |
 | Transport | QUIC version 1 over UDP. The agent dials out to the gateway, so the home network opens no inbound port. |
-| ALPN | `homeport-relay/1`. A peer that does not offer it fails the handshake. |
+| ALPN | `homeport-relay/1`. A peer that does not negotiate it fails the handshake, over QUIC and over TLS on TCP alike. |
 | TLS | TLS 1.3, mutual. Each side presents a self-signed Ed25519 certificate. |
 | Trust | Each side pins the other's SPKI. The gateway accepts only agent pins in its config, and the agent accepts only its gateway's pin. |
-| Session resumption | Off on both sides. `VerifyPeerCertificate` does not run on resumed sessions, so a removed pin could otherwise reconnect with an old ticket. |
+| Session resumption | Off on both sides, since nothing needs it. The pin and ALPN checks run in `VerifyConnection`, which Go also runs on resumed sessions, so turning resumption on later would not let a removed pin back in with an old ticket. `VerifyPinned`, the `VerifyPeerCertificate` variant, is skipped on resumption. |
 | Keep-alive | Every 15 s from both sides, so the NAT in front of the agent keeps its UDP mapping. |
 | Idle timeout | 60 s, which is four missed keep-alives. |
 | Streams the agent may open | 1 bidirectional stream (the control stream). No unidirectional streams. |
@@ -79,6 +79,8 @@ A reader rejects the header if any of these holds:
 - the address is an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`), which must be sent as IPv4 so the agent's IPv4 deny-list applies.
 
 For DNS, the address and port are the virtual resolver the client queried (`10.77.0.1:53`). The agent does not connect to them. It resolves each query through the system resolver, so websites see the home ISP's resolver.
+
+DNS over TCP to the virtual resolver, which clients use after a truncated answer, is a DNS flow too. DNS over TCP already prefixes each message with a 2-byte length, which is the UDP frame format, so the gateway passes the client's byte stream through unchanged.
 
 ### FlowResult (agent → gateway)
 
@@ -131,7 +133,7 @@ Example: the 49-byte object `{"type":"stats","flows_active":2,"bytes_in":2500}` 
 
 Readers ignore unknown fields. A message of an unknown type is read in full and reported as `ErrUnknownMessage`, so the receiver can skip it and stay in sync.
 
-`stats` exists so the agent's count can be compared with the gateway's, which is the meter of record. Like every log in Homeport, control messages carry session metadata only: never destinations, DNS names or content.
+`stats` exists so the agent's count can be compared with the gateway's, which is the meter of record. The agent counts payload bytes on its sockets, while the gateway counts inner IP packets, including their headers. A comparison has to allow for that overhead, which is largest for small packets. Like every log in Homeport, control messages carry session metadata only: never destinations, DNS names or content.
 
 ### Error codes
 

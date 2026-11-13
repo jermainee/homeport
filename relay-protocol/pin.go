@@ -90,22 +90,50 @@ func AllowPins(pins ...Pin) func(Pin) bool {
 // It replaces chain verification, which pinned self-signed certificates
 // cannot pass, so it is meant for configs with InsecureSkipVerify on the
 // client or RequireAnyClientCert on the server. TLS 1.3 still proves that the
-// peer holds the certificate's private key. The callback does not run on
-// resumed sessions, so such configs must also disable session tickets;
-// [AgentTLSConfig] and [GatewayTLSConfig] do all of this.
+// peer holds the certificate's private key.
+//
+// Go skips VerifyPeerCertificate on resumed sessions, so a config that
+// allows resumption must not rely on it alone. [AgentTLSConfig] and
+// [GatewayTLSConfig] check the pin in VerifyConnection instead, which runs on
+// every handshake.
 func VerifyPinned(allow func(Pin) bool) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) != 1 {
-			return fmt.Errorf("relayprotocol: peer presented %d certificates, want one self-signed certificate", len(rawCerts))
+			return certCountError(len(rawCerts))
 		}
 		cert, err := x509.ParseCertificate(rawCerts[0])
 		if err != nil {
 			return fmt.Errorf("relayprotocol: peer certificate: %w", err)
 		}
-		pin := PinOf(cert)
-		if allow == nil || !allow(pin) {
-			return fmt.Errorf("%w: %s", ErrPinMismatch, pin)
-		}
-		return nil
+		return checkPin([]*x509.Certificate{cert}, allow)
 	}
+}
+
+// verifyRelayConnection returns a [tls.Config] VerifyConnection callback that
+// requires the relay ALPN and a pinned peer certificate. Unlike
+// VerifyPeerCertificate, it also runs on resumed sessions, so a pin removed
+// from allow cannot come back with an old session ticket.
+func verifyRelayConnection(allow func(Pin) bool) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		// QUIC requires ALPN, but TLS over TCP lets a client offer none.
+		if cs.NegotiatedProtocol != ALPN {
+			return fmt.Errorf("relayprotocol: peer negotiated ALPN %q, want %q", cs.NegotiatedProtocol, ALPN)
+		}
+		return checkPin(cs.PeerCertificates, allow)
+	}
+}
+
+func checkPin(certs []*x509.Certificate, allow func(Pin) bool) error {
+	if len(certs) != 1 {
+		return certCountError(len(certs))
+	}
+	pin := PinOf(certs[0])
+	if allow == nil || !allow(pin) {
+		return fmt.Errorf("%w: %s", ErrPinMismatch, pin)
+	}
+	return nil
+}
+
+func certCountError(n int) error {
+	return fmt.Errorf("relayprotocol: peer presented %d certificates, want one self-signed certificate", n)
 }

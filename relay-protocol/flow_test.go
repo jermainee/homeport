@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"strings"
 	"testing"
 
 	rp "github.com/jermainee/homeport/relay-protocol"
@@ -283,5 +284,22 @@ func TestWriteFlowResultRejectsUnknownStatus(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("WriteFlowResult wrote % x for an unknown status", buf.Bytes())
+	}
+}
+
+func TestFlowErrorsNeverNameTheDestination(t *testing.T) {
+	// Callers log flow errors, and logs must never hold destinations.
+	open := rp.FlowOpen{Kind: rp.KindTCP, Dst: netip.MustParseAddrPort("[::ffff:93.184.215.14]:443")}
+	err := rp.WriteFlowOpen(io.Discard, open)
+	if err == nil || strings.Contains(err.Error(), "93.184.215.14") {
+		t.Fatalf("WriteFlowOpen error %q names the destination", err)
+	}
+	zoned := rp.FlowOpen{Kind: rp.KindTCP, Dst: netip.MustParseAddrPort("[fe80::abcd%en0]:443")}
+	if err := rp.WriteFlowOpen(io.Discard, zoned); err == nil || strings.Contains(err.Error(), "abcd") {
+		t.Fatalf("WriteFlowOpen error %q names the destination", err)
+	}
+	wire := []byte{0x01, 0x01, 0x06, 0x00, 0x01, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 93, 184, 215, 14}
+	if _, err := rp.ReadFlowOpen(bytes.NewReader(wire)); err == nil || strings.Contains(err.Error(), "93.184.215.14") {
+		t.Fatalf("ReadFlowOpen error %q names the destination", err)
 	}
 }

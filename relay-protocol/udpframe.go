@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // MaxUDPPayload is the largest payload a UDP frame can carry.
@@ -22,21 +23,28 @@ func AppendUDPFrame(b, payload []byte) ([]byte, error) {
 	if len(payload) > MaxUDPPayload {
 		return b, fmt.Errorf("%w: UDP payload of %d bytes exceeds %d", ErrMalformed, len(payload), MaxUDPPayload)
 	}
-	b = binary.BigEndian.AppendUint16(b, uint16(len(payload)))
+	b = binary.BigEndian.AppendUint16(b, uint16(len(payload))) //nolint:gosec // At most MaxUDPPayload, checked above.
 	return append(b, payload...), nil
 }
 
+// framePool holds buffers for WriteUDPFrame, which runs once per relayed
+// datagram. They start at a typical datagram's size and keep what they grow
+// to.
+var framePool = sync.Pool{New: func() any {
+	b := make([]byte, 0, udpFrameHeaderLen+1500)
+	return &b
+}}
+
 // WriteUDPFrame writes one UDP frame carrying payload to w in a single Write
-// call. Hot paths can reuse a buffer with [AppendUDPFrame] instead.
+// call, using a pooled buffer.
 func WriteUDPFrame(w io.Writer, payload []byte) error {
-	if len(payload) > MaxUDPPayload {
-		return fmt.Errorf("%w: UDP payload of %d bytes exceeds %d", ErrMalformed, len(payload), MaxUDPPayload)
+	bp := framePool.Get().(*[]byte)
+	b, err := AppendUDPFrame((*bp)[:0], payload)
+	if err == nil {
+		_, err = w.Write(b)
 	}
-	b, err := AppendUDPFrame(make([]byte, 0, udpFrameHeaderLen+len(payload)), payload)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(b)
+	*bp = b[:0]
+	framePool.Put(bp)
 	return err
 }
 

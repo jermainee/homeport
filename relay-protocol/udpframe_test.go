@@ -153,3 +153,18 @@ func FuzzReadUDPFrame(f *testing.F) {
 		}
 	})
 }
+
+func TestWriteUDPFrameDoesNotAllocate(t *testing.T) {
+	// It runs once per relayed datagram. Under -race, sync.Pool drops some
+	// buffers on purpose; AllocsPerRun's whole-number average still rounds
+	// those rare allocations down to 0.
+	payload := make([]byte, 1350)
+	allocs := testing.AllocsPerRun(100, func() {
+		if err := rp.WriteUDPFrame(io.Discard, payload); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("WriteUDPFrame allocates %.1f times per call, want 0", allocs)
+	}
+}

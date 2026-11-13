@@ -63,7 +63,9 @@ type Stats struct {
 	FlowsActive uint64 `json:"flows_active"`
 	// FlowsTotal is the number of flows the agent opened.
 	FlowsTotal uint64 `json:"flows_total"`
-	// BytesOut is the number of payload bytes the agent sent to destinations.
+	// BytesOut is the number of payload bytes the agent sent to
+	// destinations. Payload excludes TCP, UDP and IP headers, which the
+	// gateway's meter counts.
 	BytesOut uint64 `json:"bytes_out"`
 	// BytesIn is the number of payload bytes the agent received from
 	// destinations.
@@ -90,17 +92,20 @@ func (m HelloAck) validate() error {
 	case !m.ObservedIP.IsValid():
 		return fmt.Errorf("%w: hello_ack without observed_ip", ErrMalformed)
 	case m.ObservedIP.Is4In6():
-		return fmt.Errorf("%w: hello_ack observed_ip %s is IPv4-mapped; send it as IPv4", ErrMalformed, m.ObservedIP)
+		return fmt.Errorf("%w: hello_ack observed_ip is IPv4-mapped; send it as IPv4", ErrMalformed)
 	case m.ObservedIP.Zone() != "":
-		return fmt.Errorf("%w: hello_ack observed_ip %s has a zone", ErrMalformed, m.ObservedIP)
+		return fmt.Errorf("%w: hello_ack observed_ip has a zone", ErrMalformed)
 	}
 	return nil
 }
 
-// WriteControl writes m to w in a single Write call.
+// WriteControl writes m to w in a single Write call. It accepts pointers to
+// messages too, and sends an IPv4-mapped HelloAck.ObservedIP, as a gateway
+// on a dual-stack socket sees IPv4 agents, as plain IPv4.
 func WriteControl(w io.Writer, m ControlMessage) error {
-	if m == nil {
-		return fmt.Errorf("%w: nil control message", ErrMalformed)
+	m, err := canonical(m)
+	if err != nil {
+		return err
 	}
 	if err := m.validate(); err != nil {
 		return err
@@ -113,9 +118,35 @@ func WriteControl(w io.Writer, m ControlMessage) error {
 		return fmt.Errorf("%w: %s message of %d bytes exceeds %d", ErrMalformed, m.controlType(), len(body), MaxControlLen)
 	}
 	b := make([]byte, controlHeaderLen, controlHeaderLen+len(body))
-	binary.BigEndian.PutUint32(b, uint32(len(body)))
+	binary.BigEndian.PutUint32(b, uint32(len(body))) //nolint:gosec // At most MaxControlLen, checked above.
 	_, err = w.Write(append(b, body...))
 	return err
+}
+
+// canonical returns m as a value in its wire form. Pointers satisfy
+// ControlMessage through their method sets, so they are dereferenced; nil
+// is rejected.
+func canonical(m ControlMessage) (ControlMessage, error) {
+	switch v := m.(type) {
+	case Hello, Stats:
+		return v, nil
+	case HelloAck:
+		v.ObservedIP = v.ObservedIP.Unmap()
+		return v, nil
+	case *Hello:
+		if v != nil {
+			return *v, nil
+		}
+	case *HelloAck:
+		if v != nil {
+			return canonical(*v)
+		}
+	case *Stats:
+		if v != nil {
+			return *v, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: nil control message", ErrMalformed)
 }
 
 // marshalControl encodes m as a JSON object with its type in the "type"
