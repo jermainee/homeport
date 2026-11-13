@@ -1,0 +1,19 @@
+version: "2"
+
+run:
+  # The tests need the e2e tag, which gives the agent its test hooks.
+  build-tags:
+    - e2e
+
+linters:
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - nolintlint
+    - unconvert
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
