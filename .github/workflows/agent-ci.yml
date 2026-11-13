@@ -1,0 +1,78 @@
+name: agent-ci
+
+on:
+  pull_request:
+    paths:
+      - "agent/**"
+      - "relay-protocol/**"
+      - ".github/workflows/agent-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "agent/**"
+      - "relay-protocol/**"
+      - ".github/workflows/agent-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOWORK: "off"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The agent runs on members' machines; macOS comes first.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Verify modules
+        run: go mod verify
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags e2e .
+          GOOS=windows go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: agent
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Test the e2e build
+        run: go test -race -count=1 -tags e2e .
+      # The e2e tag lets the agent dial loopback test origins, so the
+      # command must refuse to build with it.
+      - name: Check that the CLI refuses the e2e tag
+        run: |
+          if go build -tags e2e -o /dev/null ./cmd/homeport-agent 2>/dev/null; then
+            echo "cmd/homeport-agent built with the e2e tag"
+            exit 1
+          fi
