@@ -74,9 +74,11 @@ type Config struct {
 	// DefaultTunnelCheckInterval.
 	TunnelCheckInterval time.Duration
 
-	// testOrigins are loopback addresses the policy lets through. Only
+	// testOrigins are loopback addresses the policy lets through, and
+	// testRoutes send a flow's destination to one of them instead. Only
 	// this package's tests and e2e builds (policy_testallow.go) set them.
 	testOrigins []netip.AddrPort
+	testRoutes  map[netip.AddrPort]netip.AddrPort
 }
 
 // State is what the agent is doing.
@@ -172,9 +174,14 @@ func New(cfg Config) (*Agent, error) {
 			return nil, errors.New("agent: test origins must be loopback addresses")
 		}
 		// The policy compares unmapped addresses.
-		origins[i] = netip.AddrPortFrom(o.Addr().Unmap(), o.Port())
+		origins[i] = unmapPort(o)
 	}
 	cfg.testOrigins = origins
+	routes := make(map[netip.AddrPort]netip.AddrPort, len(cfg.testRoutes))
+	for dst, o := range cfg.testRoutes {
+		routes[unmapPort(dst)] = unmapPort(o) // o is in testOrigins too
+	}
+	cfg.testRoutes = routes
 	if cfg.Version == "" {
 		cfg.Version = Version
 	}

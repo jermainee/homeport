@@ -15,3 +15,20 @@ import "net/netip"
 func AllowTestOrigin(cfg *Config, origin netip.AddrPort) {
 	cfg.testOrigins = append(cfg.testOrigins, origin)
 }
+
+// RouteTestOrigin makes the agent configured by cfg connect flows to dst to
+// origin instead, a loopback test server. A real gateway drops packets
+// addressed to loopback, so the end-to-end tests send their flows to a
+// public-looking dst, and only the agent's last step, the socket, reaches
+// the test server. DNS answers may name dst's address. Other ports of that
+// address get the policy as usual. New rejects an origin that is not a
+// loopback address.
+//
+// Like AllowTestOrigin, it exists only in builds with the e2e tag.
+func RouteTestOrigin(cfg *Config, dst, origin netip.AddrPort) {
+	if cfg.testRoutes == nil {
+		cfg.testRoutes = make(map[netip.AddrPort]netip.AddrPort)
+	}
+	cfg.testRoutes[dst] = origin
+	cfg.testOrigins = append(cfg.testOrigins, origin)
+}

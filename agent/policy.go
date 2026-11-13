@@ -19,8 +19,10 @@ type policy struct {
 	ownIP netip.Addr
 	// localNets returns the networks of the machine's own interfaces.
 	localNets func() []netip.Prefix
-	// testOrigins are loopback test servers allowed in tests only.
+	// testOrigins are loopback test servers allowed in tests only, and
+	// testRoutes send a destination to one of them.
 	testOrigins []netip.AddrPort
+	testRoutes  map[netip.AddrPort]netip.AddrPort
 }
 
 // newPolicy returns the policy for one connection. It drops the cached
@@ -31,6 +33,21 @@ func newPolicy(ownIP netip.Addr, testOrigins []netip.AddrPort) *policy {
 	ifNets.fetched = time.Time{} // refetch, but keep the last answer if that fails
 	ifNets.mu.Unlock()
 	return &policy{ownIP: ownIP.Unmap(), localNets: interfaceNets, testOrigins: testOrigins}
+}
+
+// target is the address a flow to dst connects to: dst itself, or in tests
+// the loopback origin a test route sends dst to. The policy then checks the
+// target, so a route reaches its origin and nothing else.
+func (p *policy) target(dst netip.AddrPort) netip.AddrPort {
+	dst = unmapPort(dst)
+	if o, ok := p.testRoutes[dst]; ok {
+		return o
+	}
+	return dst
+}
+
+func unmapPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
 // policyError is the policy's refusal of a destination. It names the rule,
@@ -93,8 +110,8 @@ var (
 
 // check returns a *policyError if the policy refuses dst.
 func (p *policy) check(dst netip.AddrPort) error {
-	addr := dst.Addr().Unmap()
-	dst = netip.AddrPortFrom(addr, dst.Port())
+	dst = unmapPort(dst)
+	addr := dst.Addr()
 	for _, o := range p.testOrigins {
 		if dst == o {
 			return nil
@@ -160,6 +177,11 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
 func (p *policy) allowsAnswer(addr netip.Addr) bool {
 	for _, o := range p.testOrigins {
 		if addr.Unmap() == o.Addr() {
+			return true
+		}
+	}
+	for dst := range p.testRoutes {
+		if addr.Unmap() == dst.Addr() {
 			return true
 		}
 	}

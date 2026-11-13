@@ -29,7 +29,7 @@ var datagramBufs = sync.Pool{New: func() any {
 // relayUDP relays a UDP flow. The stream carries one UDP frame per datagram
 // in each direction; the socket is connected to the destination.
 func (a *Agent) relayUDP(ctx context.Context, f *flow, open relayprotocol.FlowOpen, pol *policy, cnt *counters) {
-	c := a.dial(ctx, f, "udp", open.Dst.String(), pol)
+	c := a.dial(ctx, f, "udp", open.Dst, pol)
 	if c == nil {
 		return
 	}
