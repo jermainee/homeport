@@ -13,8 +13,9 @@ info:
       `/v1/gateway/*`.
     - **Members** send `Authorization: Bearer <session_token>`. The app
       creates the token itself and the API activates it when the member
-      approves the sign-in (see `createLoginRequest`). It works on every path
-      except `/v1/gateway/*`.
+      approves the sign-in (see `createLoginRequest`). Before approval it
+      works only for polling that sign-in; after approval it works on every
+      path except `/v1/gateway/*`.
 
     A token used outside its scope gets `401 unauthorized`, the same as a
     wrong token.
@@ -388,7 +389,8 @@ paths:
         The app creates a session token (`hpm_` and 32 random bytes in
         base64url) and sends only its SHA-256. The API emails a sign-in link
         to `email`, creating the member on first approval. The app shows
-        `match_code` and polls with the token. The page behind the email link
+        `match_code` and polls `GET /v1/auth/login-requests/{login_request_id}`
+        with the token. The page behind the email link
         asks the member to confirm the match code before it approves the
         login, which activates the token. The API stores only the hash and
         never sends a secret, so replaying any of these responses is
@@ -421,10 +423,10 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/IdempotencyConflict"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "503":
           description: Sign-in links can't be sent in this environment. Nothing was stored, so a retry with the same `request_id` runs again.
           content:
@@ -436,31 +438,22 @@ paths:
                     properties:
                       error:
                         const: email_unavailable
-  /v1/auth/login-requests/{login_request_id}/poll:
-    post:
+  /v1/auth/login-requests/{login_request_id}:
+    get:
       tags: [auth]
-      operationId: pollLoginRequest
-      summary: Poll a sign-in for its session token
+      operationId: getLoginRequest
+      summary: Poll a sign-in
       description: |
-        The app polls every few seconds with a new `request_id` per poll and
-        the session token it created. A poll whose token does not match the
-        login request gets 404. Once the member approves, polls return 200
-        until the login request expires, and the token works as
-        `Authorization: Bearer <session_token>`.
-      security: []
+        The app polls every few seconds with the session token it created in
+        `Authorization`. A poll only reads, so it carries no `request_id` and
+        a retry is always safe. A token that does not belong to this login
+        request gets 404. Once the member approves, polls return 200 until
+        the login request expires, and the same header works on every member
+        endpoint. Responses carry `Cache-Control: no-store`.
+      security:
+        - pendingSession: []
       parameters:
         - $ref: "#/components/parameters/LoginRequestId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/LoginPoll"
-            examples:
-              poll:
-                summary: Poll with the secret from the login request
-                externalValue: examples/member/login-poll.json
-        x-max-body-bytes: 16384
       responses:
         "200":
           description: Approved. The session token is now active.
@@ -478,12 +471,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LoginPending"
-        "400":
-          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/IdempotencyConflict"
         "410":
           description: The login request expired before it was approved.
           content:
@@ -497,8 +488,6 @@ paths:
                         const: login_request_expired
         "429":
           $ref: "#/components/responses/TooManyRequests"
-        "413":
-          $ref: "#/components/responses/PayloadTooLarge"
   /v1/auth/session:
     delete:
       tags: [auth]
@@ -906,6 +895,11 @@ components:
       scheme: bearer
       bearerFormat: hpm_<secret>
       description: Session token the app created and a sign-in activated. Not valid on `/v1/gateway/*`.
+    pendingSession:
+      type: http
+      scheme: bearer
+      bearerFormat: hpm_<secret>
+      description: The same session token before the member approves the sign-in. Valid only for polling that sign-in.
   parameters:
     IfNoneMatch:
       name: If-None-Match
@@ -1463,10 +1457,6 @@ components:
             reason: true
 
     # Auth
-    SessionToken:
-      description: "`hpm_` and 32 random bytes in base64url, created by the app."
-      type: string
-      pattern: "^hpm_[A-Za-z0-9_-]{43}$"
     LoginRequestCreate:
       type: object
       additionalProperties: false
@@ -1494,15 +1484,6 @@ components:
           pattern: "^[0-9]{6}$"
         expires_at:
           $ref: "#/components/schemas/Timestamp"
-    LoginPoll:
-      type: object
-      additionalProperties: false
-      required: [request_id, session_token]
-      properties:
-        request_id:
-          $ref: "#/components/schemas/UuidV7"
-        session_token:
-          $ref: "#/components/schemas/SessionToken"
     LoginApproved:
       type: object
       additionalProperties: false

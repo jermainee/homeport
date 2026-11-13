@@ -148,7 +148,12 @@ test("every POST is idempotent by request_id or by event_id", () => {
   }
 });
 
-const PUBLIC_OPERATIONS = new Set(["createLoginRequest", "pollLoginRequest"]);
+// Operations that take no member session. Polling a sign-in authenticates
+// with the app's session token before the member has approved it.
+const SIGN_IN_SCHEMES = new Map([
+  ["createLoginRequest", []],
+  ["getLoginRequest", ["pendingSession"]],
+]);
 
 test("gateway tokens work only on /v1/gateway/*, member sessions everywhere else", () => {
   const ops = operations();
@@ -157,9 +162,7 @@ test("gateway tokens work only on /v1/gateway/*, member sessions everywhere else
     const schemes = (operation.security ?? contract.spec.security ?? []).flatMap(Object.keys);
     const expected = path.startsWith("/v1/gateway/")
       ? ["gatewayToken"]
-      : PUBLIC_OPERATIONS.has(operation.operationId)
-        ? []
-        : ["memberSession"];
+      : (SIGN_IN_SCHEMES.get(operation.operationId) ?? ["memberSession"]);
     assert.deepEqual(schemes, expected, `${method.toUpperCase()} ${path}`);
   }
 });
@@ -193,18 +196,19 @@ test("no response carries a secret", () => {
   }
 
   const loginResponses = [
-    { path: "/v1/auth/login-requests", status: 201, file: "login-request-created.json", secret: "poll_secret" },
+    { method: "POST", path: "/v1/auth/login-requests", status: 201, file: "login-request-created.json", secret: "poll_secret" },
     {
-      path: "/v1/auth/login-requests/{login_request_id}/poll",
+      method: "GET",
+      path: "/v1/auth/login-requests/{login_request_id}",
       status: 200,
       file: "login-approved.json",
       secret: "session_token",
     },
   ];
-  for (const { path: apiPath, status, file, secret } of loginResponses) {
+  for (const { method, path: apiPath, status, file, secret } of loginResponses) {
     const { body } = readExample(file);
     body[secret] = "hpm_1GEbwdQUxDUlGqViywnkPs3EcFvghd1PD81vUIt5x8s";
-    const { errors } = contract.validateResponse("POST", apiPath, status, body);
+    const { errors } = contract.validateResponse(method, apiPath, status, body);
     assert.ok(errors.includes(`/ must not have property "${secret}"`), `${apiPath} ${status} can carry ${secret}`);
   }
 });
@@ -311,4 +315,18 @@ test("a batch of 100 events at their largest fits the body limit", () => {
     const size = Buffer.byteLength(JSON.stringify(body, null, 2));
     assert.ok(size <= limit, `${path}: ${size} bytes > ${limit}`);
   }
+});
+
+// A poll only reads. As a GET it needs no request_id, so polling every few
+// seconds writes nothing to the API's idempotency store.
+test("polling a sign-in is a GET with the token in Authorization", () => {
+  const item = contract.spec.paths["/v1/auth/login-requests/{login_request_id}"];
+  assert.ok(item?.get, "GET /v1/auth/login-requests/{login_request_id} is missing");
+  assert.equal(item.get.requestBody, undefined);
+  assert.equal(contract.spec.paths["/v1/auth/login-requests/{login_request_id}/poll"], undefined);
+  const scheme = contract.spec.components.securitySchemes.pendingSession;
+  assert.deepEqual([scheme?.type, scheme?.scheme], ["http", "bearer"]);
+
+  const pending = contract.validateResponse("GET", "/v1/auth/login-requests/{login_request_id}", 202, { status: "pending" });
+  assert.deepEqual(pending.errors, []);
 });
