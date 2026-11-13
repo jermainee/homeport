@@ -18,7 +18,7 @@ New web parts run on Cloudflare (Pages, Workers, D1) and ship through a deploy w
 1. Branch from `main` as `feature/<slug>` or `fix/<slug>`. The slug names the issue in 2–4 kebab-case words: `feature/credit-ledger`, `fix/lease-renewal`.
 2. Write commit subjects in the imperative: `Add credit ledger`, `Fix lease renewal at 80%`.
 3. Every change reaches `main` through a pull request, including changes to this file.
-4. Before merging, run a code review on the PR. Fix every finding, or reply in the PR explaining why it stays.
+4. Before merging a PR that changes code or config, run a code review on it. Fix every finding, or reply in the PR explaining why it stays. A PR that changes only Markdown (`.md`) files skips the review.
 5. Deployments and releases run only in GitHub Actions, triggered by the merge into `main`.
 
 ## Building
