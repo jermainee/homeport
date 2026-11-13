@@ -33,6 +33,9 @@ const (
 	maxTCPInFlight = 1024
 	dialTimeout    = 10 * time.Second
 	udpIdleTimeout = 60 * time.Second
+	// DNS flows end soon after their answer. Each one holds a stream on the
+	// agent, and every query from a new source port is a new flow.
+	dnsIdleTimeout = 5 * time.Second
 )
 
 // Flow is one connection from a peer: who opened it and where it goes.
@@ -71,6 +74,9 @@ type Stack struct {
 // New builds the stack. The meter decides which peers may send, and each
 // tunnel address may have at most maxPending flows waiting on the dialer.
 func New(mtu int, meter *Meter, dialer Dialer, maxPending int) (*Stack, error) {
+	if mtu < 1280 || mtu > 65535 {
+		return nil, fmt.Errorf("MTU %d outside 1280..65535", mtu)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Stack{
 		ctx:        ctx,
@@ -123,7 +129,7 @@ func (s *Stack) Write(bufs [][]byte, offset int) (int, error) {
 	for _, b := range bufs {
 		packet := b[offset:]
 		src, proto, ok := sourceOf(packet)
-		if !ok || !s.meter.countUp(src, len(packet)) {
+		if !ok || !s.meter.countUp(src, uint64(len(packet))) {
 			continue
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
@@ -165,7 +171,7 @@ func (s *Stack) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		}
 		packet := bufs[0][offset : offset+n]
 		dst, ok := destinationOf(packet)
-		if !ok || !s.meter.countDown(dst, n) {
+		if !ok || !s.meter.countDown(dst, uint64(len(packet))) {
 			continue
 		}
 		sizes[0] = n
@@ -195,11 +201,11 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	ep, tcpErr := r.CreateEndpoint(&wq)
 	if tcpErr != nil {
 		r.Complete(true)
-		upstream.Close()
+		_ = upstream.Close()
 		return
 	}
 	r.Complete(false)
-	s.relayTCP(gonet.NewTCPConn(&wq, ep), upstream)
+	s.relayTCP(gonet.NewTCPConn(&wq, ep), ep.Abort, upstream)
 }
 
 // startPending reserves one of the peer's pending-dial slots. A peer at its
@@ -239,52 +245,67 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		upstream, err := s.dialer.DialUDP(ctx, flow)
 		cancel()
 		if err != nil {
-			client.Close()
+			_ = client.Close()
 			return
 		}
-		s.relayUDP(client, upstream)
+		idle := udpIdleTimeout
+		if flow.Dst.Port() == 53 {
+			idle = dnsIdleTimeout
+		}
+		s.relayUDP(client, upstream, idle)
 	}()
 }
 
-// relayTCP copies both ways. A clean end of one direction is passed on as a
-// half-close; an error on either side, or Close on the stack, ends both.
-func (s *Stack) relayTCP(a, b net.Conn) {
+// relayTCP copies both ways between the client and the upstream. A clean end
+// of one direction is passed on as a half-close. An error on either side is a
+// reset: the client gets a TCP reset (abortClient) and the upstream is reset
+// too, so a cut-off response never looks complete. Close on the stack ends both.
+func (s *Stack) relayTCP(client net.Conn, abortClient func(), upstream net.Conn) {
 	closeBoth := func() {
-		a.Close()
-		b.Close()
+		_ = client.Close()
+		_ = upstream.Close()
+	}
+	resetBoth := func() {
+		abortClient()
+		if r, ok := upstream.(interface{ Reset() }); ok {
+			r.Reset()
+		}
+		closeBoth()
 	}
 	stop := context.AfterFunc(s.ctx, closeBoth)
 	defer stop()
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		_, err := io.Copy(dst, src)
-		cw, halfClose := dst.(interface{ CloseWrite() error })
-		if err != nil || !halfClose || cw.CloseWrite() != nil {
+		if err != nil {
+			resetBoth()
+		} else if cw, ok := dst.(interface{ CloseWrite() error }); !ok || cw.CloseWrite() != nil {
 			closeBoth()
 		}
 		done <- struct{}{}
 	}
-	go pipe(a, b)
-	go pipe(b, a)
+	go pipe(client, upstream)
+	go pipe(upstream, client)
 	<-done
 	<-done
 	closeBoth()
 }
 
-// relayUDP copies datagrams both ways until the flow is idle or the stack closes.
-func (s *Stack) relayUDP(client, upstream net.Conn) {
-	defer client.Close()
-	defer upstream.Close()
+// relayUDP copies datagrams both ways until the flow is idle for idle or the
+// stack closes.
+func (s *Stack) relayUDP(client, upstream net.Conn, idle time.Duration) {
+	defer func() { _ = client.Close() }()
+	defer func() { _ = upstream.Close() }()
 	stop := context.AfterFunc(s.ctx, func() {
-		client.Close()
-		upstream.Close()
+		_ = client.Close()
+		_ = upstream.Close()
 	})
 	defer stop()
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		buf := make([]byte, 65535)
 		for {
-			src.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+			_ = src.SetReadDeadline(time.Now().Add(idle))
 			n, err := src.Read(buf)
 			if err != nil {
 				break

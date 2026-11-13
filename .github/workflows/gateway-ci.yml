@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "gateway/**"
+      - "relay-protocol/**"
       - ".github/workflows/gateway-ci.yml"
   push:
     branches: [main]
     paths:
       - "gateway/**"
+      - "relay-protocol/**"
       - ".github/workflows/gateway-ci.yml"
 
 permissions:
@@ -35,5 +37,10 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: Vet
         run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: gateway
       - name: Test
         run: go test -race -count=1 ./...

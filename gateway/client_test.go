@@ -2,12 +2,12 @@ package gateway_test
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -35,7 +35,7 @@ type countingTun struct {
 func (c *countingTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := c.Device.Read(bufs, sizes, offset)
 	for i := 0; i < n; i++ {
-		c.sent.Add(uint64(sizes[i]))
+		c.sent.Add(uint64(len(bufs[i][offset : offset+sizes[i]])))
 	}
 	return n, err
 }
@@ -43,7 +43,7 @@ func (c *countingTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 func (c *countingTun) Write(bufs [][]byte, offset int) (int, error) {
 	for _, b := range bufs {
 		if len(b) > offset {
-			c.received.Add(uint64(len(b) - offset))
+			c.received.Add(uint64(len(b[offset:])))
 		}
 	}
 	return c.Device.Write(bufs, offset)
@@ -86,7 +86,7 @@ func (c *testClient) get(t *testing.T, url string) []byte {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
@@ -104,7 +104,7 @@ func (c *testClient) tryGet(url string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, err = io.ReadAll(resp.Body)
 	return err
 }
@@ -116,11 +116,11 @@ func (c *testClient) udpRoundTrip(t *testing.T, dst netip.AddrPort, payload []by
 	if err != nil {
 		t.Fatalf("dial UDP: %v", err)
 	}
-	defer uc.Close()
+	defer func() { _ = uc.Close() }()
 	if _, err := uc.Write(payload); err != nil {
 		t.Fatalf("write UDP: %v", err)
 	}
-	uc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = uc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 2048)
 	n, err := uc.Read(buf)
 	if err != nil {
@@ -163,7 +163,7 @@ func newUDPEcho(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listen UDP: %v", err)
 	}
-	t.Cleanup(func() { pc.Close() })
+	t.Cleanup(func() { _ = pc.Close() })
 	go func() {
 		buf := make([]byte, 65535)
 		for {
@@ -171,7 +171,7 @@ func newUDPEcho(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			pc.WriteTo(buf[:n], addr)
+			_, _ = pc.WriteTo(buf[:n], addr)
 		}
 	}()
 	return pc.LocalAddr().String()
@@ -190,7 +190,7 @@ func newGatewayWith(t *testing.T, cfg gateway.Config) *gateway.Server {
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}
-	t.Cleanup(func() { gw.Close() })
+	t.Cleanup(func() { _ = gw.Close() })
 	return gw
 }
 
@@ -274,11 +274,8 @@ func newKey(t *testing.T) gateway.Key {
 }
 
 func randomBytes(n int) []byte {
-	r := rand.New(rand.NewChaCha8([32]byte{1}))
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(r.Uint32())
-	}
+	_, _ = rand.Read(b)
 	return b
 }
 
