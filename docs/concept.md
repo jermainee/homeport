@@ -87,7 +87,7 @@ Every member has one account, one identity check and one credit balance. In this
 
 **Share flow**
 
-1. Install the agent: desktop app (Windows, macOS) or Docker image (NAS, Raspberry Pi, home server). Router firmware and Android come later.
+1. Install the agent: desktop app (Linux, macOS, Windows) or Docker image (NAS, Raspberry Pi, home server). Router firmware and Android come later.
 2. Switch on Share; the identity check from signup already covers it. A bank account through Stripe Connect is needed only to cash out.
 3. Set limits: GB per month, maximum share of upload speed, schedule, pause button.
 4. The agent tests the line; it is listed once it passes (residential ISP, enough upload, clean IP reputation).
@@ -98,6 +98,7 @@ Every member has one account, one identity check and one credit balance. In this
 
 - Sticky lines with alerts on IP change, plus same-city failover
 - Plain WireGuard, so it works on travel routers, phones, laptops and TVs
+- Desktop app for the latest Linux, macOS and Windows releases; older OS versions are out of scope
 - Split tunneling guide in v1 (route only banking and admin apps); own client app with per-app routing later
 - Home Check page for leak and consistency tests
 - Stripe Identity mandatory for every member; members never see each other's identity
@@ -383,7 +384,7 @@ Validate demand and the legal position in six weeks before writing production co
 flowchart LR
   validate["Validate<br/>Weeks 1–6<br/>20 buyer interviews<br/>Pre-order page<br/>Legal opinion<br/>10 Family Ports set up by hand"]
   gate1{{"Gate 1<br/>30+ pre-orders<br/>no legal blocker"}}
-  mvp["MVP<br/>Months 2–5<br/>Germany, 5 cities<br/>Agent: Docker, Windows, macOS<br/>1 gateway, Frankfurt<br/>WireGuard, SOCKS5<br/>Stripe Identity, Checkout, Connect"]
+  mvp["MVP<br/>Months 2–5<br/>Germany, 5 cities<br/>Agent: Docker, Linux, macOS, Windows<br/>1 gateway, Frankfurt<br/>WireGuard, SOCKS5<br/>Stripe Identity, Checkout, Connect"]
   gate2{{"Gate 2<br/>50 paying buyers<br/>95% line uptime"}}
   v1["v1: expand<br/>Months 6–9<br/>AT, CH, NL, UK<br/>Home Check page<br/>Same-city failover<br/>Auto top-up, packs in GBP and CHF<br/>Abuse tooling"]
   gate3{{"Gate 3<br/>500 paying buyers<br/>25%+ margin"}}
@@ -397,7 +398,7 @@ The MVP is the first thing built; each gate must be met before the next phase st
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Seller agent | Go single binary with quic-go; Docker image; small tray app for Windows and macOS | Cross-platform, no runtime, strong networking libraries |
+| Seller agent | Go single binary with quic-go; Docker image; small tray app for Linux, macOS and Windows | Cross-platform, no runtime, strong networking libraries |
 | Edge gateway | Go: wireguard-go with gVisor netstack, quic-go, SOCKS5 server | Runs in userspace, no kernel modules, scales per region |
 | Control plane | TypeScript API and Next.js dashboards; Postgres | One language for API and web; Postgres for the ledger |
 | Usage pipeline | NATS JetStream; ClickHouse later for analytics | Durable, light and native to Go |
