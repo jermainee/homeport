@@ -27,7 +27,7 @@ Homeport's edge gateway. It terminates members' WireGuard tunnels in userspace, 
 
 ## Control plane
 
-`internal/controlplane` runs the gateway from the control API, as [`contracts/control-api.openapi.yaml`](../contracts/control-api.openapi.yaml) specifies for `/v1/gateway/*`. `cmd/homeport-gateway` wires it to the `Server`.
+`internal/controlplane` runs the gateway from the control API, as [`contracts/control-api.openapi.yaml`](../contracts/control-api.openapi.yaml) specifies for `/v1/gateway/*`. `service` wires it to the `Server`: it announces the gateway, runs the controller and shuts down in order. `cmd/homeport-gateway` is a thin wrapper around `service`, and the end-to-end tests in [`e2e/`](../e2e/README.md) run the gateway through it too.
 
 - **Config:** polled every 30 s with the body's `etag` as `If-None-Match`. Each 200 replaces the previous config. A peer or line no longer listed is removed at once, open flows included. A changed peer is removed and added again, so its session ends. When applying fails, the next poll fetches the whole config again.
 - **Pins:** the contract sends `device_spki_sha256` and `quic_spki_sha256` as lowercase hex. relay-protocol's `Pin` holds the same 32 bytes but prints them as base64; the client converts.

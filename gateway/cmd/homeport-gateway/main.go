@@ -7,29 +7,23 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/jermainee/homeport/gateway"
-	"github.com/jermainee/homeport/gateway/internal/controlplane"
+	"github.com/jermainee/homeport/gateway/service"
 )
 
 // version is the gateway's release version, set at build time with
 // -ldflags "-X main.version=...".
 var version = "0.1.0"
-
-var _ controlplane.Gateway = (*gateway.Server)(nil)
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -72,17 +66,6 @@ func parseFlags(args []string) (options, error) {
 	return o, nil
 }
 
-// quicEndpointFor returns --quic-endpoint, or else the --wg-endpoint host with the
-// port the relay listens on.
-func (o options) quicEndpointFor(listening net.Addr) string {
-	if o.quicEndpoint != "" {
-		return o.quicEndpoint
-	}
-	host, _, _ := net.SplitHostPort(o.wgEndpoint)
-	_, port, _ := net.SplitHostPort(listening.String())
-	return net.JoinHostPort(host, port)
-}
-
 func run(log *slog.Logger, args []string) error {
 	o, err := parseFlags(args)
 	if err != nil {
@@ -100,74 +83,24 @@ func run(log *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	api := controlplane.NewClient(o.api, token)
-	ctl := controlplane.New(api, controlplane.Options{Logger: log})
-	srv, err := gateway.New(gateway.Config{
-		PrivateKey:  st.wgKey,
-		ListenPort:  wgPort,
-		QUICListen:  o.quicListen,
-		Certificate: st.cert,
-		Access:      ctl,
-		OnLineEvent: ctl.OnLineEvent,
+	svc, err := service.New(service.Config{
+		API:          o.api,
+		Token:        token,
+		PrivateKey:   st.wgKey,
+		WGListenPort: wgPort,
+		WGEndpoint:   o.wgEndpoint,
+		QUICListen:   o.quicListen,
+		QUICEndpoint: o.quicEndpoint,
+		Certificate:  st.cert,
+		Version:      version,
+		Logger:       log,
 	})
 	if err != nil {
 		return err
 	}
-	ctl.Attach(srv)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pin := srv.RelayPin()
-	quicEndpoint := o.quicEndpointFor(srv.QUICAddr())
-	quicHost, _, _ := net.SplitHostPort(quicEndpoint)
-	self := controlplane.GatewaySelf{
-		WGPublicKey:    srv.PublicKey().String(),
-		WGEndpoint:     o.wgEndpoint,
-		QUICEndpoint:   quicEndpoint,
-		QUICServerName: quicHost,
-		QUICSPKISHA256: hex.EncodeToString(pin[:]), // the contract wants hex; relay-protocol prints pins in base64
-		Version:        version,
-	}
-	if err := announce(ctx, log, api, self); err != nil {
-		_ = srv.Close()
-		return err
-	}
-	log.Info("gateway running", "version", version, "wg_port", srv.ListenPort(), "quic", srv.QUICAddr().String())
-	ctl.Run(ctx)
-
-	// Shut down in order: end the sessions (final usage, lease returns),
-	// then close the gateway, which takes its agents offline, then report
-	// those line events.
-	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	ctl.Close(shutdown)
-	_ = srv.Close()
-	ctl.Flush(shutdown)
-	log.Info("gateway stopped")
-	return nil
-}
-
-// announce sends PUT /v1/gateway/self, retrying while the API is
-// unreachable or failing. A refusal (such as a wrong token) is fatal.
-func announce(ctx context.Context, log *slog.Logger, api *controlplane.Client, self controlplane.GatewaySelf) error {
-	for {
-		err := api.PutSelf(ctx, self)
-		if err == nil {
-			return nil
-		}
-		// A wrong token will not fix itself while the gateway waits.
-		var ae *controlplane.APIError
-		if !controlplane.Temporary(err) || (errors.As(err, &ae) && ae.Status == http.StatusUnauthorized) {
-			return fmt.Errorf("announce the gateway: %w", err)
-		}
-		log.Warn("announce the gateway failed; will retry", "err", err)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Second):
-		}
-	}
+	return svc.Run(ctx)
 }
 
 // listenPort returns the port of a listen address. WireGuard listens on
