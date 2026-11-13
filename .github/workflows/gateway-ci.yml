@@ -1,0 +1,39 @@
+name: gateway-ci
+
+on:
+  pull_request:
+    paths:
+      - "gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Verify modules
+        run: go mod verify
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 ./...
