@@ -163,7 +163,7 @@ flowchart LR
   subgraph control["Control plane"]
     api["API and matching<br/>Accounts, lines, matching,<br/>configs, trust and safety"]
     billing["Billing and ledger<br/>Quota leases, double-entry ledger,<br/>holdback, payouts"]
-    usage["Usage pipeline<br/>NATS JetStream, events every 30 s,<br/>count reconciliation"]
+    usage["Usage pipeline<br/>Worker + D1, events every 30 s,<br/>count reconciliation"]
     stripe["Stripe<br/>Identity (once), Checkout (credits),<br/>Tax, Connect"]
   end
   buyer -- "WireGuard, SOCKS5" --> gw
@@ -225,7 +225,7 @@ Members prepay or earn credits, the gateway draws them down in small leases, and
 **Metering**
 
 - The gateway counts bytes in both directions for every session (WireGuard peer or SOCKS5 login, line, start, end). It is the meter of record; 1 GB = 10^9 bytes, upload plus download.
-- Every 30 seconds or 50 MB, the gateway emits a usage event with a unique ID to a durable queue (NATS JetStream). The usage service stores each event exactly once and rolls it up per hour.
+- Every 30 seconds or 50 MB, the gateway sends a usage event with a unique ID to the control-plane API, which stores each event exactly once and rolls it up per hour.
 - The agent counts independently. A daily job compares both counts per line, and a gap above 3% flags the line for review (tampered agent or bug).
 
 **Travel routers and other devices without the app**
@@ -248,7 +248,7 @@ No client ever reports its own usage; the gateway counts it, so any standard Wir
 
 Unused lease returns to the buyer when the session ends. Billing stays out of the packet path, and the most the platform can lose is one lease.
 
-**Ledger** (Postgres, whole credits, euros only at purchase and cash-out; entries are reversed and never edited)
+**Ledger** (D1, whole credits, euros only at purchase and cash-out; entries are reversed and never edited)
 
 | Account | Increases when | Decreases when |
 | --- | --- | --- |
@@ -398,11 +398,12 @@ The MVP is the first thing built; each gate must be met before the next phase st
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Seller agent | Go single binary with quic-go; Docker image; small tray app for Linux, macOS and Windows | Cross-platform, no runtime, strong networking libraries |
+| Seller agent | Go library and CLI with quic-go, embedded in the desktop app; Docker image later | Cross-platform, no runtime, strong networking libraries |
+| Desktop app | Wails v3: Go backend with a web UI in the OS webview, for Linux, macOS and Windows | One UI codebase for all three systems; the Go backend is the agent itself |
 | Edge gateway | Go: wireguard-go with gVisor netstack, quic-go, SOCKS5 server | Runs in userspace, no kernel modules, scales per region |
-| Control plane | TypeScript API and Next.js dashboards; Postgres | One language for API and web; Postgres for the ledger |
-| Usage pipeline | NATS JetStream; ClickHouse later for analytics | Durable, light and native to Go |
-| Payments and identity | Stripe Checkout, Billing, Tax, Connect, Identity, Radar | One provider for both sides of the market |
+| Control plane | TypeScript on Cloudflare Workers (Hono) with D1 for accounts, identity status and the ledger | Fits the Cloudflare and GitHub Actions setup; D1 batches give atomic ledger writes |
+| Usage pipeline | Gateway posts usage batches to the Worker; raw events kept for days, hourly rollups after; Cloudflare Queues or Postgres via Hyperdrive if volume outgrows D1 | Simple to start, with a clear path to scale |
+| Payments and identity | Stripe Checkout (one-time credit packs), Tax, Connect, Identity, Radar | One provider for both sides of the market |
 | IP intelligence | IPinfo or MaxMind for ISP data; a reputation API for daily line checks | Verify each line is residential and clean |
 | Hosting | Dedicated servers with high included traffic (Hetzner, OVH) for gateways | Every GB crosses the gateway twice |
 
