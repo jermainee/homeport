@@ -1,0 +1,14 @@
+# Known false positives that Redocly's linter skips.
+#
+# no-required-schema-properties-undefined: each `if/then/else` below requires a
+# property that its parent schema defines (session_start, reason). The rule
+# only looks inside the `then`/`else` block. The tests check both directions
+# of each rule (see test/contract.test.mjs).
+control-api.openapi.yaml:
+  no-required-schema-properties-undefined:
+    - '#/components/schemas/UsageEvent/then/required/0'
+    - '#/components/schemas/UsageEvent/else/not/required/0'
+    - '#/components/schemas/UsageResult/then/required/0'
+    - '#/components/schemas/UsageResult/else/not/required/0'
+    - '#/components/schemas/LineEventResult/then/required/0'
+    - '#/components/schemas/LineEventResult/else/not/required/0'

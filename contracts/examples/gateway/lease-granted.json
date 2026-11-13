@@ -1,0 +1,7 @@
+{
+  "lease_id": "01a1d424-0d22-7c3e-9f5a-2b8e61d7c4a9",
+  "granted_bytes": 200000000,
+  "renew_at_bytes": 160000000,
+  "expires_at": "2026-11-13T10:00:00Z",
+  "grace_seconds": 300
+}

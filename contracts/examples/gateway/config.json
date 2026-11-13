@@ -1,0 +1,28 @@
+{
+  "etag": "\"cfg-7f3a9c2e\"",
+  "peers": [
+    {
+      "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
+      "member_id": "01a1c4af-8795-7a28-9249-adbd2ba1c04a",
+      "public_key": "ID8qVleL1sxlKXgzZQbzTPuAdlP3h/m37nfq8+IB9DA=",
+      "ipv4": "10.77.0.2",
+      "ipv6": "fd77:6870::2",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
+    },
+    {
+      "peer_id": "01a1c4af-8896-7060-852d-c68d8a6174fc",
+      "member_id": "01a1c4af-8795-7a28-9249-adbd2ba1c04a",
+      "public_key": "6jNt20ZEki0n+WFznHNpE+YaFSCY/YH0HXDb5uklklU=",
+      "ipv4": "10.77.0.3",
+      "ipv6": "fd77:6870::3",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
+    }
+  ],
+  "lines": [
+    {
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "owner_member_id": "01a1c4af-897b-7f0a-a915-c1ba8ba7b153",
+      "device_spki_sha256": "9cbcb6d9cf5e797e8b18a940a0fd2a645edc317d1dc5f272a988223ae69cc2f8"
+    }
+  ]
+}

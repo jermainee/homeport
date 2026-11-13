@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "event_id": "01a1d422-9a80-71fd-82cf-7d6096776eeb",
+      "status": "applied"
+    },
+    {
+      "event_id": "01a1d423-0fb0-7ea2-a3cf-4250be183a2b",
+      "status": "duplicate"
+    },
+    {
+      "event_id": "01a1d423-84e0-77a6-8ecc-096cece50353",
+      "status": "rejected",
+      "reason": "unknown_lease"
+    }
+  ]
+}

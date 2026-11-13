@@ -1,0 +1,47 @@
+{
+  "events": [
+    {
+      "event_id": "01a1d422-9a80-71fd-82cf-7d6096776eeb",
+      "session_id": "01a1d422-2550-7b3d-b651-a660ede586fa",
+      "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "lease_id": "01a1c4af-882b-739d-988c-1410c9ee7d48",
+      "seq": 0,
+      "bytes_up": 1843204,
+      "bytes_down": 27561993,
+      "period_start": "2026-11-13T08:59:30Z",
+      "period_end": "2026-11-13T09:00:00Z",
+      "final": false,
+      "session_start": {
+        "started_at": "2026-11-13T08:59:30Z",
+        "exit_ip": "203.0.113.47"
+      }
+    },
+    {
+      "event_id": "01a1d423-0fb0-7ea2-a3cf-4250be183a2b",
+      "session_id": "01a1d422-2550-7b3d-b651-a660ede586fa",
+      "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "lease_id": "01a1c4af-882b-739d-988c-1410c9ee7d48",
+      "seq": 1,
+      "bytes_up": 402117,
+      "bytes_down": 9817342,
+      "period_start": "2026-11-13T09:00:00Z",
+      "period_end": "2026-11-13T09:00:30Z",
+      "final": false
+    },
+    {
+      "event_id": "01a1d423-84e0-77a6-8ecc-096cece50353",
+      "session_id": "01a1d3eb-36d0-7c05-a531-d0d4a94663f0",
+      "peer_id": "01a1c4af-8896-7060-852d-c68d8a6174fc",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "lease_id": "01a1c4af-8937-7bc7-bdf8-226be9170b90",
+      "seq": 118,
+      "bytes_up": 5120,
+      "bytes_down": 18944,
+      "period_start": "2026-11-13T09:00:30Z",
+      "period_end": "2026-11-13T09:00:41Z",
+      "final": true
+    }
+  ]
+}

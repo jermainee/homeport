@@ -1,0 +1,28 @@
+{
+  "name": "@homeport/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contract between the Homeport edge gateway, the apps and the control API",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "files": [
+    "control-api.openapi.yaml",
+    "examples",
+    "lib"
+  ],
+  "scripts": {
+    "lint": "redocly lint control-api.openapi.yaml",
+    "test": "node --test",
+    "validate": "node scripts/validate-examples.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@redocly/cli": "2.78.0"
+  }
+}

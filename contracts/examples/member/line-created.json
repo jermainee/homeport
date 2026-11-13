@@ -1,0 +1,8 @@
+{
+  "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+  "gateway": {
+    "quic_endpoint": "fra1.gw.homeport.example:443",
+    "server_name": "fra1.gw.homeport.example",
+    "spki_sha256": "2ca04a183e495439c9a77a4ce5f11babba2758321eb6db8d31e85b3980aea90a"
+  }
+}

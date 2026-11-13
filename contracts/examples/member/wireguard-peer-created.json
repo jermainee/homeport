@@ -1,0 +1,12 @@
+{
+  "peer": {
+    "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
+    "name": "iPhone",
+    "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+    "public_key": "ID8qVleL1sxlKXgzZQbzTPuAdlP3h/m37nfq8+IB9DA=",
+    "ipv4": "10.77.0.2",
+    "ipv6": "fd77:6870::2",
+    "created_at": "2026-11-13T09:02:00Z"
+  },
+  "config_text": "[Interface]\nPrivateKey = {{PRIVATE_KEY}}\nAddress = 10.77.0.2/32, fd77:6870::2/128\nDNS = 10.77.0.1\n\n[Peer]\nPublicKey = YND9Jx2S347AP/Ywks3VrMciTOYivx8pQxgWoPy1HHY=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = fra1.gw.homeport.example:51820\nPersistentKeepalive = 25\n"
+}
