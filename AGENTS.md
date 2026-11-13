@@ -10,8 +10,14 @@ Everything is in one git repository. Each piece of software lives in its own top
 
 | Folder | What it is | How it ships |
 | --- | --- | --- |
-| `landing-page/` | Public website | Deploy workflow to Cloudflare Pages |
-| `desktop-app/` | Share and Use app for Linux, macOS and Windows | Release workflow attaches the installers to a GitHub Release |
+| `api/` | Control plane: accounts, identity status, credits ledger, leases, lines, WireGuard peers, Stripe webhooks | Deploy workflow to Cloudflare Workers + D1 |
+| `gateway/` | Edge gateway: terminates WireGuard, relays flows to agents over QUIC, meters bytes per peer | Deploy target not decided yet |
+| `agent/` | Sharing agent: Go library and CLI that opens real sockets on the member's line | Inside `desktop-app/`; Docker image later |
+| `relay-protocol/` | Go wire format shared by `gateway/` and `agent/` | CI only |
+| `desktop-app/` | Share and Use app for Linux, macOS and Windows (Wails v3) | Release workflow attaches the installers to a GitHub Release |
+| `contracts/` | OpenAPI spec and examples for the API that `gateway/` and `desktop-app/` call | CI only |
+| `e2e/` | Cross-folder end-to-end tests and dev tools | CI only |
+| `landing-page/` | Public website (later) | Deploy workflow to Cloudflare Pages |
 
 New web parts run on Cloudflare (Pages, Workers, D1) and ship through a deploy workflow. New installable apps ship through a release workflow. When you create a folder, add a row to the table above.
 
@@ -31,8 +37,9 @@ Work test-first. Start with a failing test (red), make it pass, then refactor. A
 
 - Workflows live in `.github/workflows/` and are named `<folder>-<purpose>.yml`, for example `landing-page-ci.yml`, `landing-page-deploy.yml` and `desktop-app-release.yml`.
 - Each workflow runs only for changes under its own folder (`<folder>/**`) and to its own workflow file, so a change ships only the folder it touches.
+- **Go folders** link each other with relative `replace` directives (for example `gateway/` → `../relay-protocol`). A folder's workflow also watches the folders it depends on. There is no committed `go.work`, and CI runs with `GOWORK=off`.
 - `<folder>-ci.yml` runs lint, type checks and tests on every PR.
-- **Apps:** on merge into `main`, the release workflow builds each platform on its native runner. Linux gets an AppImage, macOS a signed and notarized `.dmg`, and Windows an installer. All three are published as a GitHub Release tagged `<folder>-v<version>`. The version comes from the app's manifest, so any PR that changes an app also bumps its version.
+- **Apps:** on merge into `main`, the release workflow builds each platform the app supports so far on its native runner: an AppImage for Linux, a signed and notarized `.dmg` for macOS and an installer for Windows. macOS comes first. The builds are published as a GitHub Release tagged `<folder>-v<version>`. The version comes from the app's manifest, so any PR that changes an app also bumps its version.
 - **Landing page:** on merge into `main`, `landing-page-deploy.yml` deploys to Cloudflare Pages with Wrangler.
 - **Workers and D1:** schema changes ship as D1 migration files, and the deploy workflow applies them.
 - **Secrets:** Cloudflare tokens, Stripe keys and Apple signing certificates are stored in GitHub Actions secrets and Cloudflare secrets. The repo holds only example files such as `.dev.vars.example`.
