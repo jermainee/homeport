@@ -6,48 +6,70 @@ import (
 	"sync/atomic"
 )
 
-// Meter counts inner IP bytes per peer. A peer's IPv4 and IPv6 tunnel
-// addresses share one counter. Packets from or to addresses the meter does
-// not know are refused, so nothing passes the gateway unmetered.
+// PeerID identifies a peer to the meter (its WireGuard public key).
+type PeerID [32]byte
+
+// Meter counts inner IP bytes per peer. A peer's tunnel addresses share one
+// counter, which survives address changes and lives until the peer is
+// removed. Packets from or to addresses the meter does not know are refused,
+// so nothing passes the gateway unmetered.
 type Meter struct {
-	mu    sync.RWMutex
-	peers map[netip.Addr]*counter
+	mu     sync.RWMutex
+	byAddr map[netip.Addr]*counter
+	byPeer map[PeerID]*counter
 }
 
 type counter struct {
 	up, down atomic.Uint64
+	addrs    []netip.Addr
 }
 
 // NewMeter returns an empty meter.
 func NewMeter() *Meter {
-	return &Meter{peers: make(map[netip.Addr]*counter)}
+	return &Meter{byAddr: make(map[netip.Addr]*counter), byPeer: make(map[PeerID]*counter)}
 }
 
-// Register starts counting for one peer's tunnel addresses.
-func (m *Meter) Register(addrs ...netip.Addr) {
-	c := &counter{}
+// Set points a peer's tunnel addresses at its counter, creating the counter
+// on first use and keeping it, with its counts, on later calls.
+func (m *Meter) Set(peer PeerID, addrs ...netip.Addr) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	c := m.byPeer[peer]
+	if c == nil {
+		c = &counter{}
+		m.byPeer[peer] = c
+	}
+	for _, a := range c.addrs {
+		delete(m.byAddr, a)
+	}
+	c.addrs = c.addrs[:0]
 	for _, a := range addrs {
 		if a.IsValid() {
-			m.peers[a] = c
+			m.byAddr[a] = c
+			c.addrs = append(c.addrs, a)
 		}
 	}
 }
 
-// Unregister stops counting for these addresses; later packets are refused.
-func (m *Meter) Unregister(addrs ...netip.Addr) {
+// Remove forgets a peer and returns its final counts.
+func (m *Meter) Remove(peer PeerID) (up, down uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, a := range addrs {
-		delete(m.peers, a)
+	c := m.byPeer[peer]
+	if c == nil {
+		return 0, 0
 	}
+	for _, a := range c.addrs {
+		delete(m.byAddr, a)
+	}
+	delete(m.byPeer, peer)
+	return c.up.Load(), c.down.Load()
 }
 
 // Usage returns the bytes counted for the peer that owns addr.
 func (m *Meter) Usage(addr netip.Addr) (up, down uint64) {
 	m.mu.RLock()
-	c := m.peers[addr]
+	c := m.byAddr[addr]
 	m.mu.RUnlock()
 	if c == nil {
 		return 0, 0
@@ -58,7 +80,7 @@ func (m *Meter) Usage(addr netip.Addr) (up, down uint64) {
 // countUp records a packet from a peer. It reports false for unknown sources.
 func (m *Meter) countUp(src netip.Addr, n int) bool {
 	m.mu.RLock()
-	c := m.peers[src]
+	c := m.byAddr[src]
 	m.mu.RUnlock()
 	if c == nil {
 		return false
@@ -70,7 +92,7 @@ func (m *Meter) countUp(src netip.Addr, n int) bool {
 // countDown records a packet to a peer. It reports false for unknown destinations.
 func (m *Meter) countDown(dst netip.Addr, n int) bool {
 	m.mu.RLock()
-	c := m.peers[dst]
+	c := m.byAddr[dst]
 	m.mu.RUnlock()
 	if c == nil {
 		return false

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -49,21 +50,34 @@ type Dialer interface {
 
 // Stack is a tun.Device backed by a gVisor stack in promiscuous mode.
 type Stack struct {
-	ep       *channel.Endpoint
-	stack    *stack.Stack
-	notify   *channel.NotificationHandle
-	events   chan tun.Event
-	incoming chan *buffer.View
-	closed   chan struct{}
-	mtu      int
-	meter    *Meter
-	dialer   Dialer
+	ep        *channel.Endpoint
+	stack     *stack.Stack
+	notify    *channel.NotificationHandle
+	events    chan tun.Event
+	incoming  chan *buffer.View
+	closed    chan struct{}
+	closeOnce sync.Once
+	ctx       context.Context // cancelled on Close; ends dials and relays
+	cancel    context.CancelFunc
+	mtu       int
+	meter     *Meter
+	dialer    Dialer
+
+	maxPending int // dials one tunnel address may have open at once
+	pendingMu  sync.Mutex
+	pending    map[netip.Addr]int
 }
 
-// New builds the stack. The meter decides which peers may send.
-func New(mtu int, meter *Meter, dialer Dialer) (*Stack, error) {
+// New builds the stack. The meter decides which peers may send, and each
+// tunnel address may have at most maxPending flows waiting on the dialer.
+func New(mtu int, meter *Meter, dialer Dialer, maxPending int) (*Stack, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Stack{
-		ep: channel.New(1024, uint32(mtu), ""),
+		ctx:        ctx,
+		cancel:     cancel,
+		maxPending: maxPending,
+		pending:    make(map[netip.Addr]int),
+		ep:         channel.New(1024, uint32(mtu), ""),
 		stack: stack.New(stack.Options{
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
@@ -165,9 +179,14 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		Peer: addrFrom(id.RemoteAddress),
 		Dst:  netip.AddrPortFrom(addrFrom(id.LocalAddress), id.LocalPort),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	if !s.startPending(flow.Peer) {
+		r.Complete(true)
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 	upstream, err := s.dialer.DialTCP(ctx, flow)
 	cancel()
+	s.endPending(flow.Peer)
 	if err != nil {
 		r.Complete(true)
 		return
@@ -180,7 +199,27 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
-	relayTCP(gonet.NewTCPConn(&wq, ep), upstream)
+	s.relayTCP(gonet.NewTCPConn(&wq, ep), upstream)
+}
+
+// startPending reserves one of the peer's pending-dial slots. A peer at its
+// limit is refused, so one member cannot use up the forwarder for everyone.
+func (s *Stack) startPending(peer netip.Addr) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pending[peer] >= s.maxPending {
+		return false
+	}
+	s.pending[peer]++
+	return true
+}
+
+func (s *Stack) endPending(peer netip.Addr) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pending[peer]--; s.pending[peer] <= 0 {
+		delete(s.pending, peer)
+	}
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
@@ -196,26 +235,32 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}
 	client := gonet.NewUDPConn(&wq, ep)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 		upstream, err := s.dialer.DialUDP(ctx, flow)
 		cancel()
 		if err != nil {
 			client.Close()
 			return
 		}
-		relayUDP(client, upstream)
+		s.relayUDP(client, upstream)
 	}()
 }
 
-// relayTCP copies both ways and passes each half-close on.
-func relayTCP(a, b net.Conn) {
+// relayTCP copies both ways. A clean end of one direction is passed on as a
+// half-close; an error on either side, or Close on the stack, ends both.
+func (s *Stack) relayTCP(a, b net.Conn) {
+	closeBoth := func() {
+		a.Close()
+		b.Close()
+	}
+	stop := context.AfterFunc(s.ctx, closeBoth)
+	defer stop()
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
-		io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		} else {
-			dst.Close()
+		_, err := io.Copy(dst, src)
+		cw, halfClose := dst.(interface{ CloseWrite() error })
+		if err != nil || !halfClose || cw.CloseWrite() != nil {
+			closeBoth()
 		}
 		done <- struct{}{}
 	}
@@ -223,14 +268,18 @@ func relayTCP(a, b net.Conn) {
 	go pipe(b, a)
 	<-done
 	<-done
-	a.Close()
-	b.Close()
+	closeBoth()
 }
 
-// relayUDP copies datagrams both ways until the flow is idle.
-func relayUDP(client, upstream net.Conn) {
+// relayUDP copies datagrams both ways until the flow is idle or the stack closes.
+func (s *Stack) relayUDP(client, upstream net.Conn) {
 	defer client.Close()
 	defer upstream.Close()
+	stop := context.AfterFunc(s.ctx, func() {
+		client.Close()
+		upstream.Close()
+	})
+	defer stop()
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		buf := make([]byte, 65535)
@@ -258,18 +307,17 @@ func (s *Stack) Events() <-chan tun.Event { return s.events }
 func (s *Stack) MTU() (int, error)        { return s.mtu, nil }
 func (s *Stack) BatchSize() int           { return 1 }
 
+// Close stops the stack and every flow through it. It is safe to call more than once.
 func (s *Stack) Close() error {
-	select {
-	case <-s.closed:
-		return nil
-	default:
-	}
-	close(s.closed)
-	s.ep.RemoveNotify(s.notify)
-	s.stack.RemoveNIC(nicID)
-	s.stack.Close()
-	s.ep.Close()
-	close(s.events)
+	s.closeOnce.Do(func() {
+		s.cancel()
+		close(s.closed)
+		s.ep.RemoveNotify(s.notify)
+		s.stack.RemoveNIC(nicID)
+		s.stack.Close()
+		s.ep.Close()
+		close(s.events)
+	})
 	return nil
 }
 

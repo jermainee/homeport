@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -32,7 +31,10 @@ type Config struct {
 	ListenPort uint16 // UDP port for WireGuard; 0 picks a free one
 	MTU        int    // inner MTU; 0 means 1280
 	Dialer     FlowDialer
-	Logger     *slog.Logger
+
+	// MaxPendingFlowsPerPeer caps the flows one tunnel address may have
+	// waiting on the Dialer; more are refused with a reset. 0 means 64.
+	MaxPendingFlowsPerPeer int
 }
 
 // Peer is a member device allowed to connect.
@@ -51,7 +53,6 @@ type Usage struct {
 type Server struct {
 	cfg    Config
 	dev    *device.Device
-	stack  *wgstack.Stack
 	meter  *wgstack.Meter
 	port   uint16
 	mu     sync.Mutex
@@ -64,14 +65,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Dialer == nil {
 		return nil, errors.New("gateway: Config.Dialer is required")
 	}
+	if cfg.PrivateKey == (Key{}) {
+		return nil, errors.New("gateway: Config.PrivateKey is required")
+	}
 	if cfg.MTU == 0 {
 		cfg.MTU = 1280
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.DiscardHandler)
+	if cfg.MaxPendingFlowsPerPeer == 0 {
+		cfg.MaxPendingFlowsPerPeer = 64
 	}
 	meter := wgstack.NewMeter()
-	st, err := wgstack.New(cfg.MTU, meter, cfg.Dialer)
+	st, err := wgstack.New(cfg.MTU, meter, cfg.Dialer, cfg.MaxPendingFlowsPerPeer)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
@@ -90,7 +94,7 @@ func New(cfg Config) (*Server, error) {
 		dev.Close()
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
-	return &Server{cfg: cfg, dev: dev, stack: st, meter: meter, port: port, peers: make(map[Key]Peer)}, nil
+	return &Server{cfg: cfg, dev: dev, meter: meter, port: port, peers: make(map[Key]Peer)}, nil
 }
 
 // ListenPort is the UDP port WireGuard listens on.
@@ -99,8 +103,9 @@ func (s *Server) ListenPort() uint16 { return s.port }
 // PublicKey is the gateway's WireGuard public key.
 func (s *Server) PublicKey() Key { return s.cfg.PrivateKey.PublicKey() }
 
-// AddPeer lets a member device connect. Its tunnel addresses are the only
-// sources it may send from, and its traffic is metered from now on.
+// AddPeer lets a member device connect, or updates its tunnel addresses.
+// Those addresses are the only sources it may send from, and its traffic is
+// metered from now on. Re-adding a peer keeps the usage counted so far.
 func (s *Server) AddPeer(p Peer) error {
 	if !p.IPv4.IsValid() && !p.IPv6.IsValid() {
 		return errors.New("gateway: peer needs a tunnel address")
@@ -115,32 +120,38 @@ func (s *Server) AddPeer(p Peer) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.peers[p.PublicKey]; ok {
-		s.meter.Unregister(old.IPv4, old.IPv6)
+	for key, other := range s.peers {
+		if key != p.PublicKey && sharesAddress(p, other) {
+			return fmt.Errorf("gateway: tunnel address of peer %s is already in use", p.PublicKey)
+		}
 	}
-	s.meter.Register(p.IPv4, p.IPv6)
 	if err := s.dev.IpcSet(b.String()); err != nil {
-		s.meter.Unregister(p.IPv4, p.IPv6)
 		return fmt.Errorf("gateway: add peer: %w", err)
 	}
+	s.meter.Set(wgstack.PeerID(p.PublicKey), p.IPv4, p.IPv6)
 	s.peers[p.PublicKey] = p
 	return nil
 }
 
-// RemovePeer disconnects a member device; its packets are refused from now on.
-func (s *Server) RemovePeer(publicKey Key) error {
+func sharesAddress(a, b Peer) bool {
+	return (a.IPv4.IsValid() && a.IPv4 == b.IPv4) || (a.IPv6.IsValid() && a.IPv6 == b.IPv6)
+}
+
+// RemovePeer disconnects a member device and returns its final usage, so
+// bytes counted since the last report can still be billed. Its packets are
+// refused from now on.
+func (s *Server) RemovePeer(publicKey Key) (Usage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.peers[publicKey]
-	if !ok {
-		return nil
+	if _, ok := s.peers[publicKey]; !ok {
+		return Usage{}, nil
 	}
 	if err := s.dev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", hex.EncodeToString(publicKey[:]))); err != nil {
-		return fmt.Errorf("gateway: remove peer: %w", err)
+		return Usage{}, fmt.Errorf("gateway: remove peer: %w", err)
 	}
-	s.meter.Unregister(p.IPv4, p.IPv6)
+	up, down := s.meter.Remove(wgstack.PeerID(publicKey))
 	delete(s.peers, publicKey)
-	return nil
+	return Usage{Up: up, Down: down}, nil
 }
 
 // PeerUsage returns the bytes counted for the peer with this tunnel address.

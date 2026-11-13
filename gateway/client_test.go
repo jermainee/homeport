@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,19 +179,89 @@ func newUDPEcho(t *testing.T) string {
 
 func newGateway(t *testing.T, dialer gateway.FlowDialer) *gateway.Server {
 	t.Helper()
-	key, err := gateway.GenerateKey()
-	if err != nil {
-		t.Fatalf("gateway key: %v", err)
-	}
-	gw, err := gateway.New(gateway.Config{
-		PrivateKey: key,
-		Dialer:     dialer,
-	})
+	return newGatewayWith(t, gateway.Config{Dialer: dialer})
+}
+
+// newGatewayWith starts a gateway with a fresh private key and cfg's other settings.
+func newGatewayWith(t *testing.T, cfg gateway.Config) *gateway.Server {
+	t.Helper()
+	cfg.PrivateKey = newKey(t)
+	gw, err := gateway.New(cfg)
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}
 	t.Cleanup(func() { gw.Close() })
 	return gw
+}
+
+// parkingDialer holds every TCP dial until released, like an agent that is
+// slow to answer.
+type parkingDialer struct {
+	release chan struct{}
+	once    sync.Once
+	parked  atomic.Int32
+}
+
+func (d *parkingDialer) DialTCP(ctx context.Context, _ gateway.Flow) (net.Conn, error) {
+	d.parked.Add(1)
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+	}
+	return nil, errors.New("released")
+}
+
+func (d *parkingDialer) DialUDP(context.Context, gateway.Flow) (net.Conn, error) {
+	return nil, errors.New("no UDP")
+}
+
+func (d *parkingDialer) releaseAll() { d.once.Do(func() { close(d.release) }) }
+
+// recordingDialer connects to target and tracks whether the gateway fully
+// closed every upstream connection it opened (CloseWrite alone does not count).
+type recordingDialer struct {
+	target string
+	mu     sync.Mutex
+	conns  []*recordedConn
+}
+
+func (d *recordingDialer) DialTCP(ctx context.Context, _ gateway.Flow) (net.Conn, error) {
+	var nd net.Dialer
+	c, err := nd.DialContext(ctx, "tcp", d.target)
+	if err != nil {
+		return nil, err
+	}
+	rc := &recordedConn{TCPConn: c.(*net.TCPConn)}
+	d.mu.Lock()
+	d.conns = append(d.conns, rc)
+	d.mu.Unlock()
+	return rc, nil
+}
+
+func (d *recordingDialer) DialUDP(context.Context, gateway.Flow) (net.Conn, error) {
+	return nil, errors.New("no UDP")
+}
+
+// allClosed reports whether every dialed connection was fully closed.
+func (d *recordingDialer) allClosed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.conns {
+		if !c.closed.Load() {
+			return false
+		}
+	}
+	return len(d.conns) > 0
+}
+
+type recordedConn struct {
+	*net.TCPConn
+	closed atomic.Bool
+}
+
+func (c *recordedConn) Close() error {
+	c.closed.Store(true)
+	return c.TCPConn.Close()
 }
 
 func newKey(t *testing.T) gateway.Key {
@@ -214,6 +285,18 @@ func randomBytes(n int) []byte {
 func sum(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
+}
+
+// waitUntil polls until cond holds.
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 10 s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // waitStable polls until read returns the same value for quiet, so in-flight
