@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,6 +51,9 @@ type Error struct {
 	// ServerTime is the API's clock from the response's Date header, or
 	// zero without one.
 	ServerTime time.Time
+	// RetryAfter is how long the API asks the client to wait, from the
+	// Retry-After header (seconds or an HTTP date), or zero.
+	RetryAfter time.Duration
 }
 
 func (e *Error) Error() string {
@@ -138,6 +142,7 @@ func (c *Client) doStatus(ctx context.Context, method, path, token string, body,
 	if t, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
 		apiErr.ServerTime = t
 	}
+	apiErr.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), apiErr.ServerTime)
 	var payload struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
@@ -148,6 +153,24 @@ func (c *Client) doStatus(ctx context.Context, method, path, token string, body,
 		apiErr.Code = strings.ReplaceAll(strings.ToLower(http.StatusText(resp.StatusCode)), " ", "_")
 	}
 	return resp.StatusCode, apiErr
+}
+
+// retryAfter reads a Retry-After value: delay seconds, or an HTTP date
+// measured against the API's clock (now when it sent no Date).
+func retryAfter(v string, serverTime time.Time) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		return max(0, time.Duration(secs)*time.Second)
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if serverTime.IsZero() {
+			serverTime = time.Now()
+		}
+		return max(0, t.Sub(serverTime))
+	}
+	return 0
 }
 
 // LoginStatus is the state of a sign-in: pending until the member approves

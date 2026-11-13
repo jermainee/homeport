@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 	"uuid"
 )
@@ -62,7 +63,7 @@ func (s *Server) Devices(t testing.TB, email string) []Device {
 			out = append(out, *d)
 		}
 	}
-	slices.SortFunc(out, func(a, b Device) int { return compare(a.ID, b.ID) })
+	slices.SortFunc(out, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -94,18 +95,8 @@ func (s *Server) Lines(t testing.TB, email string) []Line {
 			out = append(out, *l)
 		}
 	}
-	slices.SortFunc(out, func(a, b Line) int { return compare(a.ID, b.ID) })
+	slices.SortFunc(out, func(a, b Line) int { return strings.Compare(a.ID, b.ID) })
 	return out
-}
-
-func compare(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 // decodeStrict reads a JSON object with only the fields of v, as the API's

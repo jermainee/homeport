@@ -29,16 +29,19 @@ type Share struct {
 	DayBytes uint64 `json:"day_bytes,omitempty"`
 }
 
-// memberDir is the directory for one member's Share. Member ids come from
-// the API, so only a canonical UUID may become a path.
-func (p *Profile) memberDir(memberID string) (string, error) {
+// memberDir is the directory for one member's Share, created when create
+// is set. Member ids come from the API, so only a canonical UUID may become
+// a path.
+func (p *Profile) memberDir(memberID string, create bool) (string, error) {
 	id, err := uuid.Parse(memberID)
 	if err != nil || id.String() != memberID {
 		return "", fmt.Errorf("profile: member id %q is not a lowercase UUID", memberID)
 	}
 	dir := filepath.Join(p.dir, "members", memberID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("profile: %w", err)
+	if create {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("profile: %w", err)
+		}
 	}
 	return dir, nil
 }
@@ -50,7 +53,7 @@ func (p *Profile) memberDir(memberID string) (string, error) {
 // The key is a PEM PKCS #8 file only the user can read, like the session;
 // the Keychain comes with signed release builds.
 func (p *Profile) AgentKey(memberID string) (ed25519.PrivateKey, error) {
-	dir, err := p.memberDir(memberID)
+	dir, err := p.memberDir(memberID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +101,7 @@ func createAgentKey(path string) (ed25519.PrivateKey, error) {
 // or damaged file is a fresh start: registering the same key again returns
 // the same device.
 func (p *Profile) Share(memberID string) (Share, error) {
-	dir, err := p.memberDir(memberID)
+	dir, err := p.memberDir(memberID, false)
 	if err != nil {
 		return Share{}, err
 	}
@@ -118,7 +121,7 @@ func (p *Profile) Share(memberID string) (Share, error) {
 
 // SaveShare saves what the profile remembers about member's Share.
 func (p *Profile) SaveShare(memberID string, s Share) error {
-	dir, err := p.memberDir(memberID)
+	dir, err := p.memberDir(memberID, true)
 	if err != nil {
 		return err
 	}

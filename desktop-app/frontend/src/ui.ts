@@ -105,10 +105,30 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
       if (s.kind !== "signedIn" && s.kind !== "signingOut") return;
       shownShare = v;
       if (morphShare(app, render(s, v))) return;
+      const onHeading = document.activeElement === app.querySelector("h1");
       const { action } = draw(s);
-      if (action) app.querySelector<HTMLElement>(`[data-action="${action}"]`)?.focus();
+      restoreFocus(onHeading, action);
     });
     void share.start();
+  };
+
+  // restoreFocus puts focus back after Share redrew the screen: on the
+  // heading if it was there, on the button the member used, or, when that
+  // button is gone (Check again found them verified), on the Share switch.
+  const restoreFocus = (onHeading: boolean, action: string | undefined) => {
+    if (onHeading) {
+      const title = app.querySelector<HTMLElement>("h1");
+      if (title) {
+        title.tabIndex = -1;
+        title.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (!action) return;
+    const target =
+      app.querySelector<HTMLElement>(`[data-action="${action}"]`) ??
+      (action.startsWith("share-") ? app.querySelector<HTMLElement>("[data-share] [data-action]") : null);
+    target?.focus();
   };
   const stopShare = () => {
     share?.dispose();
@@ -121,13 +141,17 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
     if (!signedIn && share) stopShare();
 
     const { action, fresh } = draw(s);
-    // After the draw, so home counts as a new screen for focus below.
-    if (signedIn && !share) queueMicrotask(() => startShare(s.member.identityStatus));
 
     const said = announcement(prev, s);
     if (said) announcer.textContent = said;
     prev = s;
 
+    focusScreen(s, action, fresh);
+    // After the focus, so Share's first status keeps it where it went.
+    if (signedIn && !share) startShare(s.member.identityStatus);
+  });
+
+  const focusScreen = (s: State, action: string | undefined, fresh: boolean) => {
     // The email field takes focus whenever it can be typed in, with a
     // rejected address selected so it can be retyped at once.
     const email = app.querySelector<HTMLInputElement>("#email");
@@ -136,18 +160,10 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
       if (s.kind === "signedOut" && s.error) email.select();
       return;
     }
-    if (!fresh) {
-      // Same screen, new details: keep focus on the button the member used.
-      if (action) app.querySelector<HTMLElement>(`[data-action="${action}"]`)?.focus();
-      return;
-    }
+    // Same screen, new details: keep focus on the button the member used.
     // A new screen: focus its heading, so a screen reader announces it.
-    const title = app.querySelector<HTMLElement>("h1");
-    if (title) {
-      title.tabIndex = -1;
-      title.focus({ preventScroll: true });
-    }
-  });
+    restoreFocus(fresh, fresh ? undefined : action);
+  };
 
   app.addEventListener("submit", (e) => {
     const form = (e.target as HTMLElement).closest<HTMLFormElement>("[data-form=email]");

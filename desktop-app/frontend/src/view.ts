@@ -182,6 +182,7 @@ export function shareLine(st: ShareStatus): string {
     case "offline":
       if (st.error === "gateway_unavailable") return "Waiting for a Homeport gateway. Trying again…";
       if (st.error === "offline") return "Can't reach Homeport. Trying again…";
+      if (st.error === "rate_limited") return "Homeport asked Share to wait. Trying again later…";
       return "Homeport isn't answering. Trying again…";
     case "error":
       return "Share couldn't set up this Mac's line, so it stopped. Turn it on to try again.";

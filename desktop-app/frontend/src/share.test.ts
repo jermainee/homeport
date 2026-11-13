@@ -49,6 +49,36 @@ describe("a member who isn't verified", () => {
     expect(api.identityChecks).toBe(1);
   });
 
+  it("gets the switch after verifying, although Go refused a press before", async () => {
+    await open();
+    api.answer = { ...off, state: "error", error: "identity_required" };
+    await share.toggle();
+    expect(share.view).toMatchObject({ kind: "verify" });
+
+    // Go still remembers the refusal; the API now says verified.
+    api.identityStatus = "verified";
+    await share.recheck();
+
+    expect(share.view).toEqual({ kind: "ready", status: off, turning: false });
+  });
+
+  it("follows Share turned on from the tray once the API accepts the member", async () => {
+    await open("processing");
+
+    api.emit({ state: "connecting", sharing: true });
+
+    expect(share.view).toMatchObject({ kind: "ready", status: { state: "connecting", sharing: true } });
+  });
+
+  it("goes to sign-in when Check again finds nobody signed in", async () => {
+    await open("unverified");
+    api.identityStatus = null;
+
+    await share.recheck();
+
+    expect(share.view).toEqual({ kind: "signedOut" });
+  });
+
   it("is sent to verify when Go refuses to turn Share on", async () => {
     await open();
     api.answer = { ...off, state: "error", error: "identity_required" };

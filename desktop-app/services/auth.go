@@ -35,6 +35,7 @@ type AuthService struct {
 	attempt       *pendingLogin // a Start whose outcome is unknown, reused on retry
 	pending       *pendingLogin // the sign-in the API accepted, which Poll checks
 	beforeSignOut []func(context.Context)
+	afterSignIn   []func()
 }
 
 // pendingLogin is one sign-in attempt and, once the API accepts it, the
@@ -142,6 +143,19 @@ type PollResult struct {
 // Poll asks the API once whether the member has approved the sign-in. Once
 // they have, it saves the session in the profile.
 func (s *AuthService) Poll(ctx context.Context) (PollResult, error) {
+	res, err := s.poll(ctx)
+	if err == nil && res.Status == LoginApproved {
+		s.mu.Lock()
+		hooks := s.afterSignIn
+		s.mu.Unlock()
+		for _, fn := range hooks {
+			fn()
+		}
+	}
+	return res, err
+}
+
+func (s *AuthService) poll(ctx context.Context) (PollResult, error) {
 	s.mu.Lock()
 	p, gen := s.pending, s.gen
 	s.mu.Unlock()
@@ -197,7 +211,7 @@ func (s *AuthService) Current(ctx context.Context) (*Member, error) {
 	sess, ok, err := s.profile.Session()
 	if err != nil {
 		// An unreadable session file can't sign anyone in; start over.
-		return nil, serviceError(s.profile.ClearSession())
+		return nil, s.forgetSession(ctx)
 	}
 	if !ok {
 		return nil, nil
@@ -205,7 +219,7 @@ func (s *AuthService) Current(ctx context.Context) (*Member, error) {
 	m, err := s.api.Me(ctx, sess.Token)
 	if apiclient.IsStatus(err, http.StatusUnauthorized) {
 		// Signed out elsewhere, or the session ran out.
-		return nil, serviceError(s.profile.ClearSession())
+		return nil, s.forgetSession(ctx)
 	}
 	if err != nil {
 		return nil, serviceError(err)
@@ -220,6 +234,22 @@ func (s *AuthService) Current(ctx context.Context) (*Member, error) {
 			EarnedCashable: m.Credits.EarnedCashable,
 		},
 	}, nil
+}
+
+// forgetSession clears a session that no longer works, after the sign-out
+// hooks ran, so Share doesn't go on sharing for nobody.
+func (s *AuthService) forgetSession(ctx context.Context) error {
+	s.runBeforeSignOut(ctx)
+	return serviceError(s.profile.ClearSession())
+}
+
+func (s *AuthService) runBeforeSignOut(ctx context.Context) {
+	s.mu.Lock()
+	hooks := s.beforeSignOut
+	s.mu.Unlock()
+	for _, fn := range hooks {
+		fn(ctx)
+	}
 }
 
 // retryable reports whether a request may succeed if sent again unchanged:
@@ -238,11 +268,8 @@ func retryable(err error) bool {
 func (s *AuthService) SignOut(ctx context.Context) error {
 	s.mu.Lock()
 	s.forgetLocked()
-	hooks := s.beforeSignOut
 	s.mu.Unlock()
-	for _, fn := range hooks {
-		fn(ctx)
-	}
+	s.runBeforeSignOut(ctx)
 
 	sess, ok, _ := s.profile.Session() // an unreadable file is cleared below
 	if ok {
@@ -254,6 +281,16 @@ func (s *AuthService) SignOut(ctx context.Context) error {
 }
 
 const signOutTimeout = 5 * time.Second
+
+// AfterSignIn adds fn to what Poll does once the member signed in:
+// ShareService shows that member's count for today there.
+//
+//wails:ignore
+func (s *AuthService) AfterSignIn(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterSignIn = append(s.afterSignIn, fn)
+}
 
 // BeforeSignOut adds fn to what SignOut does first, while the session still
 // works: ShareService turns Share off there.

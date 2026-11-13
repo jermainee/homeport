@@ -46,6 +46,7 @@ func main() {
 	auth := services.NewAuthService(api, prof)
 	share := services.NewShareService(api, prof, services.ShareOptions{Logger: logger})
 	auth.BeforeSignOut(share.SignOut)
+	auth.AfterSignIn(share.SignIn)
 
 	app := application.New(application.Options{
 		Name:        "Homeport",

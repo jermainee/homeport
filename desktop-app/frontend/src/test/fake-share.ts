@@ -6,7 +6,8 @@ export const off: ShareStatus = { state: "off", sharing: false, bytesToday: 0, f
 
 export class FakeShare implements ShareApi {
   current: ShareStatus = off;
-  identityStatus = "verified";
+  /** The member's identity status; null when nobody is signed in. */
+  identityStatus: string | null = "verified";
   /** What SetSharing answers next, or the error it throws. */
   answer: ShareStatus | Error | null = null;
   toggles: boolean[] = [];

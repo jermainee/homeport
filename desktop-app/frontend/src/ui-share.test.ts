@@ -51,6 +51,10 @@ describe("the Share panel", () => {
     expect(app.querySelector('[data-field="bytesToday"]')?.textContent).toBe("2.5 MB");
   });
 
+  it("keeps focus on the home heading while Share's status arrives", () => {
+    expect(document.activeElement).toBe(app.querySelector("h1"));
+  });
+
   it("updates today's count in place", async () => {
     share.emit({ state: "online", sharing: true, bytesToday: 1_000_000 });
     const count = app.querySelector('[data-field="bytesToday"]');
@@ -91,10 +95,13 @@ describe("for a member who isn't verified", () => {
     expect(app.querySelector('[data-action="share-recheck"]')?.textContent?.trim()).toBe("Check again");
   });
 
-  it("shows the switch once a check finds them verified", async () => {
-    app.querySelector<HTMLElement>('[data-action="share-recheck"]')!.click();
+  it("shows the switch once a check finds them verified, and focuses it", async () => {
+    const recheck = app.querySelector<HTMLElement>('[data-action="share-recheck"]')!;
+    recheck.focus();
+    recheck.click();
 
     await vi.waitFor(() => expect(app.querySelector('[role="switch"]')).not.toBeNull());
     expect(share.identityChecks).toBe(1);
+    expect(document.activeElement).toBe(app.querySelector('[role="switch"]'));
   });
 });

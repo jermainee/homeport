@@ -35,5 +35,5 @@ export const wailsShare: ShareApi = {
         // An unknown state from a newer Go side; the next one may be known.
       }
     }),
-  identity: async () => (await AuthService.Current())?.identityStatus ?? "unverified",
+  identity: async () => (await AuthService.Current())?.identityStatus ?? null,
 };

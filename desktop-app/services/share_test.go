@@ -506,8 +506,10 @@ func TestShareComesBackOnAfterARestart(t *testing.T) {
 		t.Fatalf("ServiceStartup: %v", err)
 	}
 
+	if got := f.share.Status(); !got.Sharing {
+		t.Errorf("status after start-up = %+v, want Share on", got)
+	}
 	f.agents.nth(t, 2)
-	eventually(t, "Share is on", func() bool { return f.share.Status().Sharing })
 }
 
 func TestShareStaysOffAfterARestart(t *testing.T) {
@@ -521,12 +523,35 @@ func TestShareStaysOffAfterARestart(t *testing.T) {
 		t.Fatalf("ServiceStartup: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// ServiceStartup decides at once, so Share is off and stays off.
+	if got := f.share.Status(); got.State != services.ShareOff || got.Sharing {
+		t.Errorf("status = %+v, want off", got)
+	}
+	if err := f.share.ServiceShutdown(); err != nil {
+		t.Fatalf("ServiceShutdown: %v", err)
+	}
 	if n := f.agents.count(); n != 1 {
 		t.Errorf("%d agents ran, want only the first", n)
 	}
-	if got := f.share.Status(); got.State != services.ShareOff {
-		t.Errorf("status = %+v, want off", got)
+}
+
+func TestStartUpDoesNotOverrideTheMembersChoice(t *testing.T) {
+	f := verified(t)
+	f.share.SetSharing(t.Context(), true)
+	f.agents.nth(t, 1)
+	if err := f.share.ServiceShutdown(); err != nil { // quits with Share on
+		t.Fatalf("ServiceShutdown: %v", err)
+	}
+
+	f.share = f.open(t)
+	// The member turns Share off from the tray before start-up resumes it.
+	f.share.SetSharing(t.Context(), false)
+	if err := f.share.ServiceStartup(t.Context(), application.ServiceOptions{}); err != nil {
+		t.Fatalf("ServiceStartup: %v", err)
+	}
+
+	if got := f.share.Status(); got.Sharing {
+		t.Errorf("status after start-up = %+v, want Share off as the member chose", got)
 	}
 }
 
@@ -652,5 +677,84 @@ func TestAListenerThatBlocksHoldsNothingUp(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Share waited for a blocked listener")
+	}
+}
+
+func TestASessionEndedElsewhereStopsShare(t *testing.T) {
+	f := verified(t)
+	auth := newAuth(t, f.api, f.dir)
+	auth.BeforeSignOut(f.share.SignOut)
+	f.share.SetSharing(t.Context(), true)
+	a := f.agents.nth(t, 1)
+
+	f.api.RevokeAll() // signed out everywhere from another device
+	if me, err := auth.Current(t.Context()); err != nil || me != nil {
+		t.Fatalf("Current = %+v, %v; want nobody", me, err)
+	}
+
+	select {
+	case <-a.stopped:
+	default:
+		t.Error("the agent still runs although nobody is signed in")
+	}
+	if got := f.share.Status(); got.Sharing {
+		t.Errorf("status = %+v, want Share off", got)
+	}
+}
+
+func TestTurningOffAgainSendsATurnOffTheAPIMissed(t *testing.T) {
+	f := verified(t)
+	f.share.SetSharing(t.Context(), true)
+	f.agents.nth(t, 1)
+	f.api.SetOffline(true)
+	f.share.SetSharing(t.Context(), false)
+	f.api.SetOffline(false)
+
+	// Share is off already; the member signs out, which turns it off again.
+	f.share.SignOut(t.Context())
+
+	if lines := f.api.Lines(t, email); lines[0].SharingEnabled {
+		t.Error("the API still has sharing on")
+	}
+}
+
+func TestTodaysCountComesBackAfterSigningInAgain(t *testing.T) {
+	f := verified(t)
+	auth := newAuth(t, f.api, f.dir)
+	auth.BeforeSignOut(f.share.SignOut)
+	auth.AfterSignIn(f.share.SignIn)
+	f.share.SetSharing(t.Context(), true)
+	f.agents.nth(t, 1).set(func(s *agent.Stats) { s.BytesIn = 2_000_000 })
+	f.share.Status()
+	if err := auth.SignOut(t.Context()); err != nil {
+		t.Fatalf("SignOut: %v", err)
+	}
+
+	signIn(t, f.api, auth, email)
+
+	if got := f.share.Status(); got.BytesToday != 2_000_000 || got.Sharing {
+		t.Errorf("status = %+v, want 2000000 bytes shared today and Share off", got)
+	}
+}
+
+func TestShareWaitsAsLongAsTheAPIAsks(t *testing.T) {
+	f := verified(t)
+	// Ten new devices today already: the API asks to wait an hour.
+	f.api.FailNextRetryAfter("POST /v1/devices", http.StatusTooManyRequests, "rate_limited", time.Hour)
+
+	got := f.share.SetSharing(t.Context(), true)
+
+	if got.State != services.ShareOffline || got.Error != services.ErrRateLimited {
+		t.Errorf("status = %+v, want offline with error %q", got, services.ErrRateLimited)
+	}
+	time.Sleep(100 * time.Millisecond) // ten times RetryMax
+	n := 0
+	for _, r := range f.api.Requests() {
+		if r == "POST /v1/devices" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("POST /v1/devices sent %d times, want once while the API asks to wait", n)
 	}
 }

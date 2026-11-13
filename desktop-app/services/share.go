@@ -244,15 +244,47 @@ func (s *ShareService) SignOut(ctx context.Context) {
 	s.publish()
 }
 
+// SignIn shows the newly signed-in member's count for today.
+//
+//wails:ignore
+func (s *ShareService) SignIn() {
+	if _, _, ok := s.signedInShare(); ok {
+		s.publish()
+	}
+}
+
+// signedInShare returns the session and the Share state of the signed-in
+// member, and loads that member's day count if another one was shown.
+func (s *ShareService) signedInShare() (profile.Session, profile.Share, bool) {
+	sess, ok, err := s.profile.Session()
+	if err != nil || !ok {
+		return profile.Session{}, profile.Share{}, false
+	}
+	sh, err := s.readShare(sess.MemberID)
+	if err != nil {
+		return profile.Session{}, profile.Share{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.memberID != sess.MemberID {
+		s.memberID, s.day, s.dayBytes = sess.MemberID, "", 0
+		if sh.Day == s.today() {
+			s.day, s.dayBytes = sh.Day, sh.DayBytes
+		}
+	}
+	return sess, sh, true
+}
+
 // ServiceStartup starts publishing the status and, if the member left Share
-// on when the app last quit, turns it on again.
+// on when the app last quit, turns it on again. It decides at once, from
+// the profile, so a choice the member makes later always wins.
 func (s *ShareService) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.stopBackground = cancel
 	s.mu.Unlock()
 	s.background.Go(func() { s.watch(ctx) })
-	s.background.Go(func() { s.resume(ctx) })
+	s.resume(ctx)
 	return nil
 }
 
@@ -273,11 +305,25 @@ func (s *ShareService) ServiceShutdown() error {
 // start turns Share on and returns the status after the first attempt to
 // set up the line, or when ctx ends.
 func (s *ShareService) start(ctx context.Context) ShareStatus {
+	answered := s.launch()
+	if answered == nil {
+		return s.Status() // on already
+	}
+	select {
+	case st := <-answered:
+		return st
+	case <-ctx.Done():
+		return s.Status()
+	}
+}
+
+// launch turns Share on and starts its run, which answers on the returned
+// channel after its first attempt. It returns nil if Share is on already.
+func (s *ShareService) launch() <-chan ShareStatus {
 	s.mu.Lock()
 	if s.on {
-		st := s.statusLocked()
 		s.mu.Unlock()
-		return st
+		return nil
 	}
 	if s.cancelRun != nil {
 		s.cancelRun() // a run that failed and is ending
@@ -293,20 +339,16 @@ func (s *ShareService) start(ctx context.Context) ShareStatus {
 	s.publish()
 
 	go s.run(runCtx, gen, prev, done, answered)
-	select {
-	case st := <-answered:
-		return st
-	case <-ctx.Done():
-		return s.Status()
-	}
+	return answered
 }
 
 // stop ends the current run. With turnOff, it records the member's choice
-// and turns sharing off at the API; without, the app is quitting.
+// and turns sharing off at the API, also when an earlier turn-off didn't
+// reach it; without, the app is quitting.
 func (s *ShareService) stop(ctx context.Context, turnOff bool) {
 	s.mu.Lock()
 	s.gen++
-	cancel, done, memberID := s.cancelRun, s.runDone, s.memberID
+	cancel, done := s.cancelRun, s.runDone
 	s.on, s.err = false, ""
 	s.cancelRun, s.runDone = nil, nil
 	settled := make(chan struct{})
@@ -315,38 +357,47 @@ func (s *ShareService) stop(ctx context.Context, turnOff bool) {
 		s.last = settled
 	}
 	s.mu.Unlock()
-	if done == nil {
-		s.publish()
-		return
-	}
 
-	cancel()
-	<-done // the run detached its agent and saved the day count
-	s.publish()
-	if !turnOff || memberID == "" {
-		return
+	if done != nil {
+		cancel()
+		<-done // the run detached its agent and saved the day count
 	}
-	sh, err := s.updateShare(memberID, func(sh *profile.Share) { sh.On = false })
-	if err != nil || !sh.APIOn || sh.LineID == "" {
+	s.publish()
+	if !turnOff {
 		return
 	}
 	sess, ok, _ := s.profile.Session()
 	if !ok {
 		return
 	}
-	ctx, cancelPatch := context.WithTimeout(context.WithoutCancel(ctx), turnOffTimeout)
-	defer cancelPatch()
-	if err := s.api.UpdateLine(ctx, sess.Token, sh.LineID, false); err != nil {
-		// The agent is stopped, so nothing flows through the line. The
-		// next start tells the API (resume).
+	sh, err := s.updateShare(sess.MemberID, func(sh *profile.Share) { sh.On = false })
+	if err != nil || !sh.APIOn || sh.LineID == "" {
+		return
+	}
+	s.tellAPIOff(ctx, sess, sess.MemberID, sh.LineID)
+}
+
+// tellAPIOff turns sharing on lineID off at the API. If that fails, the
+// agent is stopped anyway, so nothing flows through the line; the next
+// turn-off or start tries again.
+func (s *ShareService) tellAPIOff(ctx context.Context, sess profile.Session, memberID, lineID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), turnOffTimeout)
+	defer cancel()
+	if err := s.api.UpdateLine(ctx, sess.Token, lineID, false); err != nil {
 		s.log.Warn("could not turn sharing off at the API", "error", err)
 		return
 	}
-	_, _ = s.updateShare(memberID, func(sh *profile.Share) { sh.APIOn = false })
+	if _, err := s.updateShare(memberID, func(sh *profile.Share) { sh.APIOn = false }); err != nil {
+		s.log.Warn("could not save the Share setting", "error", err)
+	}
 }
 
 // turnOffTimeout bounds telling the API that sharing is off.
 const turnOffTimeout = 5 * time.Second
+
+// maxRetryAfter caps how long Share honours an API's Retry-After, so a
+// wrong header can't keep it waiting for days.
+const maxRetryAfter = 24 * time.Hour
 
 // run is one Share session, from on until stop or a failure.
 // It answers start with the status after its first attempt.
@@ -386,11 +437,16 @@ func (s *ShareService) run(ctx context.Context, gen uint64, prev <-chan struct{}
 			s.fail(gen, err)
 			return
 		}
-		s.log.Warn("could not set up the line; trying again", "error", err)
+		delay := retry.next()
+		var apiErr *apiclient.Error
+		if errors.As(err, &apiErr) && apiErr.RetryAfter > delay {
+			delay = min(apiErr.RetryAfter, maxRetryAfter)
+		}
+		s.log.Warn("could not set up the line; trying again", "error", err, "retry_in", delay)
 		s.setOffline(gen, shareErrorCode(err))
 		answer()
 		select {
-		case <-time.After(retry.next()):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return
 		}
@@ -494,6 +550,14 @@ func (s *ShareService) fail(gen uint64, err error) {
 	}
 	s.mu.Unlock()
 	s.publish()
+}
+
+// readShare returns what the profile remembers about member's Share. It
+// holds mu, like updateShare, so it never reads half a change.
+func (s *ShareService) readShare(memberID string) (profile.Share, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.profile.Share(memberID)
 }
 
 // updateShare changes what the profile remembers about member's Share.
@@ -600,37 +664,24 @@ func (s *ShareService) watch(ctx context.Context) {
 	}
 }
 
-// resume turns Share on at start-up if the member left it on, and tells
-// the API about a turn-off it missed.
+// resume turns Share on at start-up if the member left it on, unless they
+// already chose otherwise in this run of the app, and tells the API about a
+// turn-off it missed.
 func (s *ShareService) resume(ctx context.Context) {
-	sess, ok, err := s.profile.Session()
-	if err != nil || !ok {
-		return
-	}
-	sh, err := s.profile.Share(sess.MemberID)
-	if err != nil {
+	sess, sh, ok := s.signedInShare()
+	if !ok {
 		return
 	}
 	s.mu.Lock()
-	if s.memberID == "" {
-		s.memberID = sess.MemberID
-		if sh.Day == s.today() {
-			s.day, s.dayBytes = sh.Day, sh.DayBytes
-		}
-	}
+	untouched := s.gen == 0
 	s.mu.Unlock()
 	switch {
-	case sh.On:
-		s.start(ctx)
-	case sh.APIOn && sh.LineID != "":
-		ctx, cancel := context.WithTimeout(ctx, turnOffTimeout)
-		defer cancel()
-		if s.api.UpdateLine(ctx, sess.Token, sh.LineID, false) == nil {
-			_, _ = s.updateShare(sess.MemberID, func(sh *profile.Share) { sh.APIOn = false })
-		}
-	default:
-		s.publish()
+	case sh.On && untouched:
+		s.launch()
+	case !sh.On && sh.APIOn && sh.LineID != "":
+		s.background.Go(func() { s.tellAPIOff(ctx, sess, sess.MemberID, sh.LineID) })
 	}
+	s.publish()
 }
 
 // enrollment is what the agent needs to dial the line's gateway.
@@ -661,7 +712,7 @@ func (s *ShareService) enroll(ctx context.Context, sess profile.Session, ids *en
 	if err != nil {
 		return enrollment{}, &Error{Code: ErrUnexpected, err: err}
 	}
-	sh, err := s.updateShare(sess.MemberID, func(*profile.Share) {})
+	sh, err := s.readShare(sess.MemberID)
 	if err != nil {
 		return enrollment{}, &Error{Code: ErrUnexpected, err: err}
 	}

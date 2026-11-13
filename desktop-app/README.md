@@ -87,11 +87,11 @@ Turning Share on runs these steps, and the switch shows the outcome of the first
 3. `POST /v1/lines` returns the device's line and its gateway. The contract sends the gateway's pin as the hex SHA-256 of its SPKI; the app turns it into relay-protocol's `Pin`, whose text form is base64. The agent pins it, so the gateway's `server_name` is not needed.
 4. `PATCH /v1/lines/{id}` turns sharing on, and the agent dials the gateway.
 
-While the API or a gateway can't be reached, Share stays on and tries again, from 1 s doubling to 1 minute. An error that retrying won't fix turns Share off and says why. The screen and the tray show the agent's state: connecting, online, paused while another VPN carries the default route, or offline.
+While the API or a gateway can't be reached, Share stays on and tries again, from 1 s doubling to 1 minute, or later if the API's `Retry-After` asks for it. An error that retrying won't fix turns Share off and says why. The screen and the tray show the agent's state: connecting, online, paused while another VPN carries the default route, or offline.
 
 "Shared today" is the agent's own count of payload bytes, kept per day in `members/<id>/share.json` across restarts. Credits follow the gateway's count, which includes packet headers.
 
-Closing the window keeps Share running in the menu bar. Quit stops the agent but keeps the member's choice, so Share turns on again at the next start. Turning Share off, or signing out, stops the agent first and then tells the API; a turn-off the API missed is sent at the next start.
+Closing the window keeps Share running in the menu bar. Quit stops the agent but keeps the member's choice, so Share turns on again at the next start, unless the member turns it off before then. Turning Share off, or signing out, stops the agent first and then tells the API; a turn-off the API missed is sent with the next turn-off or at the next start. A session that ends elsewhere, or runs out, turns Share off as well.
 
 ## Build and release
 

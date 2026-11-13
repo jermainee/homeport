@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -111,7 +112,8 @@ type failure struct {
 	code   string // error code; empty drops the connection instead
 	lose   bool   // handle the request, then drop the connection
 	hold   chan struct{}
-	date   time.Time // Date header to send with the error, if set
+	date   time.Time     // Date header to send with the error, if set
+	retry  time.Duration // Retry-After header to send with the error, if set
 }
 
 var (
@@ -246,6 +248,14 @@ func (s *Server) LoseNextResponse(route string) {
 	s.failures = append(s.failures, failure{route: route, lose: true})
 }
 
+// FailNextRetryAfter is FailNext with a Retry-After header, as the API sends
+// with 429 rate_limited.
+func (s *Server) FailNextRetryAfter(route string, status int, code string, retryAfter time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = append(s.failures, failure{route: route, status: status, code: code, retry: retryAfter})
+}
+
 // SetOffline makes the API unreachable, dropping every connection, until it
 // is called with false. Unlike FailNext, it also defeats the HTTP client's
 // own retry of a GET on a dropped keep-alive connection.
@@ -317,6 +327,9 @@ func (s *Server) injectFailures(next http.Handler) http.Handler {
 		}
 		if !f.date.IsZero() {
 			w.Header().Set("Date", f.date.UTC().Format(http.TimeFormat))
+		}
+		if f.retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(f.retry.Seconds())))
 		}
 		writeError(w, f.status, f.code)
 	})

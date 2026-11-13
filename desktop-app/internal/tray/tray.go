@@ -28,7 +28,7 @@ var (
 // Open shows.
 func New(app *application.App, window application.Window, share *services.ShareService) {
 	menu := app.NewMenu()
-	status := menu.Add(Label(share.Status())).SetEnabled(false)
+	status := menu.Add(Label(services.ShareStatus{})).SetEnabled(false)
 	toggle := menu.AddCheckbox(switchLabel(), false)
 	menu.AddSeparator()
 	menu.Add("Open Homeport").OnClick(func(*application.Context) { Show(app, window) })
@@ -46,8 +46,19 @@ func New(app *application.App, window application.Window, share *services.ShareS
 			Show(app, window)
 		}
 	})
+	// Statuses arrive every second while sharing, as the count grows; the
+	// menu changes only with the state, so only then does it touch the
+	// main thread.
+	shownLabel, shownOn := Label(services.ShareStatus{}), false
 	share.OnStatus(func(st services.ShareStatus) {
-		status.SetLabel(Label(st))
+		if label := Label(st); label != shownLabel {
+			status.SetLabel(label)
+			shownLabel = label
+		}
+		if st.Sharing == shownOn {
+			return
+		}
+		shownOn = st.Sharing
 		toggle.SetChecked(st.Sharing)
 		if st.Sharing {
 			tray.SetTemplateIcon(iconOn)

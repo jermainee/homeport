@@ -24,8 +24,8 @@ export interface ShareApi {
   setSharing(on: boolean): Promise<ShareStatus>;
   /** onStatus calls fn on every change Go publishes; it returns an unsubscribe. */
   onStatus(fn: (s: ShareStatus) => void): () => void;
-  /** identity asks the API for the member's identity status again. */
-  identity(): Promise<string>;
+  /** identity asks the API for the member's identity status again; null when nobody is signed in. */
+  identity(): Promise<string | null>;
 }
 
 export type ShareView =
@@ -68,9 +68,15 @@ export class Share {
     await this.#load();
   }
 
-  async #load(): Promise<void> {
+  // #load shows Go's status. After a check found the member verified, an
+  // identity_required error Go still holds is from before the check.
+  async #load(afterCheck = false): Promise<void> {
     try {
-      this.#follow(await this.api.status());
+      let status = await this.api.status();
+      if (afterCheck && status.error === "identity_required" && !status.sharing) {
+        status = { ...status, state: "off", error: undefined };
+      }
+      this.#follow(status);
     } catch (err) {
       this.#set({ kind: "ready", status: offStatus, turning: false, failed: errorCode(err) });
     }
@@ -97,19 +103,23 @@ export class Share {
     const v = this.#view;
     if (v.kind !== "verify" || v.checking) return;
     this.#set({ ...v, checking: true });
-    let identity: string;
+    let identity: string | null;
     try {
       identity = await this.api.identity();
     } catch {
       identity = v.identity;
     }
     if (this.#disposed) return;
+    if (identity === null) {
+      this.#set({ kind: "signedOut" });
+      return;
+    }
     this.identity = identity;
     if (identity !== "verified") {
       this.#set({ kind: "verify", identity, checking: false });
       return;
     }
-    await this.#load();
+    await this.#load(true);
   }
 
   /** dispose stops listening to Go. */
@@ -135,7 +145,10 @@ export class Share {
       return;
     }
     const v = this.#view;
-    // Until a check finds the member verified, the verify screen stays.
+    // Share on means the API accepted the member, for example after they
+    // verified and turned Share on from the tray.
+    if (status.sharing) this.identity = "verified";
+    // Until then, the verify screen stays.
     if (v.kind === "verify" && this.identity !== "verified") return;
     this.#set({ kind: "ready", status, turning: !answer && v.kind === "ready" && v.turning });
   }
