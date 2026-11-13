@@ -2,3 +2,10 @@
 ENVIRONMENT=dev
 EMAIL_MODE=log
 PUBLIC_BASE_URL=http://localhost:8787
+# Stripe test mode. Use a sandbox's keys, never live keys.
+STRIPE_SECRET_KEY=
+STRIPE_IDENTITY_RESTRICTED_KEY=
+# Printed by `stripe listen --forward-to localhost:8787/v1/stripe/webhook`.
+STRIPE_WEBHOOK_SECRET=
+# Any long random string, for example `openssl rand -hex 32`.
+IDENTITY_HASH_KEY=

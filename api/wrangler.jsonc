@@ -21,9 +21,22 @@
     // Origin used to build the links in sign-in emails. Empty means no links are sent (503).
     "PUBLIC_BASE_URL": ""
   },
-  // Keeps `wrangler types` independent of a local .dev.vars file.
+  // Keeps `wrangler types` independent of a local .dev.vars file. Set them
+  // with `wrangler secret put`, and locally in .dev.vars.
   "secrets": {
-    "required": []
+    "required": [
+      // Creates Identity verification sessions. A restricted key (rk_) with
+      // Identity write access is enough.
+      "STRIPE_SECRET_KEY",
+      // Restricted key (rk_) with read access to Identity verification results
+      // and detailed results; reads document number and birth date.
+      "STRIPE_IDENTITY_RESTRICTED_KEY",
+      // Signing secret of the webhook endpoint (whsec_), or of `stripe listen`.
+      "STRIPE_WEBHOOK_SECRET",
+      // Key of the HMAC that turns a verified identity into members.identity_hash.
+      // Changing it breaks the duplicate-identity check for existing members.
+      "IDENTITY_HASH_KEY"
+    ]
   },
   "d1_databases": [
     {

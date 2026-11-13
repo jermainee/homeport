@@ -1,4 +1,6 @@
+import { every } from "hono/combine";
 import { createMiddleware } from "hono/factory";
+import { requireSession, type SessionVariables } from "./auth/middleware";
 import { sha256Hex } from "./crypto";
 import { apiError, invalidRequest, readJsonObject } from "./http";
 
@@ -26,10 +28,15 @@ export interface IdempotentVariables {
  * Makes a JSON POST safe to retry, as the contract requires: the body's
  * `request_id` (UUIDv7) is claimed once, the first response is stored, and a
  * retry with the same body gets it again. The same request_id with another
- * body, or on another endpoint, gets 409. 5xx responses are not kept, so a
- * retry runs again.
+ * body, on another endpoint, or from another member, gets 409: behind
+ * requireSession the member is part of the request, so no member ever sees
+ * another member's response (use memberIdempotent there, which fixes that
+ * order). 5xx responses are not kept, so a retry runs again.
  */
-export const idempotent = createMiddleware<{ Bindings: Env; Variables: IdempotentVariables }>(
+export const idempotent = createMiddleware<{
+  Bindings: Env;
+  Variables: IdempotentVariables & Partial<SessionVariables>;
+}>(
   async (c, next) => {
     const body = await readJsonObject(c.req.raw);
     if (!body) return invalidRequest(c, "body must be a JSON object");
@@ -47,7 +54,7 @@ export const idempotent = createMiddleware<{ Bindings: Env; Variables: Idempoten
     }
 
     const db = c.env.DB;
-    const fingerprint = await requestFingerprint(c.req.method, new URL(c.req.url).pathname, body);
+    const fingerprint = await requestFingerprint(c.req.method, new URL(c.req.url).pathname, body, c.get("member")?.id);
     const claim = await db
       .prepare(
         `INSERT INTO idempotency_records (request_id, fingerprint, claimed_at, created_at, expires_at)
@@ -100,13 +107,25 @@ export const idempotent = createMiddleware<{ Bindings: Env; Variables: Idempoten
   },
 );
 
-/** SHA-256 of method, path and canonical body: what "the same request" means. */
+/**
+ * requireSession, then idempotent: the order that makes the member part of
+ * the request. Use this on every member endpoint that takes a request_id;
+ * `idempotent` alone is for endpoints without a session.
+ */
+export const memberIdempotent = every(requireSession, idempotent);
+
+/**
+ * SHA-256 of method, path, the signed-in member (if any) and canonical body:
+ * what "the same request" means.
+ */
 export function requestFingerprint(
   method: string,
   path: string,
   body: Record<string, unknown>,
+  memberId?: string,
 ): Promise<string> {
-  return sha256Hex(`${method} ${path}\n${canonicalJson(body)}`);
+  const caller = memberId === undefined ? "" : ` member:${memberId}`;
+  return sha256Hex(`${method} ${path}${caller}\n${canonicalJson(body)}`);
 }
 
 /**

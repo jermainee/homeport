@@ -36,6 +36,12 @@ export default defineConfig({
             ENVIRONMENT: "dev",
             EMAIL_MODE: "log",
             PUBLIC_BASE_URL: "https://api.homeport.test",
+            // Stripe is faked in tests (test/fake-stripe.ts); webhooks are
+            // signed with this secret.
+            STRIPE_SECRET_KEY: "sk_test_unused",
+            STRIPE_IDENTITY_RESTRICTED_KEY: "rk_test_unused",
+            STRIPE_WEBHOOK_SECRET: "whsec_test_homeport",
+            IDENTITY_HASH_KEY: "test-identity-hash-key",
             // Test-only binding so the setup file can apply the migrations.
             TEST_MIGRATIONS: migrations,
           },
