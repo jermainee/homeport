@@ -4,7 +4,10 @@ import { authApi } from "./auth/api";
 import { confirmPages } from "./auth/confirm";
 import { limitBodySize } from "./body-limits";
 import { devRoutes } from "./dev";
+import { devicesApi } from "./devices";
+import { linesApi } from "./lines/api";
 import { meApi } from "./me";
+import { wireguardApi } from "./wireguard/api";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -12,6 +15,9 @@ app.use(limitBodySize);
 
 app.route("/v1/auth", authApi);
 app.route("/v1/me", meApi);
+app.route("/v1/devices", devicesApi);
+app.route("/v1/lines", linesApi);
+app.route("/v1/wireguard", wireguardApi);
 app.route("/auth", confirmPages);
 app.route("/dev", devRoutes);
 
