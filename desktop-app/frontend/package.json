@@ -1,0 +1,22 @@
+{
+  "name": "homeport-desktop-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:dev": "vite build --minify false --mode development",
+    "build": "tsc && vite build --mode production",
+    "typecheck": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource/barlow-semi-condensed": "5.3.0",
+    "@wailsio/runtime": "3.1.0"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
