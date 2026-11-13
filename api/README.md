@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions and `request_id` idempotency. Later PRs add the credits ledger, Stripe Identity, Checkout, lines and WireGuard peers.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency and the credits ledger. Later PRs add Stripe Identity, Checkout, lines, WireGuard peers and the gateway endpoints.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ npm run dev
 | Script | What it does |
 | --- | --- |
 | `npm run dev` | `wrangler dev` with a local D1 database |
-| `npm test` | Vitest inside the Workers runtime (`@cloudflare/vitest-plugin`); migrations are applied in `test/apply-migrations.ts` |
+| `npm test` | Vitest inside the Workers runtime (`@cloudflare/vitest-plugin`); migrations are applied in `test/apply-migrations.ts`, and responses are checked against the contract (see below) |
 | `npm run lint` | ESLint with type-aware rules, including `no-floating-promises` |
 | `npm run typecheck` | `tsc` for `src/` and `test/` |
 | `npm run types` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc`; CI fails if it is stale |
@@ -73,7 +73,7 @@ sequenceDiagram
    - `401 unauthorized` for a missing or malformed token;
    - `404 not_found` for a token that belongs to another request;
    - `410 login_request_expired` once the request has expired.
-5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. Credits are all 0 until the ledger lands.
+5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. `credits` are the member's ledger balances (see Credits ledger).
 6. `DELETE /v1/auth/session` revokes the session it is called with: `204`, or `401`.
 
 No response carries a secret, so replaying one by `request_id` is harmless.
@@ -100,12 +100,32 @@ Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once 
 - Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says (`src/body-limits.ts`).
 - Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
 
+## Credits ledger
+
+All prices and billing constants live in `src/pricing.ts`; no other file holds a price. The ledger is in `src/ledger/`.
+
+- **Double-entry, append-only.** Every booking is a `ledger_transactions` row with at least two `ledger_entries` (signed whole credits) that sum to zero. Triggers abort every `UPDATE` and `DELETE` of either table, so a correction is a new, reversing transaction. Each booking ends by inserting its id into the `ledger_balance_checks` view, whose trigger aborts the whole batch if the entries do not balance.
+- **Accounts.** Each member has `purchased`, `earned_pending` and `earned_cashable`, created by a trigger when the member is created. The platform has `platform_revenue`, `credits_issued` (the source of sold credits) and `dev_grants`. Each account caches its balance, which a trigger moves with every entry.
+- **Idempotent.** Each transaction has a unique `idempotency_key` naming the business event (`usage:<usage_key>`, `dev_grant:<id>`, ...). A retry finds it and books nothing.
+- **One guarded batch per change.** D1 has no interactive transactions. A change reads the member's `ledger_version` with the balances it decides on, then writes everything in one `db.batch`. The batch's first statement bumps the version, guarded by the value read, and sets a fresh `ledger_nonce`; every later statement runs only while that nonce is still there. If another change committed first, the batch writes nothing and the change reads again and retries (`src/ledger/guarded-batch.ts`).
+- **Spend order.** Usage takes `purchased` first, then `earned_pending`, then `earned_cashable`. Metered usage is always booked, even past the balance; the shortfall makes `purchased` negative. `GET /v1/me` shows a negative account as 0.
+- **Usage charges.** `chargeUsage` adds bytes to a meter's running total (`meter_totals`, for example per WireGuard peer). The user pays `floor(total × 10 / 10^6)` minus what the meter already charged, and the line's owner earns `floor(total × 5 / 10^6)` minus what it already paid into `earned_pending`; the platform keeps the difference. Rounding therefore never adds up across usage events. Each piece of usage is recorded once in `usage_charges` by its `usage_key`, even when it books less than a credit.
+- **Reservations.** A quota lease reserves credits (`credit_reservations`) without booking anything: available credits are the balance minus what open, unexpired reservations still hold. Usage charged against a reservation reduces what it holds, and releasing it frees the rest. The check and the insert run behind the member's guard, so concurrent leases never reserve more than the member has.
+
+## Contract checks in tests
+
+`vitest.config.ts` loads `@homeport/contracts` (`file:../contracts`, installed as a copy through `install-links=true` in `.npmrc`) in Node and exposes it to tests as the `CONTRACT` service binding, because ajv cannot compile schemas inside workerd. `expectContract(method, pathTemplate, response)` in `test/contract.ts` checks a response's status and body against `contracts/control-api.openapi.yaml`. Run `npm install` again after the contract changes.
+
 ## Dev-only routes
 
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
+- `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines before credit packs can be bought.
 
 ## Database
 
-`migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`. Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
+- `migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`.
+- `migrations/0002_credit_ledger.sql` adds `members.ledger_version` and `members.ledger_nonce`, and creates `ledger_accounts`, `ledger_transactions`, `ledger_entries`, the `ledger_balance_checks` view, `meter_totals`, `usage_charges` and `credit_reservations`, with their triggers.
+
+Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
