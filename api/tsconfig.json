@@ -15,5 +15,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
+  "include": ["src/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts", "contract-module.d.ts"]
 }

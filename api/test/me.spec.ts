@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { expectContract } from "./contract";
 import { bearer, call, newSessionToken, signIn, uniqueEmail } from "./helpers";
 
 describe("GET /v1/me", () => {
@@ -26,6 +27,16 @@ describe("GET /v1/me", () => {
     const response = await call("/v1/me", { headers: { authorization: sessionToken } });
 
     expect(response.status).toBe(401);
+  });
+
+  it("returns the member as the contract describes it", async () => {
+    const { sessionToken, memberId } = await signIn(uniqueEmail());
+
+    const response = await call("/v1/me", bearer(sessionToken));
+
+    expect(response.status).toBe(200);
+    const me = await expectContract("GET", "/v1/me", response);
+    expect(me).toMatchObject({ member_id: memberId, identity_status: "unverified" });
   });
 
   it("accepts the Bearer scheme in any case", async () => {
