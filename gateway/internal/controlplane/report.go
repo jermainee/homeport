@@ -151,8 +151,7 @@ func keepForRetry(err error) bool {
 }
 
 // Run polls the config every ConfigInterval, steps every second and
-// reports what is queued, until ctx ends. Then it ends every session and
-// reports what it can before Run returns.
+// reports what is queued, until ctx ends. Call Close afterwards.
 func (c *Controller) Run(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
@@ -166,9 +165,6 @@ func (c *Controller) Run(ctx context.Context) {
 	go c.loop(ctx, time.Second, func() { c.Flush(ctx) })
 	c.loop(ctx, time.Second, c.Step)
 	<-done
-	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	c.Close(shutdown)
 }
 
 // loop runs fn now and then every interval until ctx ends.
@@ -186,9 +182,13 @@ func (c *Controller) loop(ctx context.Context, interval time.Duration, fn func()
 }
 
 // Close ends every session with a final usage event, then reports the
-// events and returns the leases, as far as ctx allows.
+// events and returns the leases, as far as ctx allows. From then on no
+// session starts: every flow is refused. Line events that come later, such
+// as the gateway's agents going offline when it closes, are reported by a
+// later Flush.
 func (c *Controller) Close(ctx context.Context) {
 	c.mu.Lock()
+	c.closing = true
 	now := c.clock.Now()
 	for _, ps := range c.peers {
 		if ps.sess != nil {

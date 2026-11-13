@@ -69,15 +69,18 @@ func parseFlags(args []string) (options, error) {
 	if _, _, err := net.SplitHostPort(o.wgEndpoint); err != nil {
 		return options{}, fmt.Errorf("--wg-endpoint: %w", err)
 	}
-	if o.quicEndpoint == "" {
-		host, _, _ := net.SplitHostPort(o.wgEndpoint)
-		_, port, err := net.SplitHostPort(o.quicListen)
-		if err != nil {
-			return options{}, fmt.Errorf("--quic-listen: %w", err)
-		}
-		o.quicEndpoint = net.JoinHostPort(host, port)
-	}
 	return o, nil
+}
+
+// quicEndpointFor returns --quic-endpoint, or else the --wg-endpoint host with the
+// port the relay listens on.
+func (o options) quicEndpointFor(listening net.Addr) string {
+	if o.quicEndpoint != "" {
+		return o.quicEndpoint
+	}
+	host, _, _ := net.SplitHostPort(o.wgEndpoint)
+	_, port, _ := net.SplitHostPort(listening.String())
+	return net.JoinHostPort(host, port)
 }
 
 func run(log *slog.Logger, args []string) error {
@@ -111,26 +114,36 @@ func run(log *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = srv.Close() }()
 	ctl.Attach(srv)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	pin := srv.RelayPin()
-	quicHost, _, _ := net.SplitHostPort(o.quicEndpoint)
+	quicEndpoint := o.quicEndpointFor(srv.QUICAddr())
+	quicHost, _, _ := net.SplitHostPort(quicEndpoint)
 	self := controlplane.GatewaySelf{
 		WGPublicKey:    srv.PublicKey().String(),
 		WGEndpoint:     o.wgEndpoint,
-		QUICEndpoint:   o.quicEndpoint,
+		QUICEndpoint:   quicEndpoint,
 		QUICServerName: quicHost,
 		QUICSPKISHA256: hex.EncodeToString(pin[:]), // the contract wants hex; relay-protocol prints pins in base64
 		Version:        version,
 	}
 	if err := announce(ctx, log, api, self); err != nil {
+		_ = srv.Close()
 		return err
 	}
-	log.Info("gateway running", "version", version, "wg_port", srv.ListenPort(), "quic", o.quicListen)
+	log.Info("gateway running", "version", version, "wg_port", srv.ListenPort(), "quic", srv.QUICAddr().String())
 	ctl.Run(ctx)
+
+	// Shut down in order: end the sessions (final usage, lease returns),
+	// then close the gateway, which takes its agents offline, then report
+	// those line events.
+	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ctl.Close(shutdown)
+	_ = srv.Close()
+	ctl.Flush(shutdown)
 	log.Info("gateway stopped")
 	return nil
 }
@@ -140,12 +153,13 @@ func run(log *slog.Logger, args []string) error {
 func announce(ctx context.Context, log *slog.Logger, api *controlplane.Client, self controlplane.GatewaySelf) error {
 	for {
 		err := api.PutSelf(ctx, self)
-		var ae *controlplane.APIError
-		if err == nil || !errors.As(err, &ae) || (ae.Status != 0 && ae.Status < 500 && ae.Status != http.StatusTooManyRequests) {
-			if err != nil {
-				return fmt.Errorf("announce the gateway: %w", err)
-			}
+		if err == nil {
 			return nil
+		}
+		// A wrong token will not fix itself while the gateway waits.
+		var ae *controlplane.APIError
+		if !controlplane.Temporary(err) || (errors.As(err, &ae) && ae.Status == http.StatusUnauthorized) {
+			return fmt.Errorf("announce the gateway: %w", err)
 		}
 		log.Warn("announce the gateway failed; will retry", "err", err)
 		select {

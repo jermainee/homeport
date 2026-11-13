@@ -74,6 +74,11 @@ type Lease struct {
 	RenewAtBytes int64     `json:"renew_at_bytes"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	GraceSeconds int       `json:"grace_seconds"`
+
+	// ServerDate is the API's Date header on the answer, if it sent one.
+	// expires_at is on the API's clock; ServerDate lets the gateway convert
+	// it to its own.
+	ServerDate time.Time `json:"-"`
 }
 
 // UsageEvent is the bytes one session used in one period.
@@ -203,7 +208,12 @@ func (c *Client) Config(ctx context.Context, etag string) (cfg Config, changed b
 // *InsufficientCreditsError and a 403 answer is ErrPeerInactive.
 func (c *Client) CreateLease(ctx context.Context, req LeaseRequest) (Lease, error) {
 	var l Lease
-	err := c.do(ctx, http.MethodPost, "/v1/gateway/leases", req, nil, &l)
+	_, hdr, err := c.send(ctx, http.MethodPost, "/v1/gateway/leases", req, nil, &l)
+	if err == nil {
+		if d, perr := http.ParseTime(hdr.Get("Date")); perr == nil {
+			l.ServerDate = d
+		}
+	}
 	return l, err
 }
 
@@ -249,24 +259,29 @@ func (c *Client) report(ctx context.Context, path string, body any, n int) ([]Ev
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in any, h http.Header, out any) error {
-	_, err := c.doStatus(ctx, method, path, in, h, out)
+	_, _, err := c.send(ctx, method, path, in, h, out)
 	return err
 }
 
-// doStatus sends one request. A 2xx answer is decoded into out; a status in
-// also is returned without error and without a body.
 func (c *Client) doStatus(ctx context.Context, method, path string, in any, h http.Header, out any, also ...int) (int, error) {
+	status, _, err := c.send(ctx, method, path, in, h, out, also...)
+	return status, err
+}
+
+// send sends one request. A 2xx answer is decoded into out; a status in
+// also is returned without error and without a body.
+func (c *Client) send(ctx context.Context, method, path string, in any, h http.Header, out any, also ...int) (int, http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return 0, fmt.Errorf("controlplane: encode request: %w", err)
+			return 0, nil, fmt.Errorf("controlplane: encode request: %w", err)
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
-		return 0, fmt.Errorf("controlplane: %w", err)
+		return 0, nil, fmt.Errorf("controlplane: %w", err)
 	}
 	for k, v := range h {
 		req.Header[k] = v
@@ -278,7 +293,7 @@ func (c *Client) doStatus(ctx context.Context, method, path string, in any, h ht
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, &APIError{Err: err}
+		return 0, nil, &APIError{Err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	limit := int64(maxResponseBody)
@@ -287,22 +302,22 @@ func (c *Client) doStatus(ctx context.Context, method, path string, in any, h ht
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
-		return 0, &APIError{Err: err}
+		return 0, nil, &APIError{Err: err}
 	}
 	for _, s := range also {
 		if resp.StatusCode == s {
-			return s, nil
+			return s, resp.Header, nil
 		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return resp.StatusCode, errorFor(resp.StatusCode, raw)
+		return resp.StatusCode, resp.Header, errorFor(resp.StatusCode, raw)
 	}
 	if out != nil {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("controlplane: decode %s answer: %w", path, err)
+			return resp.StatusCode, resp.Header, fmt.Errorf("controlplane: decode %s answer: %w", path, err)
 		}
 	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, resp.Header, nil
 }
 
 func errorFor(status int, body []byte) error {

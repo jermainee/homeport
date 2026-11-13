@@ -35,8 +35,9 @@ Homeport's edge gateway. It terminates members' WireGuard tunnels in userspace, 
 - **Leases:**
   - The first flow of a session waits for the session's first lease.
   - The next lease is requested at `renew_at_bytes`, or a minute before the current lease expires, with `supersedes_lease_id`.
-  - Bytes count against the current lease until all of `granted_bytes` are used or it expires; then the session moves to the next lease. The switch happens at the next one-second step, so a lease may end up a little over its `granted_bytes`.
+  - Bytes count against the current lease until all of `granted_bytes` are used or it expires; then the session moves to the next lease. Expiry is counted on the gateway's clock: the gateway converts `expires_at` with the answer's `Date` header, so clock skew between gateway and API does not end leases early. The switch happens at the next one-second step, so a lease may end up a little over its `granted_bytes`.
 - **Without a lease** (after a 402, or while the API is unreachable): the gateway resets the peer's flows and allows only DNS through the virtual resolver and TLS on port 443 whose ClientHello names a host in `topup_hostnames`. It asks again every 10 s, so a member who tops up continues without a new session. After `grace_seconds` the session closes: those of the 402, else of the current lease, else the last the API sent (300 before any).
+  - The server name is read from the ClientHello in the clear. A browser using Encrypted Client Hello names only the provider's public name there (Cloudflare's is `cloudflare-ech.com`), so **top-up hosts must not offer ECH**; on Cloudflare, turn it off for their zone.
   - A retry after no answer or a 429, 5xx or 401 keeps its `request_id`. A new request after any other answer gets a new one, because the API replays stored answers.
 - **Closing a session** (grace over, or 403 `peer_inactive`, at once): the peer is suspended: its flows are reset and its packets are dropped without being counted, so the final usage event holds every byte. After a minute the peer is let back, and its next byte starts a new session.
 - **Usage events:** cut per session every 30 s (if bytes were counted), every 50 MB, at a lease switch, and at session end (`final`). Each event takes every byte the meter counted since the last one, so the events add up to the meter exactly. Bytes metered while no session could start (the line offline) go into the next session's first event. Batches hold up to 100 events.
@@ -57,7 +58,7 @@ HOMEPORT_GATEWAY_TOKEN=hpgw_<id>.<secret> homeport-gateway \
 
 - The state dir keeps the WireGuard key (`wg.key`) and the relay certificate (`relay.crt`, `relay.key`), created on first start. Members' configs and agents' pins depend on them, so a damaged file stops the gateway instead of being replaced.
 - `--quic-endpoint` defaults to the `--wg-endpoint` host with the `--quic-listen` port.
-- At start the gateway sends `PUT /v1/gateway/self`, retrying while the API is unreachable. On SIGINT or SIGTERM it ends every session, reports the final usage and returns the leases.
+- At start the gateway sends `PUT /v1/gateway/self`, retrying while the API is unreachable (a refused token stops it). On SIGINT or SIGTERM it ends every session and refuses new ones, reports the final usage, returns the leases, disconnects its agents and reports those lines offline.
 
 Still to come: short idle timeouts for DNS flows.
 

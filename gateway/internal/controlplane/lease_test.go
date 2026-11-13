@@ -285,3 +285,61 @@ func sumBytes(events []usageEvent) uint64 {
 	}
 	return n
 }
+
+func TestLeaseIsRenewedAMinuteBeforeItExpires(t *testing.T) {
+	f := newFixture(t)
+	f.access(t) // lease 1 expires at 10:00
+
+	f.gw.send(t, peerAKey, 0, 1)
+	f.step(t, 58*time.Minute+59*time.Second)
+	if n := len(f.api.leaseRequests()); n != 1 {
+		t.Fatalf("%d lease requests more than a minute before expiry, want 1", n)
+	}
+	f.gw.send(t, peerAKey, 0, 1)
+	f.step(t, time.Second)
+
+	reqs := f.api.leaseRequests()
+	if len(reqs) != 2 || reqs[1].SupersedesLeaseID != leaseID(1) {
+		t.Fatalf("lease requests %+v; want a renewal of lease 1 a minute before it expires", reqs)
+	}
+	f.gw.send(t, peerAKey, 0, 1)
+	f.step(t, time.Minute)
+	if got := f.access(t); got != gateway.AccessFull {
+		t.Errorf("access is %v after the expiry, want full on the renewed lease", got)
+	}
+}
+
+func TestLeaseExpiryFollowsTheAPIsClockNotTheGateways(t *testing.T) {
+	f := newFixture(t)
+	f.api.setClockOffset(-2 * time.Hour) // the gateway's clock runs two hours ahead
+
+	if got := f.access(t); got != gateway.AccessFull {
+		t.Fatalf("access is %v, want full", got)
+	}
+	resets := f.gw.resetCount(t, peerAKey)
+	f.gw.send(t, peerAKey, 0, 1)
+	f.step(t, time.Second)
+
+	if got := f.access(t); got != gateway.AccessFull {
+		t.Errorf("access is %v a second into a lease the API granted for an hour, want full", got)
+	}
+	if f.gw.resetCount(t, peerAKey) != resets || len(f.api.leaseRequests()) != 1 {
+		t.Error("the gateway treated a fresh lease as expired")
+	}
+}
+
+func TestClosedSessionsPeerStaysQuietAfterTheCooldown(t *testing.T) {
+	f := newFixture(t)
+	f.api.setLeaseFn(func(leaseRequest) (int, any) {
+		return http.StatusForbidden, example(t, "lease-peer-inactive.json")
+	})
+	f.gw.send(t, peerAKey, 60, 0) // the SYN of the first flow, before any step
+	f.access(t)
+
+	f.step(t, time.Minute)
+	f.step(t, time.Second)
+
+	if n := len(f.api.leaseRequests()); n != 1 {
+		t.Errorf("%d lease requests; a peer that sent nothing after its session closed must not start a new one", n)
+	}
+}

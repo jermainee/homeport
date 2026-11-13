@@ -269,20 +269,29 @@ func assertConnEnds(t *testing.T, conn net.Conn) {
 	}
 }
 
-// resettingAccess resets the peer's flows while it decides, as a session
-// does when its first lease request is refused and it goes top-up only.
+// resettingAccess resets the peer's flows once, while it decides its first
+// answer, as a session does when it changes state, then answers later
+// calls with access.
 type resettingAccess struct {
 	fixedAccess
-	gw *gateway.Server
+	gw    *gateway.Server
+	first gateway.Access
+	once  sync.Once
 }
 
 func (a *resettingAccess) Access(ctx context.Context, p gateway.Peer) gateway.Access {
-	a.gw.ResetPeerFlows(p.PublicKey)
-	return a.fixedAccess.Access(ctx, p)
+	answer := a.fixedAccess.Access(ctx, p)
+	a.once.Do(func() {
+		a.gw.ResetPeerFlows(p.PublicKey)
+		answer = a.first
+	})
+	return answer
 }
 
 func TestFlowAdmittedAfterAResetDuringTheDecisionStaysOpen(t *testing.T) {
-	acc := &resettingAccess{fixedAccess: fixedAccess{access: gateway.AccessTopUp}}
+	// The session's first lease was refused: it went top-up only, resetting
+	// the peer's flows, and this flow is admitted top-up only.
+	acc := &resettingAccess{fixedAccess: fixedAccess{access: gateway.AccessTopUp}, first: gateway.AccessTopUp}
 	gw := newGatewayWith(t, gateway.Config{Dialer: newOrigins(t), Access: acc})
 	acc.gw = gw
 	key := newKey(t)
@@ -295,5 +304,22 @@ func TestFlowAdmittedAfterAResetDuringTheDecisionStaysOpen(t *testing.T) {
 
 	if string(got) != "query" {
 		t.Errorf("DNS answered %q", got)
+	}
+}
+
+func TestFlowIsDecidedAgainWhenAResetRacesItsDecision(t *testing.T) {
+	// The access check answered full, but the session went top-up only
+	// (resetting the peer's flows) before the answer was used.
+	acc := &resettingAccess{fixedAccess: fixedAccess{access: gateway.AccessTopUp}, first: gateway.AccessFull}
+	gw := newGatewayWith(t, gateway.Config{Dialer: newOrigins(t), Access: acc})
+	acc.gw = gw
+	key := newKey(t)
+	peerIP := netip.MustParseAddr("10.77.0.2")
+	if err := gw.AddPeer(gateway.Peer{ID: "peer-1", PublicKey: key.PublicKey(), IPv4: peerIP}); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	if err := newClient(t, gw, key, peerIP).tryGet("http://203.0.113.10/", 3*time.Second); err == nil {
+		t.Error("plain HTTP went through on a full-access answer that a reset had overtaken")
 	}
 }

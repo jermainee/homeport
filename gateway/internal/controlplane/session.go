@@ -68,7 +68,7 @@ func (c *Controller) Access(ctx context.Context, p gateway.Peer) gateway.Access 
 	defer c.mu.Unlock()
 	now := c.clock.Now()
 	ps := c.peers[p.ID]
-	if ps == nil || ps.peer.PublicKey != p.PublicKey || !ps.suspendedUntil.IsZero() {
+	if c.closing || ps == nil || ps.peer.PublicKey != p.PublicKey || !ps.suspendedUntil.IsZero() {
 		return gateway.AccessNone
 	}
 	if ps.sess == nil && !c.startSessionLocked(ps, now) {
@@ -135,7 +135,7 @@ func (c *Controller) startSessionLocked(ps *peerState, now time.Time) bool {
 func (c *Controller) Step() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.gw == nil {
+	if c.gw == nil || c.closing {
 		return
 	}
 	now := c.clock.Now()
@@ -232,6 +232,11 @@ func (c *Controller) leaseAnsweredLocked(ps *peerState, s *session, lease Lease,
 	case err == nil:
 		s.requestID, s.denyGrace = "", -1
 		c.grace = time.Duration(lease.GraceSeconds) * time.Second
+		if !lease.ServerDate.IsZero() {
+			// Count the lease's lifetime on the gateway's clock, which may
+			// differ from the API's.
+			lease.ExpiresAt = now.Add(lease.ExpiresAt.Sub(lease.ServerDate))
+		}
 		switch {
 		case s.lease == nil:
 			s.lease, s.leaseBase, s.state = &lease, total(ps.reported), stateActive
@@ -314,9 +319,11 @@ func (c *Controller) endSessionLocked(ps *peerState, u gateway.Usage, now time.T
 		return
 	}
 	ps.sess = nil
+	ps.lastSeen = u // bytes up to u belong to this session, not to activity after it
 	s.ended = true
 	if s.lease != nil {
 		s.finalID = c.cutLocked(ps, s, u, now, true)
+		c.afterFinal[s.finalID] = nil
 		c.returnLeaseLocked(s, s.lease.LeaseID, now)
 		if s.next != nil {
 			c.returnLeaseLocked(s, s.next.LeaseID, now)
@@ -360,20 +367,11 @@ func (c *Controller) cutLocked(ps *peerState, s *session, u gateway.Usage, now t
 // after its final event is reported.
 func (c *Controller) returnLeaseLocked(s *session, leaseID string, now time.Time) {
 	r := leaseReturn{leaseID: leaseID, requestID: newUUIDv7(now)}
-	if s.finalID != "" && c.awaitingFinal(s.finalID) {
-		c.afterFinal[s.finalID] = append(c.afterFinal[s.finalID], r)
+	if waiting, ok := c.afterFinal[s.finalID]; ok {
+		c.afterFinal[s.finalID] = append(waiting, r)
 		return
 	}
 	c.returns = append(c.returns, r)
-}
-
-func (c *Controller) awaitingFinal(eventID string) bool {
-	for _, e := range c.events {
-		if e.EventID == eventID {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Controller) usageLocked(ps *peerState) gateway.Usage {

@@ -138,8 +138,10 @@ type fakeAPI struct {
 	leaseFn    func(r leaseRequest) (status int, body any)
 	events     []usageEvent // every usage event received, retries included
 	usageFails int          // answer this many usage requests with 503
-	rejectSeq  map[int]bool // usage events with these seqs are rejected
-	returns    []string     // returned lease IDs, in order
+	clock      *fakeClock
+	offset     time.Duration // the API's clock minus the gateway's
+	rejectSeq  map[int]bool  // usage events with these seqs are rejected
+	returns    []string      // returned lease IDs, in order
 	lineEvents []lineEvent
 }
 
@@ -158,8 +160,9 @@ func (a *fakeAPI) grant(leaseRequest) (int, any) {
 	a.nextLease++
 	l := example(a.t, "lease-granted.json")
 	l["lease_id"] = leaseID(a.nextLease)
-	// The example expires at 10:00; each later lease an hour after the previous one.
-	l["expires_at"] = time.Date(2026, 11, 13, 9+a.nextLease, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	// The example expires at 10:00; each later lease an hour after the
+	// previous one. Both on the API's clock.
+	l["expires_at"] = time.Date(2026, 11, 13, 9+a.nextLease, 0, 0, 0, time.UTC).Add(a.offset).Format(time.RFC3339)
 	return http.StatusCreated, l
 }
 
@@ -174,6 +177,9 @@ func (a *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.clock != nil {
+		w.Header().Set("Date", a.clock.Now().Add(a.offset).UTC().Format(http.TimeFormat))
+	}
 	switch {
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/gateway/self":
 		a.record("self", body)
@@ -338,6 +344,12 @@ func (a *fakeAPI) lineEventsReceived() []lineEvent {
 	return append([]lineEvent(nil), a.lineEvents...)
 }
 
+func (a *fakeAPI) setClockOffset(d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.offset = d
+}
+
 func (a *fakeAPI) failUsage(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -442,6 +454,11 @@ func (g *fakeGateway) RemovePeer(k gateway.Key) (gateway.Usage, error) {
 func (g *fakeGateway) AddLine(l gateway.Line) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	for id, other := range g.lines {
+		if id != l.ID && other.AgentPin == l.AgentPin {
+			return fmt.Errorf("the agent pin of line %s already serves another line", l.ID)
+		}
+	}
 	g.lines[l.ID] = l
 	return nil
 }
@@ -572,6 +589,7 @@ func newBareFixture(t *testing.T) *fixture {
 	api := newFakeAPI(t)
 	gw := newFakeGateway()
 	clock := newClock()
+	api.clock = clock
 	ctl := controlplane.New(controlplane.NewClient(api.srv.URL, testToken), controlplane.Options{
 		Clock:  clock,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),

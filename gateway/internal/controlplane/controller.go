@@ -60,9 +60,10 @@ type Controller struct {
 	grace      time.Duration         // for a session without a lease: the last grace_seconds the API sent
 	events     []UsageEvent          // cut, not reported yet, oldest first
 	afterFinal map[string][]leaseReturn
-	returns    []leaseReturn // leases to return now
-	inflight   sync.WaitGroup
-	flushMu    sync.Mutex // one Flush at a time
+	returns    []leaseReturn  // leases to return now
+	inflight   sync.WaitGroup // lease requests; Add only under mu and before closing
+	closing    bool           // set by Close: no new sessions or lease requests
+	flushMu    sync.Mutex     // one Flush at a time
 
 	// lineMu guards what OnLineEvent changes. The gateway calls OnLineEvent
 	// while the controller may hold mu (RemoveLine disconnects an agent), so
@@ -155,8 +156,11 @@ func (c *Controller) applyLocked(cfg Config) error {
 			c.removePeerLocked(ps)
 		}
 	}
-	for id := range c.lines {
-		if _, ok := wantLines[id]; !ok {
+	for id, old := range c.lines {
+		// A line whose pin changes is removed too: its agent is
+		// disconnected either way, and its old pin may be another line's
+		// new one.
+		if want, ok := wantLines[id]; !ok || want.DeviceSPKISHA256 != old.DeviceSPKISHA256 {
 			c.gw.RemoveLine(id)
 			delete(c.lines, id)
 		}

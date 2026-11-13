@@ -101,3 +101,34 @@ func TestDroppedLineIsRemoved(t *testing.T) {
 		t.Error("the line is still on the gateway after the config dropped it")
 	}
 }
+
+func TestLinesCanSwapAgentPins(t *testing.T) {
+	f := newBareFixture(t)
+	secondLine := "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7"
+	otherPin := "2222222222222222222222222222222222222222222222222222222222222222"
+	f.api.setConfig(func(cfg map[string]any) {
+		cfg["lines"] = append(cfg["lines"].([]any), map[string]any{
+			"line_id": secondLine, "owner_member_id": ownerID, "device_spki_sha256": otherPin,
+		})
+	})
+	if err := f.ctl.SyncConfig(t.Context()); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	f.api.setConfig(func(cfg map[string]any) {
+		cfg["etag"] = `"cfg-2"`
+		lines := cfg["lines"].([]any)
+		lines[0].(map[string]any)["device_spki_sha256"] = otherPin
+		lines[1].(map[string]any)["device_spki_sha256"] = linePin
+	})
+
+	if err := f.ctl.SyncConfig(t.Context()); err != nil {
+		t.Fatalf("sync with swapped pins: %v", err)
+	}
+
+	if l, _ := f.gw.line(lineID); l.AgentPin != mustPin(t, otherPin) {
+		t.Errorf("first line has pin %s, want the second line's old pin", l.AgentPin)
+	}
+	if l, _ := f.gw.line(secondLine); l.AgentPin != mustPin(t, linePin) {
+		t.Errorf("second line has pin %s, want the first line's old pin", l.AgentPin)
+	}
+}

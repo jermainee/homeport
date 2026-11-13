@@ -280,3 +280,17 @@ func TestEventsAreBatchedAtMost100(t *testing.T) {
 		t.Errorf("%d usage requests for 150 events, want 2", usageCalls)
 	}
 }
+
+func TestNoSessionStartsAfterClose(t *testing.T) {
+	f := newFixture(t)
+	f.ctl.Close(t.Context())
+
+	if got := f.access(t); got != gateway.AccessNone {
+		t.Errorf("access is %v after Close, want none", got)
+	}
+	f.gw.send(t, peerAKey, 1, 1)
+	f.step(t, time.Second)
+	if n := len(f.api.leaseRequests()); n != 0 {
+		t.Errorf("%d lease requests after Close, want 0: their leases would never be returned", n)
+	}
+}

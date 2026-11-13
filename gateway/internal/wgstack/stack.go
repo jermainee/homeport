@@ -220,12 +220,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
-	defer cancel()
-	adm := s.admit(ctx, flow)
-	// A reset of the peer's flows from here on also ends this one. Resets
-	// while the policy decided are already part of its decision.
-	epoch := s.epoch(flow.Peer)
+	adm, epoch := s.admit(flow)
 	if !adm.Allow {
 		s.endPending(flow.Peer)
 		r.Complete(true)
@@ -235,6 +230,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		s.handleTLSOnly(r, flow, epoch, adm.ServerName)
 		return
 	}
+	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+	defer cancel()
 	upstream, err := s.dialer.DialTCP(ctx, flow)
 	s.endPending(flow.Peer)
 	if err != nil {
@@ -286,11 +283,27 @@ func (s *Stack) handleTLSOnly(r *tcp.ForwarderRequest, flow Flow, epoch uint64, 
 	s.relayTCP(flow.Peer, epoch, client, ep.Abort, upstream, hello)
 }
 
-func (s *Stack) admit(ctx context.Context, f Flow) Admission {
+// admit asks the policy about a flow and returns its answer with the epoch
+// it holds for: a reset of the peer's flows after that epoch ends the flow.
+// When a reset lands while the policy decides, the answer may predate it,
+// so the policy is asked again. A peer whose flows keep being reset is
+// refused.
+func (s *Stack) admit(f Flow) (Admission, uint64) {
+	epoch := s.epoch(f.Peer)
 	if s.policy == nil {
-		return Admission{Allow: true}
+		return Admission{Allow: true}, epoch
 	}
-	return s.policy.Admit(ctx, f)
+	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+	defer cancel()
+	for range 3 {
+		adm := s.policy.Admit(ctx, f)
+		now := s.epoch(f.Peer)
+		if now == epoch {
+			return adm, epoch
+		}
+		epoch = now
+	}
+	return Admission{}, epoch
 }
 
 // startPending reserves one of the peer's pending-dial slots. A peer at its
@@ -326,13 +339,13 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}
 	client := gonet.NewUDPConn(&wq, ep)
 	go func() {
-		ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
-		defer cancel()
-		if adm := s.admit(ctx, flow); !adm.Allow || adm.ServerName != nil {
+		adm, epoch := s.admit(flow)
+		if !adm.Allow || adm.ServerName != nil {
 			_ = client.Close()
 			return
 		}
-		epoch := s.epoch(flow.Peer)
+		ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+		defer cancel()
 		upstream, err := s.dialer.DialUDP(ctx, flow)
 		if err != nil {
 			_ = client.Close()
