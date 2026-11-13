@@ -23,6 +23,9 @@ export const EXCLUSIVE_LINE_USER_CREDITS_PER_DAY = 10_000;
 /** What an exclusive line earns its owner per day. */
 export const EXCLUSIVE_LINE_OWNER_CREDITS_PER_DAY = 5_000;
 
+/** Names the credit pack in Stripe metadata and in payments. A different pack gets a new id. */
+export const CREDIT_PACK_ID = "credits_1000000";
+
 /** Credits in one credit pack. */
 export const CREDIT_PACK_CREDITS = 1_000_000;
 

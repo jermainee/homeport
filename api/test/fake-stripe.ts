@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { createApp } from "../src/app";
+import type { CheckoutSessionInput, StripeCheckoutApi } from "../src/stripe/checkout-api";
 import type { StripeIdentityApi, VerifiedIdentity } from "../src/stripe/identity-api";
 
 /** A Stripe Identity port that records calls and answers from memory, like Stripe's test mode. */
@@ -40,9 +41,33 @@ export class FakeStripeIdentity implements StripeIdentityApi {
   }
 }
 
+/** A Stripe Checkout port that records calls and answers from memory, like Stripe's test mode. */
+export class FakeStripeCheckout implements StripeCheckoutApi {
+  readonly created: CheckoutSessionInput[] = [];
+  private readonly byIdempotencyKey = new Map<string, { id: string; url: string }>();
+
+  /** Set to make the next call fail, as a Stripe outage would. */
+  failNextCreate = false;
+
+  createCheckoutSession(input: CheckoutSessionInput) {
+    this.created.push(input);
+    if (this.failNextCreate) {
+      this.failNextCreate = false;
+      return Promise.reject(new Error("Stripe is unavailable"));
+    }
+    // Stripe answers a repeated idempotency key with the first session.
+    const known = this.byIdempotencyKey.get(input.idempotencyKey);
+    if (known) return Promise.resolve(known);
+    const id = `cs_test_${crypto.randomUUID().replaceAll("-", "")}`;
+    const session = { id, url: `https://checkout.stripe.com/c/pay/${id}` };
+    this.byIdempotencyKey.set(input.idempotencyKey, session);
+    return Promise.resolve(session);
+  }
+}
+
 /** The Worker with a fake Stripe, for `callWith`. */
-export function appWith(stripe: FakeStripeIdentity) {
-  return createApp({ stripeIdentity: () => stripe });
+export function appWith(stripe: FakeStripeIdentity, checkout: FakeStripeCheckout = new FakeStripeCheckout()) {
+  return createApp({ stripeIdentity: () => stripe, stripeCheckout: () => checkout });
 }
 
 /** A `Stripe-Signature` header for `payload`, computed the way Stripe documents it (HMAC-SHA256 of `t.payload`). */
@@ -86,6 +111,51 @@ export function identityEvent(
         status: type,
         type: "document",
         last_error: type === "requires_input" ? { code: "document_unverified_other", reason: "The document was not readable." } : null,
+      },
+    },
+  };
+}
+
+export type CheckoutEventType = "completed" | "async_payment_succeeded" | "async_payment_failed" | "expired";
+
+/** A Stripe `checkout.session.*` event as Stripe sends it (only the fields Homeport reads, plus a few). */
+export function checkoutEvent(
+  type: CheckoutEventType,
+  input: {
+    sessionId: string;
+    memberId: string;
+    paymentStatus?: "paid" | "unpaid" | "no_payment_required";
+    pack?: string;
+    livemode?: boolean;
+    eventId?: string;
+  },
+) {
+  const created = Math.floor(Date.now() / 1000);
+  const paymentStatus =
+    input.paymentStatus ?? (type === "completed" || type === "async_payment_succeeded" ? "paid" : "unpaid");
+  return {
+    id: input.eventId ?? `evt_test_${crypto.randomUUID().replaceAll("-", "")}`,
+    object: "event",
+    api_version: "2026-10-28.endive",
+    created,
+    livemode: input.livemode ?? false,
+    pending_webhooks: 1,
+    request: { id: null, idempotency_key: null },
+    type: `checkout.session.${type}`,
+    data: {
+      object: {
+        id: input.sessionId,
+        object: "checkout.session",
+        mode: "payment",
+        created,
+        livemode: input.livemode ?? false,
+        client_reference_id: input.memberId,
+        metadata: { member_id: input.memberId, pack: input.pack ?? "credits_1000000" },
+        currency: "eur",
+        amount_subtotal: 4000,
+        amount_total: 4760,
+        payment_status: paymentStatus,
+        status: type === "expired" ? "expired" : "complete",
       },
     },
   };

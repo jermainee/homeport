@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { STRIPE_API_VERSION, requireKey } from "./client";
 
 /** What a verified document says about its holder; the fields of the identity hash. */
 export interface VerifiedIdentity {
@@ -27,13 +28,11 @@ export interface StripeIdentityApi {
   retrieveVerifiedIdentity(sessionId: string): Promise<VerifiedIdentity>;
 }
 
-const API_VERSION = "2026-10-28.endive";
-
 /** The Stripe Identity port backed by Stripe's API. `fetcher` is replaceable for adapter tests. */
 export function stripeIdentityApi(env: Env, fetcher: typeof fetch = fetch): StripeIdentityApi {
   const client = (key: string) =>
     new Stripe(key, {
-      apiVersion: API_VERSION,
+      apiVersion: STRIPE_API_VERSION,
       httpClient: Stripe.createFetchHttpClient(fetcher),
       maxNetworkRetries: 2,
     });
@@ -72,9 +71,4 @@ export function stripeIdentityApi(env: Env, fetcher: typeof fetch = fetch): Stri
       };
     },
   };
-}
-
-function requireKey(value: string | undefined, name: string): string {
-  if (!value) throw new Error(`${name} is not set`);
-  return value;
 }

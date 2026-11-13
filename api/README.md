@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, sharing devices, lines and WireGuard peers. Later PRs add Checkout and the gateway endpoints.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, buying credits through Stripe Checkout, sharing devices, lines and WireGuard peers. A later PR adds the gateway endpoints.
 
 ## Requirements
 
@@ -37,9 +37,9 @@ npm run dev
 | --- | --- | --- |
 | `ENVIRONMENT` | `dev` enables the `/dev` routes and email log mode; anything else is production | `production` |
 | `EMAIL_MODE` | `log` writes sign-in links to the log, and works only when `ENVIRONMENT=dev`. Real delivery comes in a later PR; until then, other values return `503 email_unavailable` | `disabled` |
-| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails. Without a valid http(s) URL no link is sent (`503 email_unavailable`) | empty |
+| `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails and Checkout's return pages. Without a valid http(s) URL no link is sent (`503 email_unavailable`) and no Checkout Session is created (500) | empty |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
-| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions | |
+| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions and Checkout Sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions and Checkout Sessions | |
 | `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with read access to Identity verification results and detailed results; reads document number and birth date for the identity hash | |
 | `STRIPE_WEBHOOK_SECRET` | Secret. Signing secret of the webhook endpoint (`whsec_`), or the one `stripe listen` prints | |
 | `IDENTITY_HASH_KEY` | Secret. HMAC key of the identity hash. Changing it breaks the duplicate check for members verified before | |
@@ -137,7 +137,21 @@ Every member passes Stripe Identity (ID document and live selfie) before Share o
 
 Locally: `stripe listen --forward-to localhost:8787/v1/stripe/webhook` prints the signing secret for `.dev.vars`.
 
-Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` checks the real adapter's requests with a recording `fetch`.
+Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` and `test/stripe-checkout-api.spec.ts` check the real adapters' requests with a recording `fetch`.
+
+## Buying credits (Stripe Checkout)
+
+A verified member buys one credit pack at a time: 1,000,000 credits for €40 net (`src/pricing.ts`), VAT on top. Stripe Tax is not on yet, so no VAT is charged until it is.
+
+1. `POST /v1/checkout/sessions` (Bearer, `{request_id}`, verified identity) creates a hosted Checkout Session (`src/stripe/checkout-api.ts`): `mode: payment`, one line item with inline `price_data` (`unit_amount` 4,000 EUR cents, `tax_behavior: exclusive`), `client_reference_id` and `metadata {member_id, pack}` on the session and its PaymentIntent, no `payment_method_types` (the Dashboard picks the methods), and return pages `/checkout/done` and `/checkout/canceled` on `PUBLIC_BASE_URL`. It answers `201 {url}`, the page the app opens. The Stripe idempotency key is `checkout_session:<request_id>`. An unverified member gets `403 identity_required`.
+2. The same call writes a `payments` row (status `open`) that fixes what the session grants: pack, credits, net cents and currency.
+3. The webhook grants the credits, never the return page:
+   - `checkout.session.completed` with `payment_status: paid`, and `checkout.session.async_payment_succeeded`, book `credits_issued` → the member's `purchased` with idempotency key `purchase:<session id>`, and mark the payment `paid`. A session never grants twice, whichever events arrive and however often.
+   - `checkout.session.completed` while unpaid (a delayed payment method) marks it `processing`.
+   - `checkout.session.async_payment_failed` and `checkout.session.expired` mark an unpaid payment `failed` or `expired`; a paid one stays paid.
+   - Events of sessions Homeport did not create for that member change nothing, and the credits come from the `payments` row, not from the event.
+
+The webhook endpoint in the Stripe Dashboard needs these four events next to the Identity events. Refunds and disputes are not handled yet.
 
 ## Sharing and using lines
 
@@ -156,7 +170,7 @@ All endpoints follow the contract (`registerDevice`, `createLine`, `updateLine`,
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
-- `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines before credit packs can be bought.
+- `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines without a Checkout payment.
 - `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway, so lines and WireGuard configs can be created locally before gateways authenticate (`PUT /v1/gateway/self`, a later PR).
 
 ## Database
@@ -165,5 +179,6 @@ Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 - `migrations/0002_credit_ledger.sql` adds `members.ledger_version` and `members.ledger_nonce`, and creates `ledger_accounts`, `ledger_transactions`, `ledger_entries`, the `ledger_balance_checks` view, `meter_totals`, `usage_charges` and `credit_reservations`, with their triggers.
 - `migrations/0003_stripe_identity.sql` adds `members.identity_hash` (unique), `identity_failure` and `identity_event_created`, and creates `identity_sessions` and `stripe_events`.
 - `migrations/0004_lines_and_peers.sql` creates `gateways`, `devices`, `lines`, `wireguard_peers` and `member_links`, and indexes `auth_sessions.install_id`.
+- `migrations/0005_credit_checkout.sql` creates `payments`, one row per Checkout Session.
 
 Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
