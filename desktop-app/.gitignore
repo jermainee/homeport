@@ -1,0 +1,11 @@
+# Wails build output and caches
+bin/
+.task/
+.wails/
+
+# The root .gitignore ignores dist/. Keep frontend/dist/.gitkeep tracked so
+# `//go:embed all:frontend/dist` compiles on a fresh clone; the Vite build
+# writes it back after emptying dist.
+!frontend/dist/
+frontend/dist/*
+!frontend/dist/.gitkeep

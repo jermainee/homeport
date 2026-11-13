@@ -1,0 +1,117 @@
+name: desktop-app-ci
+
+# Add agent/** and relay-protocol/** here once the app imports them (P15).
+on:
+  pull_request:
+    paths:
+      - "desktop-app/**"
+      - ".github/workflows/desktop-app-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "desktop-app/**"
+      - ".github/workflows/desktop-app-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOWORK: "off"
+  # Keep in step with github.com/wailsapp/wails/v3 in desktop-app/go.mod and
+  # @wailsio/runtime in desktop-app/frontend/package.json.
+  WAILS_VERSION: v3.1.0
+
+defaults:
+  run:
+    working-directory: desktop-app
+
+jobs:
+  macos:
+    name: Test and build (macOS)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop-app/go.mod
+          cache-dependency-path: desktop-app/go.sum
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: desktop-app/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop-app/frontend/package-lock.json
+
+      - name: Install the Wails CLI
+        run: |
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_VERSION}"
+          module=$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)
+          if [ "$module" != "$WAILS_VERSION" ]; then
+            echo "::error::go.mod has wails $module but CI installs $WAILS_VERSION"
+            exit 1
+          fi
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Vet (fresh clone, frontend not built yet)
+        run: go vet ./...
+
+      - name: Install frontend dependencies
+        working-directory: desktop-app/frontend
+        run: npm ci
+
+      - name: Test the frontend
+        working-directory: desktop-app/frontend
+        run: npm test
+
+      - name: Build the app
+        run: wails3 build
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      # Assets.car is left out: actool writes different bytes for the same
+      # icon on every run.
+      - name: Check that the generated bindings are committed
+        run: |
+          generated="frontend/bindings go.mod go.sum frontend/package-lock.json"
+          if [ -n "$(git status --porcelain -- $generated)" ]; then
+            echo "::error::'wails3 build' changed generated files. Run it locally and commit the result."
+            git status --porcelain -- $generated
+            git diff -- $generated
+            exit 1
+          fi
+
+      - name: Check that the app version was bumped
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # info.version, the only two-space-indented "version:" key.
+          version() { sed -n 's/^  version: *"\{0,1\}\([^"#]*\)"\{0,1\} *$/\1/p' | head -n 1; }
+          head=$(version < build/config.yml)
+          if [ -z "$head" ]; then
+            echo "::error::No info.version in desktop-app/build/config.yml."
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          base=$(git show "origin/$BASE_REF:desktop-app/build/config.yml" 2>/dev/null | version || true)
+          if [ -z "$base" ]; then
+            echo "desktop-app has no version on $BASE_REF yet; starting at $head."
+            exit 0
+          fi
+          if [ "$head" = "$base" ] || [ "$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -n 1)" != "$head" ]; then
+            echo "::error::Raise info.version in desktop-app/build/config.yml above $base (it is $head)."
+            exit 1
+          fi
+          echo "Version $base -> $head"
