@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { expectContract } from "./contract";
 import { FakeStripeCheckout, FakeStripeIdentity, appWith, checkoutEvent, identityEvent, stripeSignature } from "./fake-stripe";
 import { GATEWAY_SELF, type LeaseBody, provisionGateway, usageEvent } from "./gateway-fixtures";
-import { bearer, callWith, signIn, uniqueEmail, uuidv7 } from "./helpers";
+import { callWith, signIn, uniqueEmail, uuidv7 } from "./helpers";
 import { driftedBalances, platformBalance, unbalancedTransactions } from "./ledger-fixtures";
 import { randomKey } from "./share-fixtures";
 
