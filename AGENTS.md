@@ -14,7 +14,7 @@ Everything is in one git repository. Each piece of software lives in its own top
 | `gateway/` | Edge gateway: terminates WireGuard, relays flows to agents over QUIC, meters bytes per peer | Deploy target not decided yet |
 | `agent/` | Sharing agent: Go library and CLI that opens real sockets on the member's line | Inside `desktop-app/`; Docker image later |
 | `relay-protocol/` | Go wire format shared by `gateway/` and `agent/` | CI only |
-| `desktop-app/` | Share and Use app for Linux, macOS and Windows, built with Wails v3 (planned) | Release workflow attaches the installers to a GitHub Release |
+| `desktop-app/` | Share and Use app for Linux, macOS and Windows, built with Wails v3 | Release workflow attaches the installers to a GitHub Release |
 | `contracts/` | OpenAPI spec and examples for the API that `gateway/` and `desktop-app/` call | CI only |
 | `e2e/` | Cross-folder end-to-end tests and dev tools (planned) | CI only |
 | `landing-page/` | Public website (later) | Deploy workflow to Cloudflare Pages |

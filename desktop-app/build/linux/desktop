@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Homeport
+Comment=Share your home internet line, or use another member's.
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/homeport %u
+Terminal=false
+Type=Application
+Icon=homeport
+Categories=Utility;
+StartupWMClass=homeport
+
+ 

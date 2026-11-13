@@ -1,0 +1,450 @@
+/* Homeport: the house, not the hacker den. A limewashed wall, an enamel
+   house-number plate for the match code, ink for text. */
+
+:root {
+  --wall: #e8ece9;
+  --surface: #f7f9f7;
+  --rule: #cdd5d1;
+  --ink: #18222f;
+  --slate: #566273;
+  --enamel: #1d3f72;
+  --enamel-hi: #2a5591;
+  --enamel-ink: #1d3f72; /* enamel used as text and focus */
+  --rim: #f4f6f8;
+  --brick: #b4321f;
+  --field-edge: #76828e; /* ≥3:1 against the wall and the field */
+  --button: var(--enamel);
+  --button-hover: var(--enamel-hi);
+  --selection: rgb(29 63 114 / 0.18);
+
+  --font-sign: "Barlow Semi Condensed", "DIN Alternate", "Bahnschrift", sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    system-ui, Ubuntu, Cantarell, sans-serif;
+
+  --measure: 22rem;
+  --radius: 8px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wall: #121925;
+    --surface: #1a2331;
+    --rule: #2b3648;
+    --ink: #e7ecf1;
+    --slate: #9ba8b8;
+    --enamel-ink: #8fb3ea;
+    --brick: #f08a76;
+    --field-edge: #66758a;
+    --button: #3466ad;
+    --button-hover: #3d72bd;
+    --selection: rgb(143 179 234 / 0.3);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+  background: var(--wall);
+  color: var(--ink);
+  font: 14px/1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  caret-color: var(--enamel-ink);
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* The window has no title bar; this strip under the traffic lights drags it. */
+.titlebar {
+  position: fixed;
+  inset: 0 0 auto;
+  height: 44px;
+  --wails-draggable: drag;
+}
+
+.masthead {
+  padding: 56px 36px 0;
+}
+
+/* Sign-in screens sit a little above the middle of the window; home reads
+   from the top like any settings pane. */
+#app {
+  display: grid;
+  align-content: center;
+  padding: 24px 36px 12vh;
+}
+
+#app[data-screen="signedIn"],
+#app[data-screen="signingOut"] {
+  align-content: start;
+  padding-top: 32px;
+  padding-bottom: 32px;
+}
+
+.screen {
+  max-width: var(--measure);
+}
+
+.screen.home {
+  max-width: 30rem;
+}
+
+/* Type */
+
+.wordmark {
+  margin: 0;
+  font: 600 17px/1 var(--font-sign);
+  letter-spacing: 0.01em;
+  color: var(--enamel-ink);
+}
+
+h1 {
+  margin: 0 0 8px;
+  font: 600 30px/1.1 var(--font-sign);
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+  outline: none;
+}
+
+h2 {
+  margin: 0;
+  font: 600 15px/1.3 var(--font-ui);
+}
+
+.lede {
+  margin: 0 0 28px;
+  color: var(--slate);
+  text-wrap: pretty;
+}
+
+.lede strong {
+  color: var(--ink);
+  font-weight: 600;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.footnote {
+  margin: 28px 0 0;
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Form */
+
+.email-form {
+  display: grid;
+  gap: 8px;
+}
+
+label {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--field-edge);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+input::placeholder {
+  color: var(--slate);
+  opacity: 1;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--brick);
+}
+
+.field-error {
+  margin: 0;
+  color: var(--brick);
+  font-size: 13px;
+}
+
+.email-form .button {
+  margin-top: 8px;
+}
+
+/* Buttons */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--radius);
+  font: 600 14px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.button.primary {
+  background: var(--button);
+  color: #fff;
+}
+
+.button.primary:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--button-hover);
+}
+
+.button.quiet {
+  min-height: 32px;
+  padding: 0;
+  background: none;
+  color: var(--enamel-ink);
+}
+
+.button.quiet:hover:not(:disabled, [aria-disabled="true"]) {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.button:disabled,
+.button[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+:focus-visible {
+  outline: 2px solid var(--enamel-ink);
+  outline-offset: 2px;
+}
+
+/* Headings take focus only so screen readers announce a new screen. */
+h1[tabindex="-1"]:focus {
+  outline: none;
+}
+
+input:focus-visible {
+  outline-offset: 0;
+  border-color: var(--enamel-ink);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 24px;
+  margin-top: 20px;
+}
+
+.actions.stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+/* The match code, on an enamel house-number plate: white rim, two screws,
+   a little gloss. It hangs into place when it first appears, not again
+   when only the status under it changes (ui.ts sets data-fresh). */
+
+.plate {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  margin: 0 0 24px;
+  padding: 20px 44px 18px;
+  border-radius: 10px;
+  background:
+    linear-gradient(160deg, rgb(255 255 255 / 0.16) 0%, rgb(255 255 255 / 0) 38%),
+    radial-gradient(130% 160% at 30% 15%, var(--enamel-hi) 0%, var(--enamel) 60%, #163259 100%);
+  box-shadow:
+    inset 0 0 0 5px var(--enamel),
+    inset 0 0 0 7px var(--rim),
+    0 1px 1px rgb(12 22 38 / 0.25),
+    0 10px 22px -12px rgb(12 22 38 / 0.55);
+  transform-origin: 50% 0;
+}
+
+#app[data-fresh] .plate {
+  animation: hang 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.plate::before,
+.plate::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #fdfdfd, #9aa3ad 70%);
+  box-shadow: 0 0 0 1px rgb(12 22 38 / 0.35);
+}
+
+.plate::before {
+  left: 16px;
+}
+
+.plate::after {
+  right: 16px;
+}
+
+.plate-digits {
+  font: 600 54px/1 var(--font-sign);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  color: #fff;
+  text-shadow: 0 1px 0 rgb(12 22 38 / 0.35);
+}
+
+@keyframes hang {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) rotate(-2deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Waiting status */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--slate);
+}
+
+.beacon {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--enamel-ink);
+  animation: breathe 2s ease-in-out infinite;
+}
+
+.status.is-offline {
+  color: var(--brick);
+}
+
+.status.is-offline .beacon {
+  background: var(--brick);
+  animation: none;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Home: grouped rows, the way macOS settings are laid out */
+
+.group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.group .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+.group .row + .row {
+  border-top: 1px solid var(--rule);
+}
+
+.row-text p {
+  margin: 2px 0 0;
+  color: var(--slate);
+  font-size: 13px;
+}
+
+.soon {
+  flex: none;
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.group-title {
+  margin: 28px 0 8px;
+  padding-left: 2px;
+  color: var(--slate);
+  font-size: 13px;
+}
+
+.facts .row {
+  padding-block: 10px;
+}
+
+.facts dt {
+  color: var(--slate);
+}
+
+.facts dd {
+  margin: 0;
+  text-align: right;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+.resend-error {
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #app[data-fresh] .plate,
+  .beacon {
+    animation: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .masthead,
+  #app {
+    padding-inline: 20px;
+  }
+}
