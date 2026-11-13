@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+ENVIRONMENT=dev
+EMAIL_MODE=log
+PUBLIC_BASE_URL=http://localhost:8787
