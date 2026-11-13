@@ -1,0 +1,1711 @@
+openapi: 3.1.0
+info:
+  title: Homeport control API
+  version: 0.1.0
+  description: |
+    The contract between the Homeport control API (`api/`), the edge gateway
+    (`gateway/`) and the apps. Both sides build against this file.
+
+    ## Authentication
+
+    - **Gateways** send `Authorization: Bearer hpgw_<gatewayId>.<secret>`.
+      The token is provisioned with the gateway and works only on
+      `/v1/gateway/*`.
+    - **Members** send `Authorization: Bearer <session_token>`. The app
+      creates the token itself and the API activates it when the member
+      approves the sign-in (see `createLoginRequest`). Before approval it
+      works only for polling that sign-in; after approval it works on every
+      path except `/v1/gateway/*`.
+
+    A token used outside its scope gets `401 unauthorized`, the same as a
+    wrong token.
+
+    ## Idempotency
+
+    Every POST can be retried safely.
+
+    - A POST body carries a `request_id`, a UUIDv7 that the client creates
+      once per logical request and reuses on every retry of it.
+    - Batch endpoints (`/v1/gateway/usage`, `/v1/gateway/line-events`) carry
+      an `event_id` (UUIDv7) on every event instead, and answer each event as
+      `applied`, `duplicate` or `rejected`.
+    - A retry with the same `request_id` and the same body gets the first
+      response again, status and body. A `request_id` is not a secret, so no
+      response carries a secret: anyone who repeats a request may see its
+      response.
+    - The same `request_id` with a different body gets
+      `409 idempotency_conflict`.
+    - A retry that arrives while the first request with that `request_id`
+      is still running gets `429 rate_limited` with `Retry-After: 1`.
+    - A 5xx response is not stored, so a retry after one runs again.
+    - A `request_id` whose UUIDv7 timestamp is more than 24 hours in the past
+      gets `400 request_id_expired`; more than 1 hour in the future gets
+      `400 invalid_request`. The API keeps each `request_id` for 25 hours
+      after it first sees it, so a retry is either replayed or rejected as
+      expired, never run twice.
+    - Event IDs follow the same idea with longer windows: an event whose
+      `event_id` timestamp is more than 72 hours old is answered `rejected`
+      with reason `expired`, and the API keeps event IDs for 7 days.
+
+    PUT, PATCH and DELETE are idempotent by their own semantics.
+
+    UUIDs are lowercase, in requests and responses.
+
+    ## Body size
+
+    Each request body states its limit in `x-max-body-bytes`: 16 KB, or
+    128 KB for the gateway's batch endpoints, which fits 100 events at their
+    largest. A larger body gets `413 payload_too_large`.
+
+    ## Schemas
+
+    Every object schema is closed (`additionalProperties: false`).
+
+    - **Requests:** the API rejects an unknown field with
+      `400 invalid_request`. A usage event therefore cannot carry a
+      destination: the API never receives one.
+    - **Responses:** a field is added here before the API sends it. Clients
+      ignore fields they don't know, so an old client keeps working.
+
+    ## Units
+
+    - Bytes are counted on inner IP packets, upload plus download. WireGuard
+      overhead is not counted.
+    - Leases are counted in bytes. The gateway never sees prices; credits
+      and euros stay in the API's pricing module.
+    - Credits are integers. Timestamps are RFC 3339 in UTC.
+servers:
+  - url: http://localhost:8787
+    description: Local `wrangler dev`
+tags:
+  - name: gateway
+    description: Called by edge gateways with a gateway token.
+  - name: auth
+    description: Email magic-link sign-in for the apps.
+  - name: member
+    description: The signed-in member's account, identity check and credits.
+  - name: share
+    description: Devices and lines of a member who shares their home line.
+  - name: use
+    description: Lines to use, and the WireGuard peers that use them.
+paths:
+  /v1/gateway/self:
+    put:
+      tags: [gateway]
+      operationId: putGatewaySelf
+      summary: Announce the gateway's endpoints and keys
+      description: |
+        Sent at start-up and whenever an endpoint or key changes. The API
+        hands these values to new WireGuard peers and sharing agents.
+      security:
+        - gatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GatewaySelf"
+            examples:
+              self:
+                summary: Frankfurt gateway
+                externalValue: examples/gateway/self.json
+        x-max-body-bytes: 16384
+      responses:
+        "204":
+          description: Stored.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /v1/gateway/config:
+    get:
+      tags: [gateway]
+      operationId: getGatewayConfig
+      summary: Fetch the peers and lines this gateway serves
+      description: |
+        The gateway polls this endpoint every 30 seconds and sends the body's
+        last `etag` as `If-None-Match`. It accepts WireGuard handshakes only
+        from the listed peers and QUIC connections only from agents with a
+        listed `device_spki_sha256`. A peer or line that is no longer listed
+        is dropped at once, open sessions included.
+
+        Use the body's `etag`, not the `ETag` header: Cloudflare turns the
+        header into a weak tag (`W/"..."`) when it compresses the response.
+        The API compares tags weakly, so either form matches.
+      security:
+        - gatewayToken: []
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: The full configuration. Replaces the previous one.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayConfig"
+              examples:
+                config:
+                  summary: One line with two peers
+                  externalValue: examples/gateway/config.json
+        "304":
+          description: The configuration still matches `If-None-Match`.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/gateway/leases:
+    post:
+      tags: [gateway]
+      operationId: createLease
+      summary: Get a quota lease for a peer's session
+      description: |
+        The gateway asks for a lease when a peer starts sending. Once the
+        session has used `renew_at_bytes` of its current lease, the gateway
+        asks for the next one with `supersedes_lease_id`. It keeps counting
+        against the current lease until all of `granted_bytes` are used or the
+        lease expires, then moves to the next lease. The API reserves credits
+        for each lease from the peer's member.
+
+        A lease can be superseded once. Renewing a lease that was already
+        superseded returns that successor with 200 instead of granting
+        another, so a gateway that lost a renewal response gets it back.
+
+        When the current lease is used up and there is no next lease:
+        - after a 402, or while the API is unreachable, the gateway forwards
+          only to the top-up hosts (`topup_hostnames` in the config) and
+          closes the session after `grace_seconds`;
+        - after a 403, the gateway closes the session at once.
+      security:
+        - gatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeaseRequest"
+            examples:
+              renewal:
+                summary: Renewal of the session's current lease
+                externalValue: examples/gateway/lease-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: "`supersedes_lease_id` was already superseded. This is that successor lease."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lease"
+        "201":
+          description: Lease granted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lease"
+              examples:
+                granted:
+                  summary: 200 MB lease, renewed at 80%
+                  externalValue: examples/gateway/lease-granted.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: The member has no credits left for a lease.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientCredits"
+              examples:
+                denied:
+                  summary: No credits left
+                  externalValue: examples/gateway/lease-denied.json
+        "403":
+          description: |
+            The peer is unknown, deleted or suspended, or its member is no
+            longer allowed to use the line. The gateway closes the session at
+            once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeerInactive"
+              examples:
+                inactive:
+                  summary: Peer deleted since the last config sync
+                  externalValue: examples/gateway/lease-peer-inactive.json
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/gateway/leases/{lease_id}/return:
+    post:
+      tags: [gateway]
+      operationId: returnLease
+      summary: Return the unused part of a lease
+      description: |
+        Sent when a session ends, for its current lease and for a next lease
+        it never used, after the session's last usage event has been
+        reported. The API releases the credits reserved for bytes the
+        session did not use. Returning a lease that is already returned or
+        expired releases nothing and still gets 200.
+      security:
+        - gatewayToken: []
+      parameters:
+        - $ref: "#/components/parameters/LeaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeaseReturnRequest"
+            examples:
+              return:
+                summary: Return at session end
+                externalValue: examples/gateway/lease-return-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: Returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaseReturned"
+              examples:
+                returned:
+                  summary: Unused credits released
+                  externalValue: examples/gateway/lease-returned.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/gateway/usage:
+    post:
+      tags: [gateway]
+      operationId: reportUsage
+      summary: Report metered usage
+      description: |
+        The gateway is the meter of record. It cuts a usage event per session
+        every 30 seconds or 50 MB, whichever comes first, when the session
+        moves to a new lease, and when the session ends. Each event counts
+        against exactly one lease.
+
+        The API applies each event exactly once: a retried event is answered
+        `duplicate` and not counted again. A `rejected` event is not retried.
+      security:
+        - gatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UsageBatch"
+            examples:
+              batch:
+                summary: Two events of one session and the last of another
+                externalValue: examples/gateway/usage-batch.json
+        x-max-body-bytes: 131072
+      responses:
+        "200":
+          description: One result per event, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageResults"
+              examples:
+                results:
+                  summary: Applied, duplicate and rejected events
+                  externalValue: examples/gateway/usage-result.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/gateway/line-events:
+    post:
+      tags: [gateway]
+      operationId: reportLineEvents
+      summary: Report lines going online or offline
+      description: |
+        Sent when a sharing agent connects to or disconnects from the
+        gateway. Each event is applied exactly once, like usage events.
+      security:
+        - gatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LineEventBatch"
+            examples:
+              events:
+                summary: A line reconnecting
+                externalValue: examples/gateway/line-events.json
+        x-max-body-bytes: 131072
+      responses:
+        "200":
+          description: One result per event, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineEventResults"
+              examples:
+                results:
+                  summary: Both events applied
+                  externalValue: examples/gateway/line-events-result.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/auth/login-requests:
+    post:
+      tags: [auth]
+      operationId: createLoginRequest
+      summary: Start an email sign-in
+      description: |
+        The app creates a session token (`hpm_` and 32 random bytes in
+        base64url) and sends only its SHA-256. The API emails a sign-in link
+        to `email`, creating the member on first approval. The app shows
+        `match_code` and polls `GET /v1/auth/login-requests/{login_request_id}`
+        with the token. The page behind the email link
+        asks the member to confirm the match code before it approves the
+        login, which activates the token. The API stores only the hash and
+        never sends a secret, so replaying any of these responses is
+        harmless. The response is the same whether or not the email belongs
+        to a member.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequestCreate"
+            examples:
+              login:
+                summary: Sign-in from the desktop app
+                externalValue: examples/member/login-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "201":
+          description: Link sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginRequest"
+              examples:
+                created:
+                  summary: Pending login
+                  externalValue: examples/member/login-request-created.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: Sign-in links can't be sent in this environment. Nothing was stored, so a retry with the same `request_id` runs again.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        const: email_unavailable
+  /v1/auth/login-requests/{login_request_id}:
+    get:
+      tags: [auth]
+      operationId: getLoginRequest
+      summary: Poll a sign-in
+      description: |
+        The app polls every few seconds with the session token it created in
+        `Authorization`. A poll only reads, so it carries no `request_id` and
+        a retry is always safe. A token that does not belong to this login
+        request gets 404. Once the member approves, polls return 200 until
+        the login request expires, and the same header works on every member
+        endpoint. Responses carry `Cache-Control: no-store`.
+      security:
+        - pendingSession: []
+      parameters:
+        - $ref: "#/components/parameters/LoginRequestId"
+      responses:
+        "200":
+          description: Approved. The session token is now active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginApproved"
+              examples:
+                approved:
+                  summary: Signed in
+                  externalValue: examples/member/login-approved.json
+        "202":
+          description: Not approved yet. Poll again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginPending"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: The login request expired before it was approved.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        const: login_request_expired
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/auth/session:
+    delete:
+      tags: [auth]
+      operationId: deleteSession
+      summary: Sign out
+      description: Ends the session whose token the request carries. The member's other sessions stay signed in.
+      security:
+        - memberSession: []
+      responses:
+        "204":
+          description: Signed out. The token no longer works.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/me:
+    get:
+      tags: [member]
+      operationId: getMe
+      summary: The signed-in member
+      security:
+        - memberSession: []
+      responses:
+        "200":
+          description: The member, their identity status and credit balances.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+              examples:
+                me:
+                  summary: Verified member with purchased and earned credits
+                  externalValue: examples/member/me.json
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/identity/sessions:
+    post:
+      tags: [member]
+      operationId: createIdentitySession
+      summary: Start the Stripe Identity check
+      description: Returns the URL of a Stripe Identity verification session for the app to open.
+      security:
+        - memberSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IdempotentRequest"
+            examples:
+              start:
+                summary: Start the identity check
+                externalValue: examples/member/identity-session-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "201":
+          description: Verification session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedirectUrl"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: "`idempotency_conflict`, or `identity_already_verified`."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [idempotency_conflict, identity_already_verified]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/checkout/sessions:
+    post:
+      tags: [member]
+      operationId: createCheckoutSession
+      summary: Buy a credit pack
+      description: Returns the URL of a Stripe Checkout session for one credit pack.
+      security:
+        - memberSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IdempotentRequest"
+            examples:
+              buy:
+                summary: Buy one credit pack
+                externalValue: examples/member/checkout-session-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "201":
+          description: Checkout session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedirectUrl"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/devices:
+    post:
+      tags: [share]
+      operationId: registerDevice
+      summary: Register a sharing agent's key
+      description: |
+        Registers the Ed25519 key a sharing agent uses for mutual TLS with the
+        gateway. Registering a key the member already registered returns that
+        device with 200.
+      security:
+        - memberSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceCreate"
+            examples:
+              mac:
+                summary: The desktop app on a Mac
+                externalValue: examples/member/device-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: The key was already registered by this member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "201":
+          description: Registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              examples:
+                device:
+                  summary: Registered device
+                  externalValue: examples/member/device.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: "`idempotency_conflict`, or `agent_key_taken`: another member registered this key."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [idempotency_conflict, agent_key_taken]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/lines:
+    post:
+      tags: [share]
+      operationId: createLine
+      summary: Create the line a device shares
+      description: |
+        Creates the device's line and assigns it a gateway. A device has at
+        most one line; creating a line for a device that has one returns that
+        line with 200. The line starts with sharing turned off.
+      security:
+        - memberSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LineCreate"
+            examples:
+              line:
+                summary: Line for the registered Mac
+                externalValue: examples/member/line-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: The device already has this line.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineCreated"
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineCreated"
+              examples:
+                created:
+                  summary: Line on the Frankfurt gateway
+                  externalValue: examples/member/line-created.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/lines/{line_id}:
+    patch:
+      tags: [share]
+      operationId: updateLine
+      summary: Turn sharing on or off
+      security:
+        - memberSession: []
+      parameters:
+        - $ref: "#/components/parameters/LineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LineUpdate"
+            examples:
+              share:
+                summary: Turn Share on
+                externalValue: examples/member/line-update.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Line"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /v1/lines/available:
+    get:
+      tags: [use]
+      operationId: listAvailableLines
+      summary: Lines the member can use
+      description: |
+        Lines that are sharing, minus the member's own lines and lines linked
+        to them by household, device, card or Connect account.
+      security:
+        - memberSession: []
+      responses:
+        "200":
+          description: Available lines.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailableLines"
+              examples:
+                lines:
+                  summary: One line in Berlin
+                  externalValue: examples/member/lines-available.json
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
+  /v1/wireguard/peers:
+    post:
+      tags: [use]
+      operationId: createWireguardPeer
+      summary: Create a WireGuard config for a device
+      description: |
+        The client generates the device's X25519 key pair and sends only the
+        public key, so the API never sees a private key. `config_text` is the
+        complete `.conf` file except for the private key: the client replaces
+        the placeholder `{{PRIVATE_KEY}}` with its key before it saves the
+        file or shows the QR code.
+      security:
+        - memberSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WireguardPeerCreate"
+            examples:
+              phone:
+                summary: Config for a phone
+                externalValue: examples/member/wireguard-peer-request.json
+        x-max-body-bytes: 16384
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireguardPeerCreated"
+              examples:
+                created:
+                  summary: Peer with its config file
+                  externalValue: examples/member/wireguard-peer-created.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `identity_required`, or `line_not_allowed`: the line is the
+            member's own, or linked to them.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [identity_required, line_not_allowed]
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            `idempotency_conflict`, `line_full`, or `public_key_taken`: the
+            key belongs to another peer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [idempotency_conflict, line_full, public_key_taken]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    get:
+      tags: [use]
+      operationId: listWireguardPeers
+      summary: The member's WireGuard peers
+      security:
+        - memberSession: []
+      responses:
+        "200":
+          description: Peers, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireguardPeers"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/wireguard/peers/{peer_id}:
+    delete:
+      tags: [use]
+      operationId: deleteWireguardPeer
+      summary: Delete a WireGuard peer
+      description: |
+        Within about 30 seconds, at its next config poll, the gateway drops
+        the peer and ends its open sessions. A lease request for the peer
+        gets `peer_inactive` at once.
+      security:
+        - memberSession: []
+      parameters:
+        - $ref: "#/components/parameters/PeerId"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    gatewayToken:
+      type: http
+      scheme: bearer
+      bearerFormat: hpgw_<gatewayId>.<secret>
+      description: Gateway token. Valid only on `/v1/gateway/*`.
+    memberSession:
+      type: http
+      scheme: bearer
+      bearerFormat: hpm_<secret>
+      description: Session token the app created and a sign-in activated. Not valid on `/v1/gateway/*`.
+    pendingSession:
+      type: http
+      scheme: bearer
+      bearerFormat: hpm_<secret>
+      description: The same session token before the member approves the sign-in. Valid only for polling that sign-in.
+  parameters:
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: The body's `etag` of the configuration the gateway already has.
+      schema:
+        $ref: "#/components/schemas/EntityTag"
+    LeaseId:
+      name: lease_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    LineId:
+      name: line_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    LoginRequestId:
+      name: login_request_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    PeerId:
+      name: peer_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+  headers:
+    ETag:
+      description: The body's `etag`, possibly weakened by Cloudflare's compression.
+      schema:
+        $ref: "#/components/schemas/EntityTag"
+  responses:
+    BadRequest:
+      description: |
+        `invalid_request`: the body does not match this spec, for example an
+        unknown field. `request_id_expired`: the `request_id` is older than
+        24 hours.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    enum: [invalid_request, request_id_expired]
+    Unauthorized:
+      description: Missing, wrong or out-of-scope token.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: unauthorized
+    IdentityRequired:
+      description: The member has not passed Stripe Identity yet.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: identity_required
+    NotFound:
+      description: The resource does not exist or belongs to someone else.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: not_found
+    IdempotencyConflict:
+      description: The `request_id` was already used with a different body.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: idempotency_conflict
+    PayloadTooLarge:
+      description: The body is larger than the request body's `x-max-body-bytes`.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: payload_too_large
+    TooManyRequests:
+      description: Too many requests, or a retry that arrived while the first request with its `request_id` is still running. Retry after the `Retry-After` header's seconds.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  error:
+                    const: rate_limited
+  schemas:
+    # Scalars
+    Id:
+      description: Resource ID, a lowercase UUID chosen by the API.
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    UuidV7:
+      description: UUID version 7, created by the sender. Its timestamp orders and expires it.
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    Timestamp:
+      type: string
+      format: date-time
+    ByteCount:
+      type: integer
+      format: int64
+      minimum: 0
+    Credits:
+      type: integer
+      format: int64
+      minimum: 0
+    Sha256Hex:
+      description: SHA-256 digest, 64 lowercase hex characters.
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    Key32:
+      description: A 32-byte public key in standard base64 (44 characters), as WireGuard writes keys.
+      type: string
+      pattern: "^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$"
+    IpAddress:
+      anyOf:
+        - type: string
+          format: ipv4
+        - type: string
+          format: ipv6
+    HostPort:
+      description: "`host:port`, with an IPv6 host in brackets."
+      type: string
+      pattern: "^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+):[0-9]{1,5}$"
+    Version:
+      description: Semantic version.
+      type: string
+      pattern: "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    ETag:
+      description: A strong HTTP entity tag, quotes included. The API sends this in the body.
+      type: string
+      pattern: '^"[!#-~]+"$'
+    EntityTag:
+      description: An HTTP entity tag, weak (`W/"..."`) or strong.
+      type: string
+      pattern: '^(W/)?"[!#-~]+"$'
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          description: Machine-readable code. Each response lists its codes.
+          type: string
+        message:
+          description: Human-readable detail for logs. Not shown to members.
+          type: string
+    IdempotentRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+
+    # Gateway
+    GatewaySelf:
+      type: object
+      additionalProperties: false
+      required:
+        - wg_public_key
+        - wg_endpoint
+        - quic_endpoint
+        - quic_server_name
+        - quic_spki_sha256
+        - version
+      properties:
+        wg_public_key:
+          $ref: "#/components/schemas/Key32"
+        wg_endpoint:
+          description: Where WireGuard peers connect (UDP).
+          $ref: "#/components/schemas/HostPort"
+        quic_endpoint:
+          description: Where sharing agents connect (QUIC, UDP).
+          $ref: "#/components/schemas/HostPort"
+        quic_server_name:
+          description: TLS server name the agent sends and verifies.
+          type: string
+          format: hostname
+        quic_spki_sha256:
+          description: SHA-256 of the gateway certificate's SubjectPublicKeyInfo (DER). Agents pin it.
+          $ref: "#/components/schemas/Sha256Hex"
+        version:
+          description: Gateway software version.
+          $ref: "#/components/schemas/Version"
+    GatewayConfig:
+      type: object
+      additionalProperties: false
+      required: [etag, peers, lines, topup_hostnames]
+      properties:
+        etag:
+          $ref: "#/components/schemas/ETag"
+        topup_hostnames:
+          description: |
+            Hosts a peer without credits can still reach: the gateway forwards
+            DNS queries, and TLS connections on port 443 whose ClientHello
+            names one of these hosts (SNI). Nothing else.
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: hostname
+        peers:
+          type: array
+          items:
+            $ref: "#/components/schemas/GatewayPeer"
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/GatewayLine"
+    GatewayPeer:
+      type: object
+      additionalProperties: false
+      required: [peer_id, member_id, public_key, ipv4, ipv6, line_id]
+      properties:
+        peer_id:
+          $ref: "#/components/schemas/Id"
+        member_id:
+          $ref: "#/components/schemas/Id"
+        public_key:
+          description: The peer's WireGuard public key.
+          $ref: "#/components/schemas/Key32"
+        ipv4:
+          description: The peer's tunnel address. Cryptokey routing ties it to this peer only.
+          type: string
+          format: ipv4
+        ipv6:
+          description: The peer's IPv6 tunnel address.
+          type: string
+          format: ipv6
+        line_id:
+          description: The line the peer's traffic exits through.
+          $ref: "#/components/schemas/Id"
+    GatewayLine:
+      type: object
+      additionalProperties: false
+      required: [line_id, owner_member_id, device_spki_sha256]
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        owner_member_id:
+          description: The sharing member. A peer of this member never uses this line.
+          $ref: "#/components/schemas/Id"
+        device_spki_sha256:
+          description: SHA-256 of the sharing agent's SubjectPublicKeyInfo (DER), checked during mutual TLS.
+          $ref: "#/components/schemas/Sha256Hex"
+    LeaseRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, peer_id, session_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        peer_id:
+          $ref: "#/components/schemas/Id"
+        session_id:
+          description: The gateway's session for this peer, as in usage events.
+          $ref: "#/components/schemas/UuidV7"
+        supersedes_lease_id:
+          description: The session's current lease, when this is a renewal.
+          $ref: "#/components/schemas/Id"
+    Lease:
+      type: object
+      additionalProperties: false
+      required: [lease_id, granted_bytes, renew_at_bytes, expires_at, grace_seconds]
+      properties:
+        lease_id:
+          $ref: "#/components/schemas/Id"
+        granted_bytes:
+          description: Bytes the session may use on this lease.
+          type: integer
+          format: int64
+          minimum: 1
+        renew_at_bytes:
+          description: Ask for the next lease once the session has used this many bytes of this lease. Less than `granted_bytes`.
+          type: integer
+          format: int64
+          minimum: 1
+        expires_at:
+          description: The lease ends at this time even if bytes are left.
+          $ref: "#/components/schemas/Timestamp"
+        grace_seconds:
+          description: How long the session stays open, top-up page only, once this lease is used up and no next lease was granted.
+          type: integer
+          minimum: 0
+    InsufficientCredits:
+      type: object
+      additionalProperties: false
+      required: [error, grace_seconds]
+      properties:
+        error:
+          const: insufficient_credits
+        grace_seconds:
+          description: How long the session stays open, top-up page only, before the gateway closes it.
+          type: integer
+          minimum: 0
+    PeerInactive:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: peer_inactive
+    LeaseReturnRequest:
+      $ref: "#/components/schemas/IdempotentRequest"
+    LeaseReturned:
+      type: object
+      additionalProperties: false
+      required: [released_credits]
+      properties:
+        released_credits:
+          description: Credits given back to the member. For logs only; the gateway does not meter with it.
+          $ref: "#/components/schemas/Credits"
+    UsageBatch:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/UsageEvent"
+    UsageEvent:
+      description: |
+        Bytes one session used in one period. Only session metadata: the
+        schema has no field for a destination or content.
+      type: object
+      additionalProperties: false
+      required:
+        - event_id
+        - session_id
+        - peer_id
+        - line_id
+        - lease_id
+        - seq
+        - bytes_up
+        - bytes_down
+        - period_start
+        - period_end
+        - final
+      properties:
+        event_id:
+          $ref: "#/components/schemas/UuidV7"
+        session_id:
+          description: Created by the gateway when a peer starts a session.
+          $ref: "#/components/schemas/UuidV7"
+        peer_id:
+          $ref: "#/components/schemas/Id"
+        line_id:
+          $ref: "#/components/schemas/Id"
+        lease_id:
+          description: The lease these bytes count against.
+          $ref: "#/components/schemas/Id"
+        seq:
+          description: Position of the event in its session, from 0, without gaps.
+          type: integer
+          minimum: 0
+        bytes_up:
+          description: Bytes from the peer toward the internet in this period.
+          $ref: "#/components/schemas/ByteCount"
+        bytes_down:
+          description: Bytes from the internet toward the peer in this period.
+          $ref: "#/components/schemas/ByteCount"
+        period_start:
+          $ref: "#/components/schemas/Timestamp"
+        period_end:
+          description: Later than `period_start`. The next event's period starts here.
+          $ref: "#/components/schemas/Timestamp"
+        final:
+          description: True on the session's last event.
+          type: boolean
+        session_start:
+          $ref: "#/components/schemas/SessionStart"
+      if:
+        required: [seq]
+        properties:
+          seq:
+            const: 0
+      then:
+        required: [session_start]
+        properties:
+          session_start: true
+      else:
+        not:
+          required: [session_start]
+          properties:
+            session_start: true
+    SessionStart:
+      description: Present on the session's first event (`seq` 0) and only there.
+      type: object
+      additionalProperties: false
+      required: [started_at, exit_ip]
+      properties:
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        exit_ip:
+          description: The line's public IP when the session started, as the gateway sees it.
+          $ref: "#/components/schemas/IpAddress"
+    UsageResults:
+      type: object
+      additionalProperties: false
+      required: [results]
+      properties:
+        results:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/UsageResult"
+    UsageResult:
+      type: object
+      additionalProperties: false
+      required: [event_id, status]
+      properties:
+        event_id:
+          $ref: "#/components/schemas/UuidV7"
+        status:
+          $ref: "#/components/schemas/EventStatus"
+        reason:
+          description: Why the event was rejected. Present only when `status` is `rejected`.
+          type: string
+          enum:
+            - unknown_peer
+            - unknown_line
+            - unknown_lease
+            - lease_mismatch
+            - invalid_period
+            - seq_conflict
+            - expired
+      if:
+        required: [status]
+        properties:
+          status:
+            const: rejected
+      then:
+        required: [reason]
+        properties:
+          reason: true
+      else:
+        not:
+          required: [reason]
+          properties:
+            reason: true
+    EventStatus:
+      description: |
+        `applied`: counted now. `duplicate`: counted before, not again.
+        `rejected`: never counted; do not retry.
+      type: string
+      enum: [applied, duplicate, rejected]
+    LineEventBatch:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/LineEvent"
+    LineEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, line_id, type, observed_ip, agent_version, at]
+      properties:
+        event_id:
+          $ref: "#/components/schemas/UuidV7"
+        line_id:
+          $ref: "#/components/schemas/Id"
+        type:
+          type: string
+          enum: [online, offline]
+        observed_ip:
+          description: The agent's public IP as the gateway sees it. For `offline`, the last one seen.
+          $ref: "#/components/schemas/IpAddress"
+        agent_version:
+          $ref: "#/components/schemas/Version"
+        at:
+          $ref: "#/components/schemas/Timestamp"
+    LineEventResults:
+      type: object
+      additionalProperties: false
+      required: [results]
+      properties:
+        results:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/LineEventResult"
+    LineEventResult:
+      type: object
+      additionalProperties: false
+      required: [event_id, status]
+      properties:
+        event_id:
+          $ref: "#/components/schemas/UuidV7"
+        status:
+          $ref: "#/components/schemas/EventStatus"
+        reason:
+          description: Why the event was rejected. Present only when `status` is `rejected`.
+          type: string
+          enum: [unknown_line, expired]
+      if:
+        required: [status]
+        properties:
+          status:
+            const: rejected
+      then:
+        required: [reason]
+        properties:
+          reason: true
+      else:
+        not:
+          required: [reason]
+          properties:
+            reason: true
+
+    # Auth
+    LoginRequestCreate:
+      type: object
+      additionalProperties: false
+      required: [request_id, email, session_token_sha256]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        session_token_sha256:
+          description: SHA-256 of the UTF-8 session token, `hpm_` prefix included.
+          $ref: "#/components/schemas/Sha256Hex"
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [login_request_id, match_code, expires_at]
+      properties:
+        login_request_id:
+          $ref: "#/components/schemas/Id"
+        match_code:
+          description: Shown in the app. The page behind the email link asks the member to confirm it.
+          type: string
+          pattern: "^[0-9]{6}$"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+    LoginApproved:
+      type: object
+      additionalProperties: false
+      required: [status, member_id, expires_at]
+      properties:
+        status:
+          const: approved
+        member_id:
+          $ref: "#/components/schemas/Id"
+        expires_at:
+          description: When the session token stops working.
+          $ref: "#/components/schemas/Timestamp"
+    LoginPending:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          const: pending
+
+    # Member
+    Member:
+      type: object
+      additionalProperties: false
+      required: [member_id, email, identity_status, credits]
+      properties:
+        member_id:
+          $ref: "#/components/schemas/Id"
+        email:
+          type: string
+          format: email
+        identity_status:
+          description: |
+            Stripe Identity result. Share and Use stay off until `verified`.
+            `unverified`: no check started. `requires_input`: the last
+            attempt failed or was abandoned.
+          type: string
+          enum: [unverified, requires_input, processing, verified]
+        credits:
+          $ref: "#/components/schemas/CreditBalance"
+    CreditBalance:
+      description: Credits by kind. Spent in this order; only `earned_cashable` can be cashed out.
+      type: object
+      additionalProperties: false
+      required: [purchased, earned_pending, earned_cashable]
+      properties:
+        purchased:
+          $ref: "#/components/schemas/Credits"
+        earned_pending:
+          description: Earned credits still in the 30-day holdback.
+          $ref: "#/components/schemas/Credits"
+        earned_cashable:
+          $ref: "#/components/schemas/Credits"
+    RedirectUrl:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          description: Stripe-hosted page for the app to open in the browser.
+          type: string
+          format: uri
+
+    # Share
+    DeviceCreate:
+      type: object
+      additionalProperties: false
+      required: [request_id, name, platform, agent_public_key]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        platform:
+          type: string
+          enum: [linux, macos, windows]
+        agent_public_key:
+          description: The agent's raw Ed25519 public key. The API derives `spki_sha256` from it.
+          $ref: "#/components/schemas/Key32"
+    Device:
+      type: object
+      additionalProperties: false
+      required: [device_id, spki_sha256]
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Id"
+        spki_sha256:
+          description: SHA-256 of the agent key's SubjectPublicKeyInfo (DER). The gateway checks it during mutual TLS.
+          $ref: "#/components/schemas/Sha256Hex"
+    LineCreate:
+      type: object
+      additionalProperties: false
+      required: [request_id, device_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        device_id:
+          $ref: "#/components/schemas/Id"
+    LineCreated:
+      type: object
+      additionalProperties: false
+      required: [line_id, gateway]
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        gateway:
+          $ref: "#/components/schemas/AgentGateway"
+    AgentGateway:
+      description: Where the sharing agent dials out to, and the certificate it pins.
+      type: object
+      additionalProperties: false
+      required: [quic_endpoint, server_name, spki_sha256]
+      properties:
+        quic_endpoint:
+          $ref: "#/components/schemas/HostPort"
+        server_name:
+          type: string
+          format: hostname
+        spki_sha256:
+          $ref: "#/components/schemas/Sha256Hex"
+    LineUpdate:
+      type: object
+      additionalProperties: false
+      required: [sharing_enabled]
+      properties:
+        sharing_enabled:
+          type: boolean
+    Line:
+      type: object
+      additionalProperties: false
+      required: [line_id, sharing_enabled]
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        sharing_enabled:
+          type: boolean
+
+    # Use
+    AvailableLines:
+      type: object
+      additionalProperties: false
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/AvailableLine"
+    AvailableLine:
+      type: object
+      additionalProperties: false
+      required: [line_id, country, city, isp, ipv6, online]
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        country:
+          description: ISO 3166-1 alpha-2 code.
+          type: string
+          pattern: "^[A-Z]{2}$"
+        city:
+          type: [string, "null"]
+        isp:
+          type: [string, "null"]
+        ipv6:
+          description: Whether traffic can exit over IPv6.
+          type: boolean
+        online:
+          type: boolean
+    WireguardPeerCreate:
+      type: object
+      additionalProperties: false
+      required: [request_id, line_id, name, public_key]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        line_id:
+          $ref: "#/components/schemas/Id"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        public_key:
+          description: The device's WireGuard public key.
+          $ref: "#/components/schemas/Key32"
+    WireguardPeerCreated:
+      type: object
+      additionalProperties: false
+      required: [peer, config_text]
+      properties:
+        peer:
+          $ref: "#/components/schemas/WireguardPeer"
+        config_text:
+          description: The `.conf` file, with `{{PRIVATE_KEY}}` where the client puts the private key.
+          type: string
+    WireguardPeers:
+      type: object
+      additionalProperties: false
+      required: [peers]
+      properties:
+        peers:
+          type: array
+          items:
+            $ref: "#/components/schemas/WireguardPeer"
+    WireguardPeer:
+      type: object
+      additionalProperties: false
+      required: [peer_id, name, line_id, public_key, ipv4, ipv6, created_at]
+      properties:
+        peer_id:
+          $ref: "#/components/schemas/Id"
+        name:
+          type: string
+        line_id:
+          $ref: "#/components/schemas/Id"
+        public_key:
+          $ref: "#/components/schemas/Key32"
+        ipv4:
+          type: string
+          format: ipv4
+        ipv6:
+          type: string
+          format: ipv6
+        created_at:
+          $ref: "#/components/schemas/Timestamp"

@@ -1,0 +1,10 @@
+# Lint rules for control-api.openapi.yaml. `recommended-strict` turns every
+# warning into an error, so CI fails on any new finding.
+extends:
+  - recommended-strict
+rules:
+  # The repository has no license yet.
+  info-license: off
+  # The only server so far is local `wrangler dev`. The deployed URL comes with
+  # the API's deploy workflow.
+  no-server-example.com: off

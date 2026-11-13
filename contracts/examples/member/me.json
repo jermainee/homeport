@@ -1,0 +1,10 @@
+{
+  "member_id": "01a1c4af-8795-7a28-9249-adbd2ba1c04a",
+  "email": "member@example.com",
+  "identity_status": "verified",
+  "credits": {
+    "purchased": 998766,
+    "earned_pending": 617,
+    "earned_cashable": 0
+  }
+}

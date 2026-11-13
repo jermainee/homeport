@@ -1,0 +1,20 @@
+{
+  "events": [
+    {
+      "event_id": "01a1d424-6f40-7986-8615-39bb65f53c99",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "type": "offline",
+      "observed_ip": "203.0.113.47",
+      "agent_version": "0.1.0",
+      "at": "2026-11-13T09:01:10Z"
+    },
+    {
+      "event_id": "01a1d424-e470-768f-befa-58707c118580",
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "type": "online",
+      "observed_ip": "2001:db8:4d2::1c",
+      "agent_version": "0.1.0",
+      "at": "2026-11-13T09:01:14Z"
+    }
+  ]
+}
