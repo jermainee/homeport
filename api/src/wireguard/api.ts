@@ -5,7 +5,8 @@ import { apiError, hasOnlyFields, invalidRequest } from "../http";
 import { type IdempotentVariables, idempotent } from "../idempotency";
 import { requireVerifiedIdentity } from "../identity/require-verified";
 import { KEY32, isName } from "../keys";
-import { MAX_PEERS_PER_MEMBER, lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
+import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
+import { MAX_PEERS_PER_MEMBER } from "../pricing";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
 
 /**

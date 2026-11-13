@@ -1,5 +1,5 @@
 /**
- * Every price and billing constant Homeport uses. All other code reads them
+ * Every price, billing constant and product limit Homeport uses. All other code reads them
  * from here. The reasoning behind the values is in docs/concept.md
  * ("Business model and unit economics"); a change here updates that file and
  * the rules in AGENTS.md in the same pull request.
@@ -30,6 +30,15 @@ export const CREDIT_PACK_CREDITS = 1_000_000;
 export const CREDIT_PACK_NET_CENTS = 4_000;
 
 export const CREDIT_PACK_CURRENCY = "eur";
+
+/** A shared line serves at most this many members besides its owner. */
+export const MAX_USERS_PER_LINE = 3;
+
+/**
+ * Active WireGuard peers one member may have. All peers share one pool of
+ * tunnel addresses, so without a cap one account could use it up.
+ */
+export const MAX_PEERS_PER_MEMBER = 20;
 
 /** Days before earned credits can be cashed out. */
 export const EARNED_CREDITS_HOLDBACK_DAYS = 30;
