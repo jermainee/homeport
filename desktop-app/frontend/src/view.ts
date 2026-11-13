@@ -1,7 +1,9 @@
-// Renders the sign-in state machine into the window. Each state is one
-// screen; actions are buttons with data-action, handled in ui.ts. Every
-// value from Go or the API goes through esc().
+// Renders the sign-in and Share state machines into the window. Each
+// sign-in state is one screen, and home holds the Share panel; actions are
+// buttons with data-action, handled in ui.ts. Every value from Go or the API
+// goes through esc().
 
+import type { ShareStatus, ShareView } from "./share";
 import type { ErrorCode, Member, State } from "./signin";
 
 const errorText: Record<ErrorCode, string> = {
@@ -11,6 +13,9 @@ const errorText: Record<ErrorCode, string> = {
   rate_limited: "Too many sign-in attempts. Wait a minute, then try again.",
   email_unavailable: "Sign-in emails can't be sent right now. Try again in a few minutes.",
   no_sign_in: "That sign-in was cancelled. Enter your email to start again.",
+  identity_required: "Verify your identity first.",
+  gateway_unavailable: "No Homeport gateway can take your line yet. Try again in a few minutes.",
+  signed_out: "You were signed out. Sign in again.",
   unexpected: "Sign-in didn't work. Try again.",
 };
 
@@ -124,21 +129,161 @@ function identityText(status: string): string {
   }
 }
 
-function home(member: Member, signingOut: boolean): string {
+const decimal1 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const decimal2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+
+/**
+ * Formats a byte count the way Homeport bills it: 1 MB is 10^6 bytes, with
+ * about three significant digits.
+ */
+export function formatBytes(bytes: number): string {
+  const mb = bytes / 1e6;
+  if (bytes === 0) return "0 MB";
+  if (mb < 0.1) return `< ${decimal1.format(0.1)} MB`;
+  if (mb < 100) return `${decimal1.format(mb)} MB`;
+  if (mb < 1000) return `${whole.format(mb)} MB`;
+  const gb = mb / 1000;
+  return gb < 10 ? `${decimal2.format(gb)} GB` : `${decimal1.format(gb)} GB`;
+}
+
+// The window glyph at the head of the Share panel: a house window whose
+// light is on while the line is shared.
+type Light = "off" | "on" | "warming" | "dim" | "fault";
+
+function windowGlyph(light: Light): string {
+  return `<span class="house-window" data-light="${light}" aria-hidden="true"><i></i><i></i><i></i><i></i></span>`;
+}
+
+function lightFor(st: ShareStatus): Light {
+  switch (st.state) {
+    case "online":
+      return "on";
+    case "connecting":
+      return "warming";
+    case "paused":
+      return "dim";
+    case "error":
+      return "fault";
+    default:
+      return "off";
+  }
+}
+
+/** shareLine says what Share is doing, in one sentence under the heading. */
+export function shareLine(st: ShareStatus): string {
+  switch (st.state) {
+    case "connecting":
+      return "Connecting…";
+    case "online":
+      return "Online. Members can use this Mac's line.";
+    case "paused":
+      return "Paused while another VPN is on. Share carries on once it's off.";
+    case "offline":
+      if (st.error === "gateway_unavailable") return "Waiting for a Homeport gateway. Trying again…";
+      if (st.error === "offline") return "Can't reach Homeport. Trying again…";
+      return "Homeport isn't answering. Trying again…";
+    case "error":
+      return "Share couldn't set up this Mac's line, so it stopped. Turn it on to try again.";
+    default:
+      return "Let verified members use this Mac's home line, and earn credits for what they use.";
+  }
+}
+
+function shareSwitch(on: boolean, turning: boolean): string {
+  return `<button class="switch" type="button" role="switch" data-action="share-toggle"
+    aria-checked="${on}" aria-labelledby="share-title" aria-describedby="share-line"
+    ${turning ? 'aria-disabled="true" aria-busy="true"' : ""}><span class="knob"></span></button>`;
+}
+
+function verifyText(identity: string): { line: string; note: string } {
+  switch (identity) {
+    case "processing":
+      return {
+        line: "Your identity is being checked",
+        note: "This usually takes a few minutes. Share can turn on once it's done.",
+      };
+    case "requires_input":
+      return {
+        line: "Your identity check didn't go through",
+        note: "Homeport checks every member's ID and a selfie once, before Share or Use turns on. Try the check again.",
+      };
+    default:
+      return {
+        line: "Verify your identity first",
+        note: "Homeport checks every member's ID and a selfie once, before Share or Use turns on. That way every session traces back to a verified person.",
+      };
+  }
+}
+
+/** sharePanel renders the Share state machine on the home screen. */
+export function sharePanel(v: ShareView): string {
+  switch (v.kind) {
+    case "loading":
+    case "signedOut":
+      return `
+      <section class="share-panel" aria-labelledby="share-title" aria-busy="true">
+        <div class="share-head">${windowGlyph("off")}<div class="share-text"><h2 id="share-title">Share</h2></div></div>
+      </section>`;
+    case "verify": {
+      const t = verifyText(v.identity);
+      return `
+      <section class="share-panel is-verify" aria-labelledby="share-title">
+        <div class="share-head">
+          ${windowGlyph("off")}
+          <div class="share-text">
+            <h2 id="share-title">Share</h2>
+            <p class="share-line" id="share-line">${t.line}</p>
+          </div>
+        </div>
+        <p class="share-note">${t.note}</p>
+        <div class="share-actions">
+          <button class="button quiet" type="button" data-action="share-recheck"
+            ${v.checking ? 'aria-disabled="true" aria-busy="true"' : ""}>
+            ${v.checking ? "Checking…" : "Check again"}
+          </button>
+        </div>
+      </section>`;
+    }
+    case "ready": {
+      const st = v.status;
+      const on = v.turning ? !st.sharing : st.sharing;
+      const line = v.turning ? (on ? "Turning on…" : "Turning off…") : shareLine(st);
+      const problem = !v.turning && (st.state === "offline" || st.state === "error");
+      const flows = st.state === "online"
+        ? `<div class="row"><dt>Connections now</dt><dd class="numeric" data-field="flowsActive">${whole.format(st.flowsActive)}</dd></div>`
+        : "";
+      return `
+      <section class="share-panel" data-state="${st.state}" aria-labelledby="share-title">
+        <div class="share-head">
+          ${windowGlyph(v.turning ? "off" : lightFor(st))}
+          <div class="share-text">
+            <h2 id="share-title">Share</h2>
+            <p class="share-line ${problem ? "is-problem" : ""}" id="share-line">${line}</p>
+          </div>
+          ${shareSwitch(on, v.turning)}
+        </div>
+        ${v.failed ? `<p class="field-error share-failed" role="alert">Share didn't turn ${st.sharing ? "off" : "on"}. ${v.failed === "unexpected" ? "Try again." : errorText[v.failed]}</p>` : ""}
+        <dl class="share-facts">
+          <div class="row"><dt>Shared today</dt><dd class="numeric" data-field="bytesToday">${formatBytes(st.bytesToday)}</dd></div>
+          ${flows}
+        </dl>
+      </section>
+      ${st.sharing || st.bytesToday > 0 ? `<p class="share-footnote">Counted on this Mac. Your credits follow Homeport's own count.</p>` : ""}`;
+    }
+  }
+}
+
+function home(member: Member, signingOut: boolean, share: ShareView): string {
   const c = member.credits;
   const total = c.purchased + c.earnedPending + c.earnedCashable;
   return `
     <section class="screen home" aria-labelledby="title">
       <h1 id="title" class="visually-hidden">Home</h1>
 
-      <ul class="group" aria-label="Modes">
-        <li class="row">
-          <div class="row-text">
-            <h2>Share</h2>
-            <p>Let other members connect through this Mac's home line, and earn credits for what they use.</p>
-          </div>
-          <span class="soon">Coming soon</span>
-        </li>
+      <div class="share" data-share>${sharePanel(share)}</div>
+
+      <ul class="group modes" aria-label="Other modes">
         <li class="row">
           <div class="row-text">
             <h2>Use</h2>
@@ -163,8 +308,8 @@ function home(member: Member, signingOut: boolean): string {
     </section>`;
 }
 
-/** render returns the screen for a state. */
-export function render(s: State): string {
+/** render returns the screen for a state; home shows share as well. */
+export function render(s: State, share: ShareView = { kind: "loading" }): string {
   switch (s.kind) {
     case "checking":
       return `<section class="screen checking" aria-busy="true"></section>`;
@@ -179,8 +324,8 @@ export function render(s: State): string {
     case "expired":
       return expired(s);
     case "signedIn":
-      return home(s.member, false);
+      return home(s.member, false, share);
     case "signingOut":
-      return home(s.member, true);
+      return home(s.member, true, share);
   }
 }

@@ -40,6 +40,9 @@ export const ERROR_CODES = [
   "rate_limited",
   "email_unavailable",
   "no_sign_in",
+  "identity_required",
+  "gateway_unavailable",
+  "signed_out",
   "unexpected",
 ] as const;
 
