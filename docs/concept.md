@@ -290,7 +290,10 @@ Every session ties a verified buyer to a verified seller, the exit refuses the t
 
 **Seller home network protection**
 
-- The agent refuses all private, local and special ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, multicast, fc00::/7, fe80::/10, plus the seller's own public IP.
+- The agent refuses all private, local and special ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, multicast, fc00::/7, fe80::/10 and the other ranges that are not globally reachable, plus the seller's own public IP.
+- It also refuses the networks of the seller's own machine. On an IPv6 home network every device has a global address, so this keeps the home's /64 out of reach.
+- Its DNS answers never point into the home network, and it does not look up names that exist only there, such as `.local` and single-label names. Buyers cannot map the seller's devices through DNS.
+- It pauses sharing while another VPN carries the seller's default route, so buyers' traffic never leaves through someone else's tunnel.
 - It runs without admin rights in socket mode, updates itself from signed releases, and is open source so sellers can audit it.
 - Upload share and monthly GB caps protect the household's own internet.
 
