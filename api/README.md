@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions and `request_id` idempotency. Later PRs add the credits ledger, Stripe Identity, Checkout, lines and WireGuard peers.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency and the Stripe Identity check. Later PRs add the credits ledger, Checkout, lines and WireGuard peers.
 
 ## Requirements
 
@@ -39,6 +39,12 @@ npm run dev
 | `EMAIL_MODE` | `log` writes sign-in links to the log, and works only when `ENVIRONMENT=dev`. Real delivery comes in a later PR; until then, other values return `503 email_unavailable` | `disabled` |
 | `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails. Without a valid http(s) URL no link is sent (`503 email_unavailable`) | empty |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
+| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions | |
+| `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with read access to Identity verification results and detailed results; reads document number and birth date for the identity hash | |
+| `STRIPE_WEBHOOK_SECRET` | Secret. Signing secret of the webhook endpoint (`whsec_`), or the one `stripe listen` prints | |
+| `IDENTITY_HASH_KEY` | Secret. HMAC key of the identity hash. Changing it breaks the duplicate check for members verified before | |
+
+Secrets are listed in `wrangler.jsonc` (`secrets.required`), set with `wrangler secret put`, and locally in `.dev.vars` (see `.dev.vars.example`; use a Stripe sandbox's test keys).
 
 ## Sign-in
 
@@ -80,14 +86,14 @@ No response carries a secret, so replaying one by `request_id` is harmless.
 
 ### `request_id`
 
-Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
+Every POST under `/v1`, except Stripe's webhook, carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
 
 - A retry with the same `request_id` and body gets the first response again, status and body.
-- The same `request_id` with another body, or on another endpoint, gets `409 idempotency_conflict`.
+- The same `request_id` with another body, on another endpoint, or from another signed-in member, gets `409 idempotency_conflict`. Behind a session the member is part of the request, so no member sees another member's response (such as a Stripe verification URL).
 - A `request_id` older than 24 hours gets `400 request_id_expired`. One more than 1 hour in the future gets `400 invalid_request`.
 - While the first request is still running, a retry gets `429 rate_limited` with `Retry-After: 1`. A first request that stays silent for a minute (an evicted isolate, a cancelled request) is taken over by the next retry.
 - 5xx responses are not kept, so a retry runs again.
-- Records live 25 hours. Only a SHA-256 fingerprint of method, path and body is stored, never the body.
+- Records live 25 hours. Only a SHA-256 fingerprint of method, path, member and body is stored, never the body.
 
 ### Rules the code enforces
 
@@ -97,8 +103,24 @@ Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once 
 - Sessions last 90 days from approval.
 - The match code is a six-digit number. It is not a secret, so it is stored as is.
 - Request schemas are closed: an unknown field gets `400 invalid_request`. Errors are `{error, message?}`.
-- Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says (`src/body-limits.ts`).
+- Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says, and 256 KB for Stripe's webhook (`src/body-limits.ts`).
 - Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
+
+## Identity check (Stripe Identity)
+
+Every member passes Stripe Identity (ID document and live selfie) before Share or Use turns on.
+
+1. `POST /v1/identity/sessions` (Bearer, `{request_id}`) creates a VerificationSession (`type: document`, `require_matching_selfie`, `require_live_capture`, `metadata.member_id`) and answers `201 {url}`, the Stripe-hosted page the app opens. A verified member gets `409 identity_already_verified`. The Stripe idempotency key is `identity_session:<request_id>`.
+2. Stripe calls `POST /v1/stripe/webhook`. The handler checks the `Stripe-Signature` header on the raw body (`Stripe.webhooks.constructEventAsync` with the SubtleCrypto provider; 400 `invalid_signature` otherwise), skips an event id it already handled (`stripe_events`), and answers 200. A failure answers 500, so Stripe delivers the event again.
+3. Events change `members.identity_status` only for sessions Homeport created for that member (`identity_sessions`):
+   - `verified`: verifies the member. It always applies, since verification is final.
+   - `processing`: `processing`. `requires_input` and `canceled`: `requires_input`. These apply only while the member is not verified, and only if no newer event was applied (Stripe does not keep order).
+4. **One person, one account.** In the `verified` handler, inside Stripe's 48-hour window, the restricted key reads the document number, issuing country and birth date. Their HMAC (`IDENTITY_HASH_KEY`) is stored as `members.identity_hash`, which is unique. A member whose hash another member already has stays at `requires_input` (`identity_failure = 'duplicate_identity'`), as does a live-mode document without those fields. Test mode (`livemode: false`) skips the hash and the check, since every test document is the same. Only the result and the hash are stored; the document data stays with Stripe.
+5. `requireVerifiedIdentity` (`src/identity/require-verified.ts`) answers `403 identity_required` until the member is verified. Devices, lines and WireGuard peers sit behind it.
+
+Locally: `stripe listen --forward-to localhost:8787/v1/stripe/webhook` prints the signing secret for `.dev.vars`.
+
+Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` checks the real adapter's requests with a recording `fetch`.
 
 ## Dev-only routes
 
@@ -108,4 +130,7 @@ Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 ## Database
 
-`migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`. Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
+- `migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`.
+- `migrations/0003_stripe_identity.sql` adds `members.identity_hash` (unique), `identity_failure` and `identity_event_created`, and creates `identity_sessions` and `stripe_events`.
+
+Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
