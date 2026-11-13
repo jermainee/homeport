@@ -253,7 +253,8 @@ func TestTheSessionStopsAtTheLeaseAndClosesAfterGrace(t *testing.T) {
 			closedAt = at
 		}
 	}
-	if d := closedAt.Sub(graceAt); graceAt.IsZero() || d < grace*time.Second || d > grace*time.Second+2*time.Second {
+	// A little slack below: each line is logged just after the clock read.
+	if d := closedAt.Sub(graceAt); graceAt.IsZero() || d < grace*time.Second-100*time.Millisecond || d > grace*time.Second+2*time.Second {
 		t.Errorf("the session closed %v after the lease ran out (logged at %v and %v), want %d s and a step", d, graceAt, closedAt, grace)
 	}
 
@@ -265,15 +266,26 @@ func TestTheSessionStopsAtTheLeaseAndClosesAfterGrace(t *testing.T) {
 	if m := s.meter(); m != closed {
 		t.Errorf("the gateway metered %+v after the session closed, %+v before", m, closed)
 	}
+	// The lease is checked once a second; allow two seconds of traffic.
 	if total := closed.Up + closed.Down; total < granted || total > granted+2*rate {
-		t.Errorf("the session used %d bytes on a %d-byte lease; want at most one second's traffic (%d bytes) over", total, granted, rate)
+		t.Errorf("the session used %d bytes on a %d-byte lease; want at most %d bytes over", total, granted, 2*rate)
 	}
 	if up, down := s.api.UsageTotal(); up != closed.Up || down != closed.Down {
 		t.Errorf("usage events report %d up and %d down; the gateway metered %+v", up, down, closed)
 	}
+	// The first lease, then renewals of it: one at renew_at_bytes, and
+	// another every 10 s after a 402 while bytes are left.
 	reqs := s.api.LeaseRequests()
-	if len(reqs) != 2 || reqs[1].SupersedesLeaseID == "" {
-		t.Errorf("lease requests %+v, want the first lease and one renewal", reqs)
+	if events := s.api.Usage(); len(events) > 0 {
+		lease := events[0].LeaseID
+		if len(reqs) < 2 || reqs[0].SupersedesLeaseID != "" {
+			t.Errorf("lease requests %+v, want the first lease and a renewal", reqs)
+		}
+		for _, r := range reqs[1:] {
+			if r.SupersedesLeaseID != lease {
+				t.Errorf("lease request %+v does not renew the session's lease %s", r, lease)
+			}
+		}
 	}
 	waitUntil(t, "the lease came back", func() bool { return len(s.api.Returns()) == 1 })
 	assertOneClosedSession(t, s.api)
@@ -311,8 +323,10 @@ func TestARetriedUsageReportIsCountedOnce(t *testing.T) {
 			if failed.Status == 200 {
 				t.Fatalf("the first usage report was answered %d", failed.Status)
 			}
+			// The retry sends the failed events first, with their IDs; events
+			// cut since may ride along.
 			retried := calls[1]
-			if retried.Status != 200 || !slices.Equal(retried.EventIDs, failed.EventIDs) {
+			if retried.Status != 200 || len(retried.EventIDs) < len(failed.EventIDs) || !slices.Equal(retried.EventIDs[:len(failed.EventIDs)], failed.EventIDs) {
 				t.Errorf("the retry carried %v (answered %d); the failed report carried %v", retried.EventIDs, retried.Status, failed.EventIDs)
 			}
 			if up, down := s.api.UsageTotal(); up != c.gateway.Up || down != c.gateway.Down {

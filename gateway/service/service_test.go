@@ -150,3 +150,28 @@ func TestNewNeedsAWireGuardEndpointWithAPort(t *testing.T) {
 		t.Fatal("New accepted a WireGuard endpoint without a port")
 	}
 }
+
+func TestStoppingBeforeTheAPIAnswersIsNotAFailure(t *testing.T) {
+	api := &selfAPI{status: http.StatusServiceUnavailable}
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+	svc, err := service.New(newConfig(t, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	for api.announced() == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after a stop during the announcement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run kept retrying after its context ended")
+	}
+}

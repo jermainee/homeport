@@ -127,10 +127,15 @@ func (s *Service) Server() *gateway.Server { return s.srv }
 // down in order: it ends every session (final usage, lease returns), closes
 // the gateway, which disconnects its agents, and reports those lines
 // offline. It returns an error, with the gateway closed, if the API refuses
-// the announcement or ctx ends before the API accepts it.
+// the announcement. If ctx ends before the API accepts it, the gateway
+// closes and Run returns nil: it never served anyone.
 func (s *Service) Run(ctx context.Context) error {
 	if err := s.announce(ctx); err != nil {
 		_ = s.srv.Close()
+		if ctx.Err() != nil {
+			s.log.Info("gateway stopped before the API accepted it")
+			return nil
+		}
 		return err
 	}
 	s.log.Info("gateway running", "version", s.cfg.Version, "wg_port", s.srv.ListenPort(), "quic", s.srv.QUICAddr().String())

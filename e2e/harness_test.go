@@ -376,7 +376,18 @@ func (s *stack) destinationPatterns() []*regexp.Regexp {
 		regexp.QuoteMeta(contentPath),
 	}
 	// The loopback origins' ports, in any address form or as a port field.
+	// The gateway's own UDP ports may be logged; the origin's TCP port can
+	// have the same number (TCP and UDP ports are apart), so it is skipped
+	// then.
+	gatewayPorts := map[uint16]bool{s.wgPort: true}
+	if ap, err := netip.ParseAddrPort(s.quicListen); err == nil {
+		gatewayPorts[ap.Port()] = true
+	}
 	for _, ap := range []netip.AddrPort{s.origin.tcp, s.origin.udp} {
+		if gatewayPorts[ap.Port()] {
+			s.t.Logf("not checking the logs for origin port %d: the gateway uses it too", ap.Port())
+			continue
+		}
 		port := strconv.Itoa(int(ap.Port()))
 		pats = append(pats, `[0-9.\]]:`+port+`\b`, `"(dst_)?port":"?`+port+`\b`)
 	}
@@ -438,11 +449,12 @@ func startOrigin(t *testing.T) *origin {
 		w.Header().Set("Content-Length", strconv.Itoa(size))
 		const tick = 20 * time.Millisecond
 		chunk := max(rate/int(time.Second/tick), 1)
-		body := blob(size)
+		body, buf := blobStream(size), make([]byte, chunk)
 		next := time.Now()
 		for sent := 0; sent < size; {
 			n := min(chunk, size-sent)
-			if _, err := w.Write(body[sent : sent+n]); err != nil {
+			_, _ = body.Read(buf[:n])
+			if _, err := w.Write(buf[:n]); err != nil {
 				return
 			}
 			w.(http.Flusher).Flush()
@@ -478,12 +490,16 @@ func startOrigin(t *testing.T) *origin {
 
 // blob is n pseudo-random bytes, the same for the same n.
 func blob(n int) []byte {
+	b := make([]byte, n)
+	_, _ = blobStream(n).Read(b)
+	return b
+}
+
+// blobStream reads blob(n) piece by piece.
+func blobStream(n int) *rand.ChaCha8 {
 	var seed [32]byte
 	binary.LittleEndian.PutUint64(seed[:], uint64(n)) // #nosec G115 -- sizes are not negative
-	r := rand.NewChaCha8(seed)
-	b := make([]byte, n)
-	_, _ = r.Read(b)
-	return b
+	return rand.NewChaCha8(seed)
 }
 
 func sum(b []byte) string {
