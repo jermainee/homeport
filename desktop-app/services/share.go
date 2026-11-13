@@ -96,12 +96,6 @@ type ShareOptions struct {
 // the member's identity, registers this computer's agent key as a device,
 // creates the device's line, turns sharing on at the API and runs the
 // sharing agent, which dials out to the line's gateway.
-//
-// Each time Share turns on starts a run in its own goroutine. Locking
-// follows AuthService: mu is never held across an API call or while
-// waiting for a run, and a run writes back only while gen is still the one
-// it started with. A run waits for the previous run and its turn-off to
-// finish, so the API sees sharing turned on and off in order.
 type ShareService struct {
 	api     *apiclient.Client
 	profile *profile.Profile
@@ -111,9 +105,26 @@ type ShareService struct {
 	publishMu sync.Mutex // orders publications
 	published ShareStatus
 
+	// Listeners hear about changes from their own goroutine, in order, so
+	// one that waits for the main thread, as the tray's menu does, never
+	// holds up Share, not even ServiceShutdown, which Wails runs on the
+	// main thread.
+	listenMu  sync.Mutex
+	listeners []func(ShareStatus)
+	queue     []ShareStatus
+	delivery  chan struct{} // nudges the delivery goroutine; nil until OnStatus
+	closed    chan struct{} // closed by ServiceShutdown: delivery ends
+	closeOnce sync.Once
+
 	background     sync.WaitGroup // ServiceStartup's goroutines
 	stopBackground context.CancelFunc
 
+	// Each time Share turns on starts a run in its own goroutine. Locking
+	// follows AuthService: mu is never held across an API call or while
+	// waiting for a run, and a run writes back only while gen is still the
+	// one it started with. A run waits for the previous run and its
+	// turn-off to finish, so the API sees sharing turned on and off in
+	// order.
 	mu        sync.Mutex
 	gen       uint64    // bumped whenever Share turns on or off
 	on        bool      // the switch
@@ -126,7 +137,6 @@ type ShareService struct {
 	memberID  string        // whose Share the day count belongs to
 	day       string        // the day dayBytes counts, YYYY-MM-DD
 	dayBytes  uint64
-	listeners []func(ShareStatus)
 }
 
 // NewShareService returns a ShareService that calls api and keeps the
@@ -156,8 +166,12 @@ func NewShareService(api *apiclient.Client, p *profile.Profile, opts ShareOption
 		log = slog.New(slog.DiscardHandler)
 	}
 	opts.Logger = log
-	// Listeners hear about changes from the start state, off.
-	return &ShareService{api: api, profile: p, opts: opts, log: log, published: ShareStatus{State: ShareOff}}
+	return &ShareService{
+		api: api, profile: p, opts: opts, log: log,
+		// Listeners hear about changes from the start state, off.
+		published: ShareStatus{State: ShareOff},
+		closed:    make(chan struct{}),
+	}
 }
 
 // Status returns Share's state and today's count.
@@ -179,14 +193,43 @@ func (s *ShareService) SetSharing(ctx context.Context, on bool) ShareStatus {
 	return s.Status()
 }
 
-// OnStatus calls fn whenever the status changes. fn runs on its own and
-// must not call SetSharing.
+// OnStatus calls fn with every change of the status, in order, from a
+// goroutine of its own.
 //
 //wails:ignore
 func (s *ShareService) OnStatus(fn func(ShareStatus)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
 	s.listeners = append(s.listeners, fn)
+	if s.delivery == nil {
+		s.delivery = make(chan struct{}, 1)
+		go s.deliver(s.delivery)
+	}
+}
+
+// deliver hands queued statuses to the listeners until ServiceShutdown.
+func (s *ShareService) deliver(nudge <-chan struct{}) {
+	for {
+		select {
+		case <-nudge:
+		case <-s.closed:
+			return
+		}
+		for {
+			s.listenMu.Lock()
+			if len(s.queue) == 0 {
+				s.listenMu.Unlock()
+				break
+			}
+			st := s.queue[0]
+			s.queue = s.queue[1:]
+			listeners := s.listeners
+			s.listenMu.Unlock()
+			for _, fn := range listeners {
+				fn(st)
+			}
+		}
+	}
 }
 
 // SignOut turns Share off before the member signs out, while the session
@@ -223,6 +266,7 @@ func (s *ShareService) ServiceShutdown() error {
 	s.mu.Unlock()
 	s.background.Wait()
 	s.stop(context.Background(), false)
+	s.closeOnce.Do(func() { close(s.closed) })
 	return nil
 }
 
@@ -522,20 +566,24 @@ func (s *ShareService) statusLocked() ShareStatus {
 	return st
 }
 
-// publish tells the listeners about a changed status.
+// publish queues a changed status for the listeners.
 func (s *ShareService) publish() {
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	s.mu.Lock()
-	st := s.statusLocked()
-	listeners := s.listeners
-	s.mu.Unlock()
+	st := s.Status()
 	if st == s.published {
 		return
 	}
 	s.published = st
-	for _, fn := range listeners {
-		fn(st)
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	if s.delivery == nil {
+		return // nobody listens
+	}
+	s.queue = append(s.queue, st)
+	select {
+	case s.delivery <- struct{}{}:
+	default: // already nudged
 	}
 }
 

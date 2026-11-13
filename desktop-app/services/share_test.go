@@ -626,3 +626,31 @@ func TestShareNeedsASignedInMember(t *testing.T) {
 		t.Errorf("status = %+v, want error %q", got, services.ErrSignedOut)
 	}
 }
+
+// A listener may wait for the main thread, as the tray's menu updates do,
+// while the main thread runs ServiceShutdown. Share must not wait for it.
+func TestAListenerThatBlocksHoldsNothingUp(t *testing.T) {
+	f := verified(t)
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	f.share.OnStatus(func(services.ShareStatus) { <-unblock })
+	if err := f.share.ServiceStartup(t.Context(), application.ServiceOptions{}); err != nil {
+		t.Fatalf("ServiceStartup: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.share.SetSharing(t.Context(), true)
+		f.agents.nth(t, 1).set(func(s *agent.Stats) { s.State = agent.StateConnected })
+		time.Sleep(20 * time.Millisecond) // a few status ticks
+		f.share.SetSharing(t.Context(), false)
+		_ = f.share.ServiceShutdown()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Share waited for a blocked listener")
+	}
+}
