@@ -37,6 +37,8 @@ Work test-first. Start with a failing test (red), make it pass, then refactor. A
 
 ## Product rules the code enforces
 
+The full product concept, with the reasoning behind these rules, is in [docs/concept.md](docs/concept.md). When a change alters a rule, update that file and this list in the same PR.
+
 These are the current values. Keep them in one pricing module, and have all other code read them from there.
 
 - **Identity:** every member passes Stripe Identity (ID document and selfie) before Share or Use turns on. A line, a WireGuard config and a listing each require a verified identity.
