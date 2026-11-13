@@ -6,6 +6,7 @@ import { checkoutApi, checkoutPages } from "./checkout/api";
 import { limitBodySize } from "./body-limits";
 import { devRoutes } from "./dev";
 import { devicesApi } from "./devices";
+import { gatewayApi } from "./gateway/api";
 import { identityApi } from "./identity/api";
 import { linesApi } from "./lines/api";
 import { meApi } from "./me";
@@ -30,6 +31,7 @@ export function createApp(dependencies: Dependencies = productionDependencies) {
 
   app.use(limitBodySize);
 
+  app.route("/v1/gateway", gatewayApi);
   app.route("/v1/auth", authApi);
   app.route("/v1/me", meApi);
   app.route("/v1/identity", identityApi(dependencies.stripeIdentity));

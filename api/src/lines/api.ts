@@ -35,7 +35,14 @@ linesApi.post("/", verifiedMemberIdempotent, async (c) => {
     .first();
   if (!device) return apiError(c, 404, "not_found");
 
-  const gateway = await db.prepare(`SELECT id FROM gateways ORDER BY updated_at DESC LIMIT 1`).first<{ id: string }>();
+  // The gateway that announced itself last, unless its token was revoked.
+  const gateway = await db
+    .prepare(
+      `SELECT g.id FROM gateways g
+        WHERE NOT EXISTS (SELECT 1 FROM gateway_credentials c WHERE c.gateway_id = g.id AND c.revoked_at IS NOT NULL)
+        ORDER BY g.updated_at DESC LIMIT 1`,
+    )
+    .first<{ id: string }>();
   if (!gateway) return apiError(c, 503, "gateway_unavailable", "no gateway has announced itself yet");
 
   // Where the line is, as Cloudflare sees the device's request.

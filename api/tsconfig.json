@@ -18,5 +18,5 @@
     "allowJs": true,
     "maxNodeModuleJsDepth": 1
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"]
 }

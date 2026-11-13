@@ -1,8 +1,10 @@
-import { CONFLICT, guardedBatch, retryOnConflict } from "./guarded-batch";
+import { CONFLICT, type Guard, guardedBatch, retryOnConflict } from "./guarded-batch";
 import { availableCredits } from "./spend";
 import { memberLedgerFrom, memberLedgerStatement } from "./state";
 
-export type ReservationResult = { status: "reserved" } | { status: "insufficient"; availableCredits: number };
+export type ReservationResult =
+  | { status: "reserved"; credits: number }
+  | { status: "insufficient"; availableCredits: number };
 
 /**
  * Holds `credits` back from the member's available credits, for a quota
@@ -10,18 +12,35 @@ export type ReservationResult = { status: "reserved" } | { status: "insufficient
  * what it holds, and releasing it frees the rest. Refused when the member's
  * available credits (balance minus open reservations) do not cover it.
  *
+ * With `minimumCredits`, a member with fewer than `credits` available gets
+ * what they have, down to that minimum; the result says how much.
+ *
  * The check and the insert run behind the member's guard, so concurrent
  * reservations never commit more than the member has. Reserving an id that
  * the member already reserved is answered `reserved` again and holds
  * nothing more.
+ *
+ * `alsoWrite` adds statements to the reservation's batch, so they commit
+ * with it or not at all. Each must carry `guard.sql` in its WHERE clause.
+ * They do not run for an id that was reserved already.
  */
 export async function reserveCredits(
   db: D1Database,
-  input: { reservationId: string; memberId: string; credits: number; expiresAt: number; now?: number },
+  input: {
+    reservationId: string;
+    memberId: string;
+    credits: number;
+    minimumCredits?: number;
+    expiresAt: number;
+    now?: number;
+    alsoWrite?: (guard: Guard, credits: number) => D1PreparedStatement[];
+  },
 ): Promise<ReservationResult> {
-  if (!Number.isSafeInteger(input.credits) || input.credits <= 0) {
-    throw new RangeError("credits must be a positive whole number");
+  const minimum = input.minimumCredits ?? input.credits;
+  for (const value of [input.credits, minimum]) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError("credits must be a positive whole number");
   }
+  if (minimum > input.credits) throw new RangeError("minimumCredits must not exceed credits");
   const now = input.now ?? Date.now();
   // A reservation that is already over would hold nothing; an expiry in
   // seconds instead of milliseconds is the likely cause.
@@ -32,16 +51,17 @@ export async function reserveCredits(
   return retryOnConflict(async () => {
     const [memberResult, existingResult] = await db.batch([
       memberLedgerStatement(db, input.memberId, now),
-      db.prepare(`SELECT member_id FROM credit_reservations WHERE id = ?`).bind(input.reservationId),
+      db.prepare(`SELECT member_id, credits FROM credit_reservations WHERE id = ?`).bind(input.reservationId),
     ]);
-    const existing = existingResult?.results[0] as { member_id: string } | undefined;
+    const existing = existingResult?.results[0] as { member_id: string; credits: number } | undefined;
     if (existing) {
       if (existing.member_id !== input.memberId) throw new Error("the reservation id belongs to another member");
-      return { status: "reserved" } as const;
+      return { status: "reserved", credits: existing.credits } as const;
     }
     const member = memberLedgerFrom(memberResult);
     const available = availableCredits(member.balances, member.reserved);
-    if (available < input.credits) return { status: "insufficient", availableCredits: Math.max(available, 0) } as const;
+    if (available < minimum) return { status: "insufficient", availableCredits: Math.max(available, 0) } as const;
+    const credits = Math.min(input.credits, available);
 
     const written = await guardedBatch(db, [{ memberId: input.memberId, version: member.version }], (guard) => [
       db
@@ -49,9 +69,10 @@ export async function reserveCredits(
           `INSERT INTO credit_reservations (id, member_id, credits, created_at, expires_at)
            SELECT ?, ?, ?, ?, ? WHERE ${guard.sql}`,
         )
-        .bind(input.reservationId, input.memberId, input.credits, now, input.expiresAt, ...guard.binds),
+        .bind(input.reservationId, input.memberId, credits, now, input.expiresAt, ...guard.binds),
+      ...(input.alsoWrite?.(guard, credits) ?? []),
     ]);
-    return written === CONFLICT ? CONFLICT : ({ status: "reserved" } as const);
+    return written === CONFLICT ? CONFLICT : ({ status: "reserved", credits } as const);
   });
 }
 

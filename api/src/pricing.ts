@@ -70,6 +70,32 @@ export const LEASE_RENEW_AT_BYTES = wholeQuotient(LEASE_BYTES * LEASE_RENEW_PERC
 export const LEASE_GRACE_SECONDS = 300;
 
 /**
+ * How long a lease lasts if the session neither uses it up nor returns it.
+ * Its credits stay reserved until then.
+ */
+export const LEASE_TTL_SECONDS = 60 * 60;
+
+/** What one lease reserves and grants. */
+export interface LeaseTerms {
+  credits: number;
+  grantedBytes: number;
+  renewAtBytes: number;
+}
+
+/**
+ * The lease for `credits` reserved credits: the bytes they buy at the use
+ * rate, rounded down, renewed at LEASE_RENEW_PERCENT. A full lease reserves
+ * LEASE_CREDITS; a member with fewer left gets a smaller last lease.
+ */
+export function leaseTerms(credits: number): LeaseTerms {
+  if (!Number.isSafeInteger(credits) || credits <= 0 || credits > LEASE_CREDITS) {
+    throw new RangeError(`a lease reserves 1 to ${LEASE_CREDITS} credits`);
+  }
+  const grantedBytes = Number((BigInt(credits) * BigInt(BYTES_PER_MB)) / BigInt(USE_CREDITS_PER_MB));
+  return { credits, grantedBytes, renewAtBytes: Math.floor((grantedBytes * LEASE_RENEW_PERCENT) / 100) };
+}
+
+/**
  * Credits for a byte total at a per-MB rate, rounded down:
  * floor(totalBytes × creditsPerMb / 10^6).
  *

@@ -2,6 +2,8 @@ import { every } from "hono/combine";
 import { createMiddleware } from "hono/factory";
 import { requireSession, type SessionVariables } from "./auth/middleware";
 import { sha256Hex } from "./crypto";
+import { UUID_V7, uuidV7Timestamp } from "./formats";
+import type { GatewayVariables } from "./gateway/auth";
 import { apiError, invalidRequest, readJsonObject } from "./http";
 import { requireVerifiedIdentity } from "./identity/require-verified";
 
@@ -18,7 +20,6 @@ export const RECORD_TTL_MS = 25 * HOUR_MS;
  */
 export const CLAIM_TIMEOUT_MS = 60 * 1000;
 
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface IdempotentVariables {
   /** The parsed JSON body, for the handler behind `idempotent`. */
@@ -29,14 +30,15 @@ export interface IdempotentVariables {
  * Makes a JSON POST safe to retry, as the contract requires: the body's
  * `request_id` (UUIDv7) is claimed once, the first response is stored, and a
  * retry with the same body gets it again. The same request_id with another
- * body, on another endpoint, or from another member, gets 409: behind
- * requireSession the member is part of the request, so no member ever sees
- * another member's response (use memberIdempotent there, which fixes that
- * order). 5xx responses are not kept, so a retry runs again.
+ * body, on another endpoint, or from another member or gateway, gets 409:
+ * behind requireSession or requireGateway the caller is part of the
+ * request, so no caller ever sees another's response (use memberIdempotent
+ * for members, which fixes that order). 5xx responses are not kept, so a
+ * retry runs again.
  */
 export const idempotent = createMiddleware<{
   Bindings: Env;
-  Variables: IdempotentVariables & Partial<SessionVariables>;
+  Variables: IdempotentVariables & Partial<SessionVariables> & Partial<GatewayVariables>;
 }>(
   async (c, next) => {
     const body = await readJsonObject(c.req.raw);
@@ -55,7 +57,13 @@ export const idempotent = createMiddleware<{
     }
 
     const db = c.env.DB;
-    const fingerprint = await requestFingerprint(c.req.method, new URL(c.req.url).pathname, body, c.get("member")?.id);
+    const fingerprint = await requestFingerprint(
+      c.req.method,
+      new URL(c.req.url).pathname,
+      body,
+      c.get("member")?.id,
+      c.get("gateway")?.id,
+    );
     const claim = await db
       .prepare(
         `INSERT INTO idempotency_records (request_id, fingerprint, claimed_at, created_at, expires_at)
@@ -123,16 +131,17 @@ export const memberIdempotent = every(requireSession, idempotent);
 export const verifiedMemberIdempotent = every(requireSession, requireVerifiedIdentity, idempotent);
 
 /**
- * SHA-256 of method, path, the signed-in member (if any) and canonical body:
- * what "the same request" means.
+ * SHA-256 of method, path, the caller (signed-in member or gateway, if any)
+ * and canonical body: what "the same request" means.
  */
 export function requestFingerprint(
   method: string,
   path: string,
   body: Record<string, unknown>,
   memberId?: string,
+  gatewayId?: string,
 ): Promise<string> {
-  const caller = memberId === undefined ? "" : ` member:${memberId}`;
+  const caller = memberId !== undefined ? ` member:${memberId}` : gatewayId !== undefined ? ` gateway:${gatewayId}` : "";
   return sha256Hex(`${method} ${path}${caller}\n${canonicalJson(body)}`);
 }
 
@@ -157,10 +166,6 @@ async function takeOverAbandonedClaim(
   return taken.meta.changes === 1;
 }
 
-/** Milliseconds since the Unix epoch, from the first 48 bits of a UUIDv7. */
-function uuidV7Timestamp(id: string): number {
-  return parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
-}
 
 /** JSON with object keys sorted, so the same body always has the same fingerprint. */
 function canonicalJson(value: unknown): string {

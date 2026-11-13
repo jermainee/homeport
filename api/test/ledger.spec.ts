@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { chargeUsage, getBalances, grantCredits, releaseReservation, reserveCredits } from "../src/ledger";
-import { CONFLICT, guardedBatch } from "../src/ledger/guarded-batch";
+import { CONFLICT, type Guard, guardedBatch } from "../src/ledger/guarded-batch";
 import { memberLedgerFrom, memberLedgerStatement } from "../src/ledger/state";
 import { LEASE_CREDITS } from "../src/pricing";
 import { createMember, driftedBalances, platformBalance, unbalancedTransactions } from "./ledger-fixtures";
@@ -161,6 +161,23 @@ describe("chargeUsage", () => {
     }
     return { user, owner };
   }
+
+  it("writes alsoWrite's statements in the charge's batch, or nothing at all", async () => {
+    const { user, owner } = await userAndOwner(100);
+    const meterId = crypto.randomUUID();
+    const link = (from: string, to: string) => (guard: Guard) => [
+      db
+        .prepare(`INSERT INTO member_links (member_id, linked_member_id, reason, created_at) SELECT ?, ?, 'charged', 0 WHERE ${guard.sql}`)
+        .bind(from, to, ...guard.binds),
+    ];
+
+    await chargeUsage(db, { meterId, payerMemberId: user, payeeMemberId: owner, bytes: 1_000_000, usageKey: crypto.randomUUID(), alsoWrite: link(user, owner) });
+    const failed = chargeUsage(db, { meterId, payerMemberId: user, payeeMemberId: owner, bytes: 1_000_000, usageKey: crypto.randomUUID(), alsoWrite: link(user, user) });
+
+    await expect(failed).rejects.toThrow();
+    expect(await db.prepare(`SELECT reason FROM member_links WHERE member_id = ?`).bind(user).first()).toEqual({ reason: "charged" });
+    expect((await getBalances(db, user))?.purchased).toBe(90);
+  });
 
   it("moves 10 credits per MB from the user: 5 to the line's owner, 5 to the platform", async () => {
     // The plan's control-plane check: 123,456,789 bytes in five events.
@@ -435,6 +452,40 @@ describe("credit reservations (quota leases)", () => {
 
     await expect(reserve(memberId, 0)).rejects.toThrow(RangeError);
     await expect(reserve(memberId, 2.5)).rejects.toThrow(RangeError);
+  });
+
+  it("reserves what is available, down to minimumCredits, and says how much", async () => {
+    const memberId = await memberWithCredits(500);
+    const reservationId = crypto.randomUUID();
+
+    const partial = await reserveCredits(db, { reservationId, memberId, credits: 2_000, minimumCredits: 1, expiresAt: Date.now() + HOUR });
+    const again = await reserveCredits(db, { reservationId, memberId, credits: 2_000, minimumCredits: 1, expiresAt: Date.now() + HOUR });
+    const none = await reserveCredits(db, { reservationId: crypto.randomUUID(), memberId, credits: 2_000, minimumCredits: 1, expiresAt: Date.now() + HOUR });
+
+    expect(partial).toEqual({ status: "reserved", credits: 500 });
+    expect(again).toEqual({ status: "reserved", credits: 500 });
+    expect(none).toEqual({ status: "insufficient", availableCredits: 0 });
+  });
+
+  it("writes alsoWrite's statements in the reservation's batch, with the credits reserved, or nothing at all", async () => {
+    const memberId = await memberWithCredits(700);
+    const other = await memberWithCredits(10);
+    const reservationId = crypto.randomUUID();
+    const failingId = crypto.randomUUID();
+    const link = (from: string, to: string) => (guard: Guard, credits: number) => [
+      db
+        .prepare(`INSERT INTO member_links (member_id, linked_member_id, reason, created_at) SELECT ?, ?, ?, 0 WHERE ${guard.sql}`)
+        .bind(from, to, `reserved:${credits}`, ...guard.binds),
+    ];
+
+    await reserveCredits(db, { reservationId, memberId, credits: 2_000, minimumCredits: 1, expiresAt: Date.now() + HOUR, alsoWrite: link(memberId, other) });
+    // A member never links to themselves (CHECK), so this batch aborts, reservation included.
+    const failed = reserveCredits(db, { reservationId: failingId, memberId: other, credits: 1, expiresAt: Date.now() + HOUR, alsoWrite: link(other, other) });
+
+    await expect(failed).rejects.toThrow();
+    const linked = await db.prepare(`SELECT reason FROM member_links WHERE member_id = ? AND linked_member_id = ?`).bind(memberId, other).first();
+    expect(linked).toEqual({ reason: "reserved:700" });
+    expect(await db.prepare(`SELECT 1 FROM credit_reservations WHERE id = ?`).bind(failingId).first()).toBeNull();
   });
 });
 

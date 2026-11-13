@@ -1,6 +1,6 @@
 import { SHARE_CREDITS_PER_MB, USE_CREDITS_PER_MB, creditsForBytes } from "../pricing";
 import { type Entry, MEMBER_ACCOUNT_KINDS, bookStatements, memberAccount, platformAccount } from "./book";
-import { CONFLICT, guardedBatch, retryOnConflict } from "./guarded-batch";
+import { CONFLICT, type Guard, guardedBatch, retryOnConflict } from "./guarded-batch";
 import { spendOrder } from "./spend";
 import { memberLedgerFrom, memberLedgerStatement } from "./state";
 
@@ -18,6 +18,12 @@ export interface UsageInput {
   /** The credit reservation (quota lease) this usage counts against, if any. */
   reservationId?: string;
   now?: number;
+  /**
+   * Statements for the charge's batch, so they commit with it or not at
+   * all. Each must carry `guard.sql` in its WHERE clause. They do not run
+   * for a duplicate.
+   */
+  alsoWrite?: (guard: Guard) => D1PreparedStatement[];
 }
 
 export type UsageResult =
@@ -145,6 +151,7 @@ export async function chargeUsage(db: D1Database, input: UsageInput): Promise<Us
                 )
                 .bind(charged, reservationId, payerMemberId, ...guard.binds),
             ]),
+        ...(input.alsoWrite?.(guard) ?? []),
       ];
     });
     if (written === CONFLICT) return CONFLICT;
