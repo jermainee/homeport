@@ -220,10 +220,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
-	epoch := s.epoch(flow.Peer)
 	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 	defer cancel()
 	adm := s.admit(ctx, flow)
+	// A reset of the peer's flows from here on also ends this one. Resets
+	// while the policy decided are already part of its decision.
+	epoch := s.epoch(flow.Peer)
 	if !adm.Allow {
 		s.endPending(flow.Peer)
 		r.Complete(true)
@@ -323,7 +325,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 	client := gonet.NewUDPConn(&wq, ep)
-	epoch := s.epoch(flow.Peer)
 	go func() {
 		ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 		defer cancel()
@@ -331,6 +332,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 			_ = client.Close()
 			return
 		}
+		epoch := s.epoch(flow.Peer)
 		upstream, err := s.dialer.DialUDP(ctx, flow)
 		if err != nil {
 			_ = client.Close()

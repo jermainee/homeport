@@ -268,3 +268,32 @@ func assertConnEnds(t *testing.T, conn net.Conn) {
 		t.Fatal("the connection is still open")
 	}
 }
+
+// resettingAccess resets the peer's flows while it decides, as a session
+// does when its first lease request is refused and it goes top-up only.
+type resettingAccess struct {
+	fixedAccess
+	gw *gateway.Server
+}
+
+func (a *resettingAccess) Access(ctx context.Context, p gateway.Peer) gateway.Access {
+	a.gw.ResetPeerFlows(p.PublicKey)
+	return a.fixedAccess.Access(ctx, p)
+}
+
+func TestFlowAdmittedAfterAResetDuringTheDecisionStaysOpen(t *testing.T) {
+	acc := &resettingAccess{fixedAccess: fixedAccess{access: gateway.AccessTopUp}}
+	gw := newGatewayWith(t, gateway.Config{Dialer: newOrigins(t), Access: acc})
+	acc.gw = gw
+	key := newKey(t)
+	peerIP := netip.MustParseAddr("10.77.0.2")
+	if err := gw.AddPeer(gateway.Peer{ID: "peer-1", PublicKey: key.PublicKey(), IPv4: peerIP}); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	got := newClient(t, gw, key, peerIP).udpRoundTrip(t, netip.MustParseAddrPort("10.77.0.1:53"), []byte("query"))
+
+	if string(got) != "query" {
+		t.Errorf("DNS answered %q", got)
+	}
+}
