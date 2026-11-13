@@ -139,8 +139,17 @@ CREATE TABLE meter_totals (
   updated_at INTEGER NOT NULL
 );
 
+-- A meter belongs to one payer and one payee for good. Usage writes them on
+-- every update, so a batch that would move a meter aborts here.
+CREATE TRIGGER meter_totals_owners_fixed BEFORE UPDATE OF payer_member_id, payee_member_id ON meter_totals
+WHEN NEW.payer_member_id <> OLD.payer_member_id OR NEW.payee_member_id <> OLD.payee_member_id
+BEGIN
+  SELECT RAISE(ABORT, 'a meter never changes payer or payee');
+END;
+
 -- Each piece of usage applied to a meter (for example one gateway usage
--- event), so a retry is never counted twice.
+-- event), so a retry is never counted twice. These rows are not ledger rows:
+-- they may be deleted once a retry of their usage can no longer arrive.
 CREATE TABLE usage_charges (
   usage_key TEXT PRIMARY KEY,
   meter_id TEXT NOT NULL REFERENCES meter_totals (meter_id),
@@ -151,8 +160,6 @@ CREATE TABLE usage_charges (
   transaction_id TEXT REFERENCES ledger_transactions (id),
   created_at INTEGER NOT NULL
 );
-
-CREATE INDEX usage_charges_meter ON usage_charges (meter_id);
 
 -- Credits a quota lease holds back. A reservation books nothing: a member's
 -- available credits are their balance minus what open reservations still

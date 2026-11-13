@@ -39,6 +39,8 @@ export default defineConfig({
             // Test-only binding so the setup file can apply the migrations.
             TEST_MIGRATIONS: migrations,
           },
+          // Test-only: an empty database for tests that apply migrations step by step.
+          d1Databases: ["MIGRATION_TEST_DB"],
           serviceBindings: {
             // Test-only: validates a response body against contracts/control-api.openapi.yaml.
             CONTRACT: async (request) => {

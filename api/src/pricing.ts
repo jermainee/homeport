@@ -38,13 +38,13 @@ export const EARNED_CREDITS_HOLDBACK_DAYS = 30;
 export const LEASE_CREDITS = 2_000;
 
 /** Bytes one lease lets a session use: LEASE_CREDITS at the use rate (200 MB). */
-export const LEASE_BYTES = (LEASE_CREDITS * BYTES_PER_MB) / USE_CREDITS_PER_MB;
+export const LEASE_BYTES = wholeQuotient(LEASE_CREDITS * BYTES_PER_MB, USE_CREDITS_PER_MB);
 
 /** The gateway asks for the next lease once a session has used this share of the current one. */
 export const LEASE_RENEW_PERCENT = 80;
 
 /** Bytes into a lease at which the gateway asks for the next one (160 MB). */
-export const LEASE_RENEW_AT_BYTES = (LEASE_BYTES * LEASE_RENEW_PERCENT) / 100;
+export const LEASE_RENEW_AT_BYTES = wholeQuotient(LEASE_BYTES * LEASE_RENEW_PERCENT, 100);
 
 /** How long a session stays open, top-up page only, once no next lease is granted. */
 export const LEASE_GRACE_SECONDS = 300;
@@ -65,4 +65,11 @@ export function creditsForBytes(totalBytes: number, creditsPerMb: number): numbe
     throw new RangeError("creditsPerMb must be a non-negative safe integer");
   }
   return Number((BigInt(totalBytes) * BigInt(creditsPerMb)) / BigInt(BYTES_PER_MB));
+}
+
+/** `dividend / divisor`, which must be a whole number: byte counts the gateway receives are integers. */
+function wholeQuotient(dividend: number, divisor: number): number {
+  const quotient = dividend / divisor;
+  if (!Number.isSafeInteger(quotient)) throw new RangeError(`${dividend} / ${divisor} is not a whole number`);
+  return quotient;
 }

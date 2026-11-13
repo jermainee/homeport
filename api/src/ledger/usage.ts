@@ -53,18 +53,25 @@ export async function chargeUsage(db: D1Database, input: UsageInput): Promise<Us
   const now = input.now ?? Date.now();
 
   return retryOnConflict(async () => {
-    const [payerResult, meterResult, appliedResult] = await db.batch([
+    const [payerResult, payeeResult, meterResult, appliedResult] = await db.batch([
       memberLedgerStatement(db, payerMemberId, now),
+      db.prepare(`SELECT ledger_version FROM members WHERE id = ?`).bind(payeeMemberId),
       db
         .prepare(
           `SELECT payer_member_id, payee_member_id, total_bytes, charged_credits, earned_credits
              FROM meter_totals WHERE meter_id = ?`,
         )
         .bind(meterId),
-      db.prepare(`SELECT 1 FROM usage_charges WHERE usage_key = ?`).bind(usageKey),
+      db.prepare(`SELECT meter_id FROM usage_charges WHERE usage_key = ?`).bind(usageKey),
     ]);
-    if ((appliedResult?.results.length ?? 0) > 0) return { status: "duplicate" } as const;
+    const applied = appliedResult?.results[0] as { meter_id: string } | undefined;
+    if (applied) {
+      if (applied.meter_id !== meterId) throw new Error("the usage key was already applied to another meter");
+      return { status: "duplicate" } as const;
+    }
     const payer = memberLedgerFrom(payerResult);
+    const payeeVersion = (payeeResult?.results[0] as { ledger_version: number } | undefined)?.ledger_version;
+    if (payeeVersion === undefined) throw new Error("unknown payee");
     const meter = meterResult?.results[0] as MeterRow | undefined;
     if (meter && (meter.payer_member_id !== payerMemberId || meter.payee_member_id !== payeeMemberId)) {
       throw new Error("a meter belongs to one payer and one payee");
@@ -75,7 +82,13 @@ export async function chargeUsage(db: D1Database, input: UsageInput): Promise<Us
     const earned = creditsForBytes(totalBytes, SHARE_CREDITS_PER_MB) - (meter?.earned_credits ?? 0);
     const transactionId = charged > 0 ? crypto.randomUUID() : null;
 
-    const written = await guardedBatch(db, payerMemberId, payer.version, (guard) => {
+    // The owner is claimed too: their earned_pending changes, and a spend of
+    // theirs that read the old balance must retry.
+    const members = [
+      { memberId: payerMemberId, version: payer.version },
+      { memberId: payeeMemberId, version: payeeVersion },
+    ];
+    const written = await guardedBatch(db, members, (guard) => {
       const taken = spendOrder(payer.balances, charged);
       const entries: Entry[] = [
         ...MEMBER_ACCOUNT_KINDS.map((kind) => ({ accountId: memberAccount(payerMemberId, kind), amount: -taken[kind] })),
@@ -89,6 +102,8 @@ export async function chargeUsage(db: D1Database, input: UsageInput): Promise<Us
                (meter_id, payer_member_id, payee_member_id, total_bytes, charged_credits, earned_credits, updated_at)
              SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}
              ON CONFLICT (meter_id) DO UPDATE SET
+               payer_member_id = excluded.payer_member_id,
+               payee_member_id = excluded.payee_member_id,
                total_bytes = excluded.total_bytes,
                charged_credits = excluded.charged_credits,
                earned_credits = excluded.earned_credits,

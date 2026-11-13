@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { chargeUsage, getBalances, grantCredits, releaseReservation, reserveCredits } from "../src/ledger";
+import { CONFLICT, guardedBatch } from "../src/ledger/guarded-batch";
+import { memberLedgerFrom, memberLedgerStatement } from "../src/ledger/state";
 import { LEASE_CREDITS } from "../src/pricing";
 import { createMember, driftedBalances, platformBalance, unbalancedTransactions } from "./ledger-fixtures";
 
@@ -390,6 +392,40 @@ describe("credit reservations (quota leases)", () => {
     expect(await releaseReservation(db, { reservationId, now: now + 2_000 })).toEqual({ releasedCredits: 0 });
   });
 
+  it("treats a repeated reservation id as the same reservation", async () => {
+    const memberId = await memberWithCredits(3_000);
+    const reservationId = crypto.randomUUID();
+    const expiresAt = Date.now() + HOUR;
+
+    expect((await reserveCredits(db, { reservationId, memberId, credits: 2_000, expiresAt })).status).toBe("reserved");
+    expect((await reserveCredits(db, { reservationId, memberId, credits: 2_000, expiresAt })).status).toBe("reserved");
+
+    expect(await reserve(memberId, 1_001)).toEqual({ status: "insufficient", availableCredits: 1_000 });
+  });
+
+  it("refuses a reservation id that belongs to another member", async () => {
+    const [first, second] = await Promise.all([memberWithCredits(2_000), memberWithCredits(2_000)]);
+    const reservationId = crypto.randomUUID();
+    await reserveCredits(db, { reservationId, memberId: first, credits: 2_000, expiresAt: Date.now() + HOUR });
+
+    await expect(
+      reserveCredits(db, { reservationId, memberId: second, credits: 2_000, expiresAt: Date.now() + HOUR }),
+    ).rejects.toThrow(/another member/);
+  });
+
+  it("refuses a reservation that has already expired", async () => {
+    const memberId = await memberWithCredits(2_000);
+    const now = Date.now();
+
+    await expect(
+      reserveCredits(db, { reservationId: crypto.randomUUID(), memberId, credits: 10, expiresAt: now, now }),
+    ).rejects.toThrow(RangeError);
+    // Seconds instead of milliseconds is the likely mistake.
+    await expect(
+      reserveCredits(db, { reservationId: crypto.randomUUID(), memberId, credits: 10, expiresAt: Math.floor(now / 1000) + 3600, now }),
+    ).rejects.toThrow(RangeError);
+  });
+
   it("releases nothing for an unknown reservation", async () => {
     expect(await releaseReservation(db, { reservationId: crypto.randomUUID() })).toEqual({ releasedCredits: 0 });
   });
@@ -421,5 +457,70 @@ describe("concurrent usage", () => {
     expect(meter?.total_bytes).toBe(12_345_670);
     expect(await unbalancedTransactions()).toEqual([]);
     expect(await driftedBalances()).toEqual([]);
+  });
+});
+
+describe("guarded batch", () => {
+  it("makes a change retry when a booking credited its member after it read", async () => {
+    // An owner's spend must not split its debit by balances that a user's
+    // usage has changed since, so crediting a member moves their version too.
+    const [user, owner] = await Promise.all([createMember(), createMember()]);
+    await grantCredits(db, { memberId: user, credits: 1_000, source: "dev_grants", idempotencyKey: crypto.randomUUID() });
+    const stale = memberLedgerFrom(await memberLedgerStatement(db, owner, Date.now()).all());
+
+    await chargeUsage(db, { meterId: crypto.randomUUID(), payerMemberId: user, payeeMemberId: owner, bytes: 1_000_000, usageKey: crypto.randomUUID() });
+
+    expect(await guardedBatch(db, [{ memberId: owner, version: stale.version }], () => [])).toBe(CONFLICT);
+  });
+
+  it("refuses to claim the same member twice", async () => {
+    const memberId = await createMember();
+
+    await expect(
+      guardedBatch(db, [{ memberId, version: 0 }, { memberId, version: 0 }], () => []),
+    ).rejects.toThrow(/twice/);
+  });
+});
+
+describe("idempotency keys", () => {
+  it("refuse a grant whose key already booked another member's grant", async () => {
+    const [first, second] = await Promise.all([createMember(), createMember()]);
+    const idempotencyKey = crypto.randomUUID();
+    await grantCredits(db, { memberId: first, credits: 10, source: "dev_grants", idempotencyKey });
+
+    await expect(grantCredits(db, { memberId: second, credits: 10, source: "dev_grants", idempotencyKey })).rejects.toThrow(
+      /another booking/,
+    );
+  });
+
+  it("refuse usage whose key was already applied to another meter", async () => {
+    const [user, owner] = await Promise.all([createMember(), createMember()]);
+    const usageKey = crypto.randomUUID();
+    await chargeUsage(db, { meterId: crypto.randomUUID(), payerMemberId: user, payeeMemberId: owner, bytes: 1, usageKey });
+
+    await expect(
+      chargeUsage(db, { meterId: crypto.randomUUID(), payerMemberId: user, payeeMemberId: owner, bytes: 1, usageKey }),
+    ).rejects.toThrow(/another meter/);
+  });
+});
+
+describe("guard rails", () => {
+  it("never lets sold credits land in an earned account", async () => {
+    const memberId = await createMember();
+
+    await expect(
+      // @ts-expect-error The type allows only purchased for sold credits; this is a caller that bypasses it.
+      grantCredits(db, { memberId, credits: 10, source: "credits_issued", account: "earned_cashable", idempotencyKey: crypto.randomUUID() }),
+    ).rejects.toThrow(/purchased/);
+  });
+
+  it("never lets a meter change payer or payee", async () => {
+    const [user, owner, other] = await Promise.all([createMember(), createMember(), createMember()]);
+    const meterId = crypto.randomUUID();
+    await chargeUsage(db, { meterId, payerMemberId: user, payeeMemberId: owner, bytes: 1, usageKey: crypto.randomUUID() });
+
+    await expect(
+      db.prepare(`UPDATE meter_totals SET payee_member_id = ? WHERE meter_id = ?`).bind(other, meterId).run(),
+    ).rejects.toThrow(/meter/);
   });
 });

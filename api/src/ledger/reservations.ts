@@ -11,7 +11,9 @@ export type ReservationResult = { status: "reserved" } | { status: "insufficient
  * available credits (balance minus open reservations) do not cover it.
  *
  * The check and the insert run behind the member's guard, so concurrent
- * reservations never commit more than the member has.
+ * reservations never commit more than the member has. Reserving an id that
+ * the member already reserved is answered `reserved` again and holds
+ * nothing more.
  */
 export async function reserveCredits(
   db: D1Database,
@@ -21,13 +23,27 @@ export async function reserveCredits(
     throw new RangeError("credits must be a positive whole number");
   }
   const now = input.now ?? Date.now();
+  // A reservation that is already over would hold nothing; an expiry in
+  // seconds instead of milliseconds is the likely cause.
+  if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now) {
+    throw new RangeError("expiresAt must be a later time than now, in epoch milliseconds");
+  }
 
   return retryOnConflict(async () => {
-    const member = memberLedgerFrom(await memberLedgerStatement(db, input.memberId, now).all());
+    const [memberResult, existingResult] = await db.batch([
+      memberLedgerStatement(db, input.memberId, now),
+      db.prepare(`SELECT member_id FROM credit_reservations WHERE id = ?`).bind(input.reservationId),
+    ]);
+    const existing = existingResult?.results[0] as { member_id: string } | undefined;
+    if (existing) {
+      if (existing.member_id !== input.memberId) throw new Error("the reservation id belongs to another member");
+      return { status: "reserved" } as const;
+    }
+    const member = memberLedgerFrom(memberResult);
     const available = availableCredits(member.balances, member.reserved);
     if (available < input.credits) return { status: "insufficient", availableCredits: Math.max(available, 0) } as const;
 
-    const written = await guardedBatch(db, input.memberId, member.version, (guard) => [
+    const written = await guardedBatch(db, [{ memberId: input.memberId, version: member.version }], (guard) => [
       db
         .prepare(
           `INSERT INTO credit_reservations (id, member_id, credits, created_at, expires_at)
