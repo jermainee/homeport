@@ -36,6 +36,8 @@ const (
 	// DNS flows end soon after their answer. Each one holds a stream on the
 	// agent, and every query from a new source port is a new flow.
 	dnsIdleTimeout = 5 * time.Second
+	// A TLS-only flow must send its ClientHello this soon.
+	helloTimeout = 10 * time.Second
 )
 
 // Flow is one connection from a peer: who opened it and where it goes.
@@ -49,6 +51,22 @@ type Flow struct {
 type Dialer interface {
 	DialTCP(ctx context.Context, f Flow) (net.Conn, error)
 	DialUDP(ctx context.Context, f Flow) (net.Conn, error)
+}
+
+// Policy decides whether a flow may open. Admit runs before the flow is
+// dialed and may block until ctx ends.
+type Policy interface {
+	Admit(ctx context.Context, f Flow) Admission
+}
+
+// Admission is a Policy's answer for one flow.
+type Admission struct {
+	Allow bool
+	// ServerName, when set, admits only TLS: a TCP flow opens if the server
+	// name in its ClientHello is one ServerName accepts, and a UDP flow is
+	// refused. The client's handshake completes before the dial, so such a
+	// flow can no longer be refused with a plain reset during the handshake.
+	ServerName func(name string) bool
 }
 
 // Stack is a tun.Device backed by a gVisor stack in promiscuous mode.
@@ -66,14 +84,24 @@ type Stack struct {
 	meter     *Meter
 	dialer    Dialer
 
+	policy Policy // nil allows every flow
+
 	maxPending int // dials one tunnel address may have open at once
 	pendingMu  sync.Mutex
 	pending    map[netip.Addr]int
+
+	flowsMu sync.Mutex
+	flows   map[netip.Addr]map[*flowEntry]struct{} // open flows by tunnel address
+	epochs  map[netip.Addr]uint64                  // ResetFlows calls per tunnel address
 }
 
-// New builds the stack. The meter decides which peers may send, and each
-// tunnel address may have at most maxPending flows waiting on the dialer.
-func New(mtu int, meter *Meter, dialer Dialer, maxPending int) (*Stack, error) {
+// flowEntry is an open flow that ResetFlows can end.
+type flowEntry struct{ reset func() }
+
+// New builds the stack. The meter decides which peers may send, the policy
+// (if not nil) which flows they may open, and each tunnel address may have
+// at most maxPending flows waiting on the policy and the dialer.
+func New(mtu int, meter *Meter, dialer Dialer, policy Policy, maxPending int) (*Stack, error) {
 	if mtu < 1280 || mtu > 65535 {
 		return nil, fmt.Errorf("MTU %d outside 1280..65535", mtu)
 	}
@@ -83,6 +111,9 @@ func New(mtu int, meter *Meter, dialer Dialer, maxPending int) (*Stack, error) {
 		cancel:     cancel,
 		maxPending: maxPending,
 		pending:    make(map[netip.Addr]int),
+		flows:      make(map[netip.Addr]map[*flowEntry]struct{}),
+		epochs:     make(map[netip.Addr]uint64),
+		policy:     policy,
 		ep:         channel.New(1024, uint32(mtu), ""),
 		stack: stack.New(stack.Options{
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
@@ -189,9 +220,19 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
+	adm, epoch := s.admit(flow)
+	if !adm.Allow {
+		s.endPending(flow.Peer)
+		r.Complete(true)
+		return
+	}
+	if adm.ServerName != nil {
+		s.handleTLSOnly(r, flow, epoch, adm.ServerName)
+		return
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+	defer cancel()
 	upstream, err := s.dialer.DialTCP(ctx, flow)
-	cancel()
 	s.endPending(flow.Peer)
 	if err != nil {
 		r.Complete(true)
@@ -205,7 +246,64 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
-	s.relayTCP(gonet.NewTCPConn(&wq, ep), ep.Abort, upstream)
+	s.relayTCP(flow.Peer, epoch, gonet.NewTCPConn(&wq, ep), ep.Abort, upstream, nil)
+}
+
+// handleTLSOnly completes the client's handshake, reads its ClientHello,
+// and dials only if the server name it names is accepted. The ClientHello
+// is then passed on unchanged.
+func (s *Stack) handleTLSOnly(r *tcp.ForwarderRequest, flow Flow, epoch uint64, accept func(string) bool) {
+	var wq waiter.Queue
+	ep, tcpErr := r.CreateEndpoint(&wq)
+	if tcpErr != nil {
+		s.endPending(flow.Peer)
+		r.Complete(true)
+		return
+	}
+	r.Complete(false)
+	client := gonet.NewTCPConn(&wq, ep)
+	refuse := func() {
+		s.endPending(flow.Peer)
+		ep.Abort()
+		_ = client.Close()
+	}
+	name, hello, err := peekServerName(client, time.Now().Add(helloTimeout))
+	if err != nil || !accept(name) {
+		refuse()
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+	defer cancel()
+	upstream, err := s.dialer.DialTCP(ctx, flow)
+	if err != nil {
+		refuse()
+		return
+	}
+	s.endPending(flow.Peer)
+	s.relayTCP(flow.Peer, epoch, client, ep.Abort, upstream, hello)
+}
+
+// admit asks the policy about a flow and returns its answer with the epoch
+// it holds for: a reset of the peer's flows after that epoch ends the flow.
+// When a reset lands while the policy decides, the answer may predate it,
+// so the policy is asked again. A peer whose flows keep being reset is
+// refused.
+func (s *Stack) admit(f Flow) (Admission, uint64) {
+	epoch := s.epoch(f.Peer)
+	if s.policy == nil {
+		return Admission{Allow: true}, epoch
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+	defer cancel()
+	for range 3 {
+		adm := s.policy.Admit(ctx, f)
+		now := s.epoch(f.Peer)
+		if now == epoch {
+			return adm, epoch
+		}
+		epoch = now
+	}
+	return Admission{}, epoch
 }
 
 // startPending reserves one of the peer's pending-dial slots. A peer at its
@@ -241,26 +339,87 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}
 	client := gonet.NewUDPConn(&wq, ep)
 	go func() {
+		adm, epoch := s.admit(flow)
+		if !adm.Allow || adm.ServerName != nil {
+			_ = client.Close()
+			return
+		}
 		ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+		defer cancel()
 		upstream, err := s.dialer.DialUDP(ctx, flow)
-		cancel()
 		if err != nil {
 			_ = client.Close()
 			return
 		}
+		cancel()
 		idle := udpIdleTimeout
 		if flow.Dst.Port() == 53 {
 			idle = dnsIdleTimeout
 		}
-		s.relayUDP(client, upstream, idle)
+		s.relayUDP(flow.Peer, epoch, client, upstream, idle)
 	}()
 }
 
-// relayTCP copies both ways between the client and the upstream. A clean end
-// of one direction is passed on as a half-close. An error on either side is a
-// reset: the client gets a TCP reset (abortClient) and the upstream is reset
-// too, so a cut-off response never looks complete. Close on the stack ends both.
-func (s *Stack) relayTCP(client net.Conn, abortClient func(), upstream net.Conn) {
+// epoch is the number of ResetFlows calls for addr so far. A flow admitted
+// before a reset is ended as soon as it is tracked.
+func (s *Stack) epoch(addr netip.Addr) uint64 {
+	s.flowsMu.Lock()
+	defer s.flowsMu.Unlock()
+	return s.epochs[addr]
+}
+
+// track registers an open flow of peer. It reports false, and registers
+// nothing, when the peer's flows were reset since epoch.
+func (s *Stack) track(peer netip.Addr, epoch uint64, reset func()) (untrack func(), ok bool) {
+	s.flowsMu.Lock()
+	defer s.flowsMu.Unlock()
+	if s.epochs[peer] != epoch {
+		return nil, false
+	}
+	e := &flowEntry{reset: reset}
+	if s.flows[peer] == nil {
+		s.flows[peer] = make(map[*flowEntry]struct{})
+	}
+	s.flows[peer][e] = struct{}{}
+	return func() {
+		s.flowsMu.Lock()
+		defer s.flowsMu.Unlock()
+		delete(s.flows[peer], e)
+		if len(s.flows[peer]) == 0 {
+			delete(s.flows, peer)
+		}
+	}, true
+}
+
+// ResetFlows ends every open flow of these tunnel addresses, including
+// flows still waiting on the policy or the dialer. A TCP client gets a
+// reset.
+func (s *Stack) ResetFlows(addrs ...netip.Addr) {
+	var resets []func()
+	s.flowsMu.Lock()
+	for _, a := range addrs {
+		if !a.IsValid() {
+			continue
+		}
+		s.epochs[a]++
+		for e := range s.flows[a] {
+			resets = append(resets, e.reset)
+		}
+		delete(s.flows, a)
+	}
+	s.flowsMu.Unlock()
+	for _, reset := range resets {
+		reset()
+	}
+}
+
+// relayTCP copies both ways between the client and the upstream, after
+// sending first (the ClientHello a TLS-only flow already read) upstream. A
+// clean end of one direction is passed on as a half-close. An error on
+// either side is a reset: the client gets a TCP reset (abortClient) and the
+// upstream is reset too, so a cut-off response never looks complete. Close
+// on the stack, or ResetFlows for the peer, ends both.
+func (s *Stack) relayTCP(peer netip.Addr, epoch uint64, client net.Conn, abortClient func(), upstream net.Conn, first []byte) {
 	closeBoth := func() {
 		_ = client.Close()
 		_ = upstream.Close()
@@ -274,6 +433,18 @@ func (s *Stack) relayTCP(client net.Conn, abortClient func(), upstream net.Conn)
 	}
 	stop := context.AfterFunc(s.ctx, closeBoth)
 	defer stop()
+	untrack, ok := s.track(peer, epoch, resetBoth)
+	if !ok {
+		resetBoth()
+		return
+	}
+	defer untrack()
+	if len(first) > 0 {
+		if _, err := upstream.Write(first); err != nil {
+			resetBoth()
+			return
+		}
+	}
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		_, err := io.Copy(dst, src)
@@ -291,16 +462,21 @@ func (s *Stack) relayTCP(client net.Conn, abortClient func(), upstream net.Conn)
 	closeBoth()
 }
 
-// relayUDP copies datagrams both ways until the flow is idle for idle or the
-// stack closes.
-func (s *Stack) relayUDP(client, upstream net.Conn, idle time.Duration) {
-	defer func() { _ = client.Close() }()
-	defer func() { _ = upstream.Close() }()
-	stop := context.AfterFunc(s.ctx, func() {
+// relayUDP copies datagrams both ways until the flow is idle for idle, the
+// stack closes or ResetFlows ends the peer's flows.
+func (s *Stack) relayUDP(peer netip.Addr, epoch uint64, client, upstream net.Conn, idle time.Duration) {
+	closeBoth := func() {
 		_ = client.Close()
 		_ = upstream.Close()
-	})
+	}
+	defer closeBoth()
+	stop := context.AfterFunc(s.ctx, closeBoth)
 	defer stop()
+	untrack, ok := s.track(peer, epoch, closeBoth)
+	if !ok {
+		return
+	}
+	defer untrack()
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		buf := make([]byte, 65535)

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -406,5 +407,62 @@ func TestPeerOnALineNeedsItsMember(t *testing.T) {
 	err := gw.AddPeer(gateway.Peer{PublicKey: newKey(t).PublicKey(), IPv4: netip.MustParseAddr("10.77.0.2"), LineID: "line-1"})
 	if err == nil {
 		t.Fatal("a peer with a line but no member was accepted; the self-dealing check needs the member")
+	}
+}
+
+// lineEvents records the gateway's line events.
+type lineEvents struct {
+	mu     sync.Mutex
+	events []gateway.LineEvent
+}
+
+func (l *lineEvents) add(e gateway.LineEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, e)
+}
+
+func (l *lineEvents) all() []gateway.LineEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]gateway.LineEvent(nil), l.events...)
+}
+
+func TestLineEventsTellWhenAnAgentConnectsAndLeaves(t *testing.T) {
+	events := &lineEvents{}
+	cert, err := relayprotocol.GenerateSelfSigned("gateway")
+	if err != nil {
+		t.Fatalf("gateway certificate: %v", err)
+	}
+	gw := newGatewayWith(t, gateway.Config{QUICListen: "127.0.0.1:0", Certificate: cert, OnLineEvent: events.add})
+	agentCert, pin := newAgentCert(t)
+	if err := gw.AddLine(gateway.Line{ID: "line-1", OwnerMemberID: "member-owner", AgentPin: pin}); err != nil {
+		t.Fatalf("add line: %v", err)
+	}
+
+	agent, err := startAgent(t, gw, agentCert, answer(relayprotocol.StatusOK))
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	online := gateway.LineEvent{LineID: "line-1", Online: true, ObservedIP: netip.MustParseAddr("127.0.0.1"), AgentVersion: "test"}
+	if got := events.all(); len(got) != 1 || got[0] != online {
+		t.Fatalf("events %+v after hello, want %+v", got, online)
+	}
+
+	_ = agent.conn.CloseWithError(0, "")
+	waitUntil(t, func() bool { return len(events.all()) == 2 })
+	offline := online
+	offline.Online = false
+	if got := events.all()[1]; got != offline {
+		t.Errorf("event after the agent left is %+v, want %+v", got, offline)
+	}
+
+	if _, err := startAgent(t, gw, agentCert, answer(relayprotocol.StatusOK)); err != nil {
+		t.Fatalf("agent reconnect: %v", err)
+	}
+	gw.RemoveLine("line-1")
+	got := events.all()
+	if len(got) != 4 || got[2] != online || got[3] != offline {
+		t.Errorf("events %+v; want online, then offline when the line is removed", got[2:])
 	}
 }

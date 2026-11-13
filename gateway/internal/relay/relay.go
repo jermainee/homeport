@@ -31,22 +31,42 @@ type Line struct {
 	Pin relayprotocol.Pin
 }
 
+// Event tells that a line's agent registered (Online) or stopped serving
+// the line.
+type Event struct {
+	LineID       string
+	Online       bool
+	ObservedIP   netip.Addr // the agent's public IP as the gateway sees it
+	AgentVersion string     // from the agent's hello
+}
+
 // Relay accepts agent connections and opens flows on them.
 type Relay struct {
-	ln     *quic.Listener
-	pin    relayprotocol.Pin
-	dns    netip.AddrPort
-	ctx    context.Context
-	cancel context.CancelFunc
+	ln      *quic.Listener
+	pin     relayprotocol.Pin
+	dns     netip.AddrPort
+	onEvent func(Event)
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	mu     sync.Mutex
 	lines  map[string]Line              // by line ID
 	byPin  map[relayprotocol.Pin]string // agent pin → line ID
-	agents map[string]*quic.Conn        // line ID → the agent's connection
+	agents map[string]*agent            // line ID → its registered agent
+}
+
+// agent is the registered connection of a line's agent.
+type agent struct {
+	conn    *quic.Conn
+	ip      netip.Addr
+	version string
 }
 
 // Listen starts accepting agents on addr. Flows to dns become DNS flows.
-func Listen(addr string, cert tls.Certificate, dns netip.AddrPort) (*Relay, error) {
+// onEvent, if not nil, is called while the relay holds its lock whenever a
+// line goes online or offline, so events arrive in order; it must return
+// quickly and must not call the relay.
+func Listen(addr string, cert tls.Certificate, dns netip.AddrPort, onEvent func(Event)) (*Relay, error) {
 	signer, ok := cert.PrivateKey.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("relay: certificate has no usable private key")
@@ -56,14 +76,18 @@ func Listen(addr string, cert tls.Certificate, dns netip.AddrPort) (*Relay, erro
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	if onEvent == nil {
+		onEvent = func(Event) {}
+	}
 	r := &Relay{
-		pin:    pin,
-		dns:    dns,
-		ctx:    ctx,
-		cancel: cancel,
-		lines:  make(map[string]Line),
-		byPin:  make(map[relayprotocol.Pin]string),
-		agents: make(map[string]*quic.Conn),
+		pin:     pin,
+		dns:     dns,
+		onEvent: onEvent,
+		ctx:     ctx,
+		cancel:  cancel,
+		lines:   make(map[string]Line),
+		byPin:   make(map[relayprotocol.Pin]string),
+		agents:  make(map[string]*agent),
 	}
 	ln, err := quic.ListenAddr(addr, relayprotocol.GatewayTLSConfig(cert, r.knownPin), relayprotocol.GatewayQUICConfig())
 	if err != nil {
@@ -157,11 +181,12 @@ func (r *Relay) Close() error {
 
 func (r *Relay) openFlow(ctx context.Context, lineID string, kind relayprotocol.Kind, dst netip.AddrPort) (*quic.Stream, *quic.Conn, error) {
 	r.mu.Lock()
-	conn := r.agents[lineID]
+	a := r.agents[lineID]
 	r.mu.Unlock()
-	if conn == nil {
+	if a == nil {
 		return nil, nil, ErrLineOffline
 	}
+	conn := a.conn
 	s, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("relay: open flow: %w", err)
@@ -233,13 +258,14 @@ func (r *Relay) serve(conn *quic.Conn) {
 	_ = ctl.SetReadDeadline(time.Now().Add(helloTimeout))
 	msg, err := relayprotocol.ReadControl(ctl)
 	_ = ctl.SetReadDeadline(time.Time{})
-	if _, isHello := msg.(relayprotocol.Hello); err != nil || !isHello {
+	hello, isHello := msg.(relayprotocol.Hello)
+	if err != nil || !isHello {
 		_ = conn.CloseWithError(relayprotocol.CodeProtocolError.ApplicationErrorCode(), "")
 		return
 	}
 	// Register before acknowledging, so an agent that has its hello_ack can
 	// already be sent flows.
-	if !r.register(lineID, pin, conn) {
+	if !r.register(lineID, pin, &agent{conn: conn, ip: remoteIP(conn), version: hello.AgentVersion}) {
 		_ = conn.CloseWithError(relayprotocol.CodeUnauthorized.ApplicationErrorCode(), "")
 		return
 	}
@@ -259,9 +285,10 @@ func (r *Relay) serve(conn *quic.Conn) {
 	}
 }
 
-// register makes conn the line's agent, replacing an earlier connection. It
-// fails if the line was removed or its pin changed during the hello.
-func (r *Relay) register(lineID string, pin relayprotocol.Pin, conn *quic.Conn) bool {
+// register makes a the line's agent, replacing an earlier connection, and
+// reports the line online. It fails if the line was removed or its pin
+// changed during the hello.
+func (r *Relay) register(lineID string, pin relayprotocol.Pin, a *agent) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ctx.Err() != nil {
@@ -271,24 +298,28 @@ func (r *Relay) register(lineID string, pin relayprotocol.Pin, conn *quic.Conn) 
 		return false
 	}
 	if old := r.agents[lineID]; old != nil {
-		_ = old.CloseWithError(relayprotocol.CodeGoingAway.ApplicationErrorCode(), "replaced")
+		// The new connection's online event follows; the line never went offline.
+		_ = old.conn.CloseWithError(relayprotocol.CodeGoingAway.ApplicationErrorCode(), "replaced")
 	}
-	r.agents[lineID] = conn
+	r.agents[lineID] = a
+	r.onEvent(Event{LineID: lineID, Online: true, ObservedIP: a.ip, AgentVersion: a.version})
 	return true
 }
 
 func (r *Relay) unregister(lineID string, conn *quic.Conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.agents[lineID] == conn {
+	if a := r.agents[lineID]; a != nil && a.conn == conn {
 		delete(r.agents, lineID)
+		r.onEvent(Event{LineID: lineID, ObservedIP: a.ip, AgentVersion: a.version})
 	}
 }
 
 func (r *Relay) dropAgentLocked(lineID string, code relayprotocol.Code) {
-	if c := r.agents[lineID]; c != nil {
-		_ = c.CloseWithError(code.ApplicationErrorCode(), "")
+	if a := r.agents[lineID]; a != nil {
+		_ = a.conn.CloseWithError(code.ApplicationErrorCode(), "")
 		delete(r.agents, lineID)
+		r.onEvent(Event{LineID: lineID, ObservedIP: a.ip, AgentVersion: a.version})
 	}
 }
 

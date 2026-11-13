@@ -5,12 +5,14 @@ on:
     paths:
       - "gateway/**"
       - "relay-protocol/**"
+      - "contracts/**"
       - ".github/workflows/gateway-ci.yml"
   push:
     branches: [main]
     paths:
       - "gateway/**"
       - "relay-protocol/**"
+      - "contracts/**"
       - ".github/workflows/gateway-ci.yml"
 
 permissions:
