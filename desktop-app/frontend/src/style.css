@@ -1,5 +1,6 @@
 /* Homeport: the house, not the hacker den. A limewashed wall, an enamel
-   house-number plate for the match code, ink for text. */
+   house-number plate for the match code, ink for text, and lamplight in the
+   window while the line is shared. */
 
 :root {
   --wall: #e8ece9;
@@ -16,6 +17,12 @@
   --button: var(--enamel);
   --button-hover: var(--enamel-hi);
   --selection: rgb(29 63 114 / 0.18);
+  /* The Share window: an enamel frame, dark glass, and lamplight when the
+     line is shared. Lamplight is a fill only; as text it fails contrast. */
+  --frame: var(--enamel);
+  --glass: #a3b1c1; /* unlit glass reflecting daylight */
+  --lamplight: #f0b23e;
+  --lamp-glow: rgb(240 178 62 / 0.5);
 
   --font-sign: "Barlow Semi Condensed", "DIN Alternate", "Bahnschrift", sans-serif;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
@@ -40,6 +47,10 @@
     --button: #3466ad;
     --button-hover: #3d72bd;
     --selection: rgb(143 179 234 / 0.3);
+    --frame: #3466ad;
+    --glass: #0b1019;
+    --lamplight: #f5bd4f;
+    --lamp-glow: rgb(245 189 79 / 0.42);
   }
 }
 
@@ -435,10 +446,206 @@ input:focus-visible {
   margin-top: 12px;
 }
 
+/* Share: a panel at the top of home. Its window is lit while the line is
+   shared, warms up while it connects, glows dimly while paused, and is dark
+   when Share is off or can't reach Homeport. */
+
+.share-panel {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.share-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.share-head h2 {
+  font: 600 22px/1 var(--font-sign);
+  letter-spacing: 0.005em;
+}
+
+.share-line {
+  margin: 5px 0 0;
+  color: var(--slate);
+  font-size: 13px;
+  text-wrap: pretty;
+}
+
+.share-line.is-problem {
+  color: var(--brick);
+}
+
+.house-window {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  width: 30px;
+  height: 36px;
+  padding: 3px;
+  border-radius: 4px 4px 2px 2px;
+  background: var(--frame);
+  /* The sill. */
+  box-shadow: 0 3px 0 -1px var(--frame);
+  transition: box-shadow 600ms ease;
+}
+
+.house-window i {
+  border-radius: 1px;
+  background-color: var(--glass);
+  background-image: linear-gradient(140deg, rgb(255 255 255 / 0.16), rgb(255 255 255 / 0) 55%);
+  transition: background-color 600ms ease, opacity 600ms ease;
+}
+
+.house-window[data-light="on"] {
+  box-shadow:
+    0 3px 0 -1px var(--frame),
+    0 0 22px 3px var(--lamp-glow);
+}
+
+.house-window[data-light="on"] i,
+.house-window[data-light="warming"] i {
+  background-color: var(--lamplight);
+}
+
+.house-window[data-light="warming"] i {
+  animation: warm 1.8s ease-in-out infinite;
+}
+
+.house-window[data-light="dim"] i {
+  background-color: color-mix(in srgb, var(--lamplight) 38%, var(--glass));
+}
+
+.house-window[data-light="fault"] {
+  --frame: var(--brick);
+}
+
+@keyframes warm {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* The switch, as on macOS: enamel when on. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  margin-top: -1px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--field-edge);
+  cursor: pointer;
+  transition: background-color 180ms ease;
+}
+
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(12 22 38 / 0.35);
+  transition: transform 180ms cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--button);
+}
+
+.switch[aria-checked="true"] .knob {
+  transform: translateX(16px);
+}
+
+.switch[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.switch:focus-visible {
+  outline-offset: 3px;
+}
+
+.share-failed {
+  margin: -6px 16px 12px;
+}
+
+.share-facts {
+  margin: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.share-facts .row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+}
+
+.share-facts .row + .row {
+  border-top: 1px solid var(--rule);
+}
+
+.share-facts dt {
+  color: var(--slate);
+}
+
+.share-facts dd {
+  margin: 0;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.share-note {
+  margin: -4px 16px 0;
+  color: var(--slate);
+  font-size: 13px;
+  text-wrap: pretty;
+}
+
+.share-actions {
+  padding: 4px 16px 8px;
+}
+
+.share-footnote {
+  margin: 8px 2px 0;
+  color: var(--slate);
+  font-size: 12px;
+}
+
+.group.modes {
+  margin-top: 20px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #app[data-fresh] .plate,
-  .beacon {
+  .beacon,
+  .house-window[data-light="warming"] i {
     animation: none;
+  }
+
+  .house-window[data-light="warming"] i {
+    opacity: 0.55;
+  }
+
+  .house-window,
+  .house-window i,
+  .switch,
+  .switch .knob {
+    transition: none;
   }
 }
 

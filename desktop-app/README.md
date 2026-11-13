@@ -2,9 +2,11 @@
 
 The Homeport app for Linux, macOS and Windows, built with [Wails v3](https://v3.wails.io): a Go backend and a TypeScript + Vite frontend in the OS webview. macOS comes first.
 
-So far it signs the member in with an email link and shows a home screen with placeholders for Share and Use. Later PRs embed the sharing agent (Share) and add identity, credits and WireGuard configs (Use).
+It signs the member in with an email link and shares this Mac's home line: the Share switch runs the sharing agent from [`agent/`](../agent/README.md) inside the app. Use (identity check, credits and WireGuard configs) comes in a later PR.
 
-![Sign-in screen](docs/sign-in.png)
+![Sign-in screen](docs/sign-in.png) ![Share screen](docs/share.png)
+
+The Share screenshot is the dev preview (`?preview=home&share=online`), which runs the real screens against fake data.
 
 ## Requirements
 
@@ -29,7 +31,7 @@ wails3 dev
 | Variable | What it does | Default |
 | --- | --- | --- |
 | `HOMEPORT_API` | API base URL | `http://localhost:8787` |
-| `HOMEPORT_PROFILE` | Profile directory: install id and session | `~/Library/Application Support/Homeport` on macOS |
+| `HOMEPORT_PROFILE` | Profile directory: install id, session, and each member's agent key and Share state | `~/Library/Application Support/Homeport` on macOS |
 
 To run two accounts side by side, give each its own profile. Run the second one from a build, because two `wails3 dev` instances collide on the Vite port:
 
@@ -38,9 +40,11 @@ wails3 build
 HOMEPORT_PROFILE=/tmp/homeport-b ./bin/homeport
 ```
 
+Share needs a member whose identity is verified and a gateway that has announced itself to the API (`PUT /dev/gateways/{id}` until the gateway does it, see `../api/README.md`). The agent connects once that gateway lists the device.
+
 ### Designing the screens in a browser
 
-`npm run dev` in `frontend/` serves the UI without Go. Add `?preview=<state>` to run it against a fake AuthService: `signedOut`, `approve` (approves after a few polls), `offline`, `expired`, `home` or `unreachable`. Production builds leave the fake out.
+`npm run dev` in `frontend/` serves the UI without Go. Add `?preview=<state>` to run it against a fake AuthService: `signedOut`, `approve` (approves after a few polls), `offline`, `expired`, `home` or `unreachable`. On `home`, `&share=<state>` sets the fake ShareService: `off`, `connecting`, `online`, `paused`, `offline`, `gateway` or `error`, or `unverified`, `processing` or `requires_input` for the member's identity. Production builds leave the fakes out.
 
 ## Test
 
@@ -49,30 +53,51 @@ go test -race ./...
 cd frontend && npm test
 ```
 
-- `services/auth_test.go` tests `AuthService` against `internal/fakeapi`, an in-memory stand-in for the API's member endpoints.
-- `frontend/src/signin.test.ts` tests the sign-in state machine against a fake `AuthApi` (`src/test/fake-auth.ts`), with fake timers for polling.
-- `frontend/src/ui.test.ts` and `view.test.ts` test focus, announcements and rendering in happy-dom.
+- `services/auth_test.go` tests `AuthService` against `internal/fakeapi`, an in-memory stand-in for the API's member and share endpoints.
+- `services/share_test.go` tests `ShareService` against the same fake API, with a fake agent behind the `services.Agent` interface: enrollment, the line and its gateway pin, the switch, retries while the API or a gateway is unavailable, another VPN, today's count, sign-out and restarts.
+- `frontend/src/signin.test.ts` and `share.test.ts` test the sign-in and Share state machines against fakes of the Go services (`src/test/`), with fake timers for polling.
+- `frontend/src/ui.test.ts`, `ui-share.test.ts` and `view.test.ts` test focus, announcements and rendering in happy-dom.
 
 ## How it fits together
 
 | Path | What it is |
 | --- | --- |
-| `main.go` | Opens the profile, creates the API client and the window |
+| `main.go` | Opens the profile, creates the API client, the services, the window and the tray |
 | `services/` | Wails services the frontend calls. The webview never calls the API, so the session token never reaches JavaScript |
-| `internal/apiclient/` | Client for the member endpoints in `contracts/control-api.openapi.yaml` |
-| `internal/profile/` | Profile directory: a stable install id and the session |
-| `frontend/src/signin.ts` | Sign-in state machine: polling, backoff, expiry |
+| `services/share.go` | `ShareService`: enrolls this computer, turns sharing on and off at the API and runs the agent |
+| `internal/apiclient/` | Client for the member and share endpoints in `contracts/control-api.openapi.yaml` |
+| `internal/profile/` | Profile directory: a stable install id, the session, and per member (`members/<id>/`) the agent key and Share state |
+| `internal/tray/` | The menu bar icon and menu: Share status, the Share switch, Open and Quit. `icons/gen.go` draws its icons |
+| `e2e_guard.go` | Stops the app from building with the agent's `e2e` test tag |
+| `frontend/src/signin.ts`, `share.ts` | The sign-in and Share state machines |
 | `frontend/src/view.ts`, `ui.ts` | Render each state and wire up the window; `style.css` holds the design tokens |
+| `frontend/src/auth.ts`, `share-api.ts` | Connect the state machines to the generated bindings and Share's status events |
 | `frontend/bindings/` | TypeScript bindings generated by `wails3 build`. Commit them; CI fails if they are stale |
 
 Sign-in follows the contract: the app creates the session token (`hpm_` and 32 random bytes), sends only its SHA-256, shows the match code and polls until the member confirms the code on the page behind the email link. A retry after a lost response reuses the same `request_id`, so the member gets one email, not two.
 
 The session token is stored in `session.json` in the profile, readable only by the user. Unsigned dev builds can't use the macOS Keychain without a prompt after every rebuild; the Keychain comes with signed release builds.
 
+### Share
+
+Turning Share on runs these steps, and the switch shows the outcome of the first attempt:
+
+1. `GET /v1/me`: Share needs a verified identity. Otherwise the Share screen asks the member to verify first.
+2. On first use, the app creates the agent's Ed25519 key (`members/<id>/agent-key.pem`, readable only by the user) and registers it with `POST /v1/devices`.
+3. `POST /v1/lines` returns the device's line and its gateway. The contract sends the gateway's pin as the hex SHA-256 of its SPKI; the app turns it into relay-protocol's `Pin`, whose text form is base64. The agent pins it, so the gateway's `server_name` is not needed.
+4. `PATCH /v1/lines/{id}` turns sharing on, and the agent dials the gateway.
+
+While the API or a gateway can't be reached, Share stays on and tries again, from 1 s doubling to 1 minute, or later if the API's `Retry-After` asks for it. An error that retrying won't fix turns Share off and says why. The screen and the tray show the agent's state: connecting, online, paused while another VPN carries the default route, or offline.
+
+"Shared today" is the agent's own count of payload bytes, kept per day in `members/<id>/share.json` across restarts. Credits follow the gateway's count, which includes packet headers.
+
+Closing the window keeps Share running in the menu bar. Quit stops the agent but keeps the member's choice, so Share turns on again at the next start, unless the member turns it off before then. Turning Share off, or signing out, stops the agent first and then tells the API; a turn-off the API missed is sent with the next turn-off or at the next start. A session that ends elsewhere, or runs out, turns Share off as well.
+
 ## Build and release
 
 - `wails3 build` builds the frontend, regenerates the bindings and writes `bin/homeport`. CI fails if it changes any tracked file.
-- The app version is `info.version` in `build/config.yml`. CI fails a pull request that changes this folder without raising it. A release workflow (later) will publish `desktop-app-v<version>`.
+- The app version is `info.version` in `build/config.yml`. CI fails a pull request that changes this folder, `agent/` or `relay-protocol/` without raising it, because the app ships the agent. A release workflow (later) will publish `desktop-app-v<version>`.
+- The release build must never carry the agent's `e2e` tag; `e2e_guard.go` makes it fail to compile, and CI checks that.
 - After changing `info` in `build/config.yml`, run `wails3 task common:update:build-assets`, then delete the `build/ios/` folder it recreates and set `LSMinimumSystemVersion` back to `26.0.0` in both plists. Homeport supports only the latest macOS.
 - Git tracks `frontend/dist/.gitkeep` so that `//go:embed all:frontend/dist` compiles on a fresh clone; the Vite build puts it back after emptying `dist/`.
 - Builds don't regenerate the app icons, because `actool` writes a different `Assets.car` on every run. After changing `build/appicon.png` or `build/appicon.icon`, run `wails3 task common:generate:icons` and commit the result.

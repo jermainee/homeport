@@ -27,6 +27,13 @@ const (
 	ErrEmailUnavailable ErrorCode = "email_unavailable"
 	// ErrNoSignIn: there is no sign-in in progress to poll.
 	ErrNoSignIn ErrorCode = "no_sign_in"
+	// ErrIdentityRequired: the member hasn't passed the identity check, so
+	// Share and Use stay off.
+	ErrIdentityRequired ErrorCode = "identity_required"
+	// ErrGatewayUnavailable: no gateway can take the line yet.
+	ErrGatewayUnavailable ErrorCode = "gateway_unavailable"
+	// ErrSignedOut: the session is gone, so the member has to sign in again.
+	ErrSignedOut ErrorCode = "signed_out"
 	// ErrUnexpected: anything else. The message has the details for logs.
 	ErrUnexpected ErrorCode = "unexpected"
 )

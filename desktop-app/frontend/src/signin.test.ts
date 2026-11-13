@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SignIn, errorCode, type LoginStart, type State } from "./signin";
+import { ERROR_CODES, SignIn, errorCode, type LoginStart, type State } from "./signin";
 import { FakeAuth, member, serviceError } from "./test/fake-auth";
 
 let auth: FakeAuth;
@@ -239,5 +239,14 @@ describe("errorCode", () => {
     expect(errorCode(serviceError("clock_skew"))).toBe("clock_skew");
     expect(errorCode(serviceError("something_new"))).toBe("unexpected");
     expect(errorCode(new TypeError("boom"))).toBe("unexpected");
+  });
+});
+
+describe("error codes", () => {
+  it("are the codes Go's services.ErrorCode has", async () => {
+    const { ErrorCode } = await import("../bindings/github.com/jermainee/homeport/desktop-app/services/models");
+    const goCodes = Object.values(ErrorCode).filter((c) => c !== "");
+
+    expect([...ERROR_CODES].sort()).toEqual(goCodes.sort());
   });
 });

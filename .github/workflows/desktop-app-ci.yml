@@ -1,15 +1,20 @@
 name: desktop-app-ci
 
-# Add agent/** and relay-protocol/** here once the app imports them (P15).
+# The app embeds the sharing agent, which uses relay-protocol, so changes to
+# either run this workflow too.
 on:
   pull_request:
     paths:
       - "desktop-app/**"
+      - "agent/**"
+      - "relay-protocol/**"
       - ".github/workflows/desktop-app-ci.yml"
   push:
     branches: [main]
     paths:
       - "desktop-app/**"
+      - "agent/**"
+      - "relay-protocol/**"
       - ".github/workflows/desktop-app-ci.yml"
 
 permissions:
@@ -79,6 +84,15 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 ./...
+
+      # The e2e tag lets the embedded agent dial loopback test origins, so
+      # the app must refuse to build with it (e2e_guard.go).
+      - name: Check that the app refuses the e2e tag
+        run: |
+          if go build -tags e2e -o /dev/null . 2>/dev/null; then
+            echo "::error::desktop-app built with the e2e tag"
+            exit 1
+          fi
 
       - name: Check that generated files are committed
         run: |

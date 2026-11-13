@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SignIn } from "./signin";
 import { FakeAuth, serviceError } from "./test/fake-auth";
+import { FakeShare } from "./test/fake-share";
 import { mount } from "./ui";
 
 let auth: FakeAuth;
@@ -16,7 +17,7 @@ beforeEach(async () => {
   announcer = document.getElementById("announcer")!;
   auth = new FakeAuth();
   signIn = new SignIn(auth);
-  mount(signIn, app, announcer);
+  mount(signIn, app, announcer, new FakeShare());
   await signIn.boot();
 });
 

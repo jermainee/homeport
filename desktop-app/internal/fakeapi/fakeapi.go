@@ -1,7 +1,8 @@
 // Package fakeapi is an in-memory stand-in for the Homeport control API's
-// member endpoints, for tests. It follows contracts/control-api.openapi.yaml:
-// the app creates the session token, the API sees only its SHA-256, and the
-// token works once the member approves the sign-in.
+// member and share endpoints, for tests. It follows
+// contracts/control-api.openapi.yaml: the app creates the session token, the
+// API sees only its SHA-256, and the token works once the member approves the
+// sign-in. Lines need a verified identity, as in the API.
 package fakeapi
 
 import (
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +32,45 @@ type Server struct {
 	members     map[string]*Member // by email
 	sessions    map[string]*Member // by token hash, active sessions only
 	failures    []failure
+	offline     bool     // drop every connection, as an unreachable API would
 	requests    []string // "METHOD path" of every request, in order
+
+	gateway     *Gateway           // the gateway new lines get, or nil
+	devices     map[string]*Device // by device_id
+	lines       map[string]*Line   // by line_id
+	shareReplay map[string]replay  // POST answers by member and request_id
+}
+
+// Gateway is where a line's agent dials out to, as POST /v1/lines returns
+// it: the pin is the hex SHA-256 of the gateway certificate's SPKI.
+type Gateway struct {
+	QUICEndpoint string `json:"quic_endpoint"`
+	ServerName   string `json:"server_name"`
+	SPKISHA256   string `json:"spki_sha256"`
+}
+
+// Device is a registered sharing agent key.
+type Device struct {
+	ID             string
+	MemberID       string
+	Name           string
+	Platform       string
+	AgentPublicKey string // standard base64, as the app sent it
+	SPKISHA256     string
+}
+
+// Line is a device's line.
+type Line struct {
+	ID             string
+	DeviceID       string
+	MemberID       string
+	SharingEnabled bool
+}
+
+type replay struct {
+	body   string // the request body, to detect a conflicting reuse
+	status int
+	answer any
 }
 
 // Member is a member as GET /v1/me returns it.
@@ -72,7 +112,8 @@ type failure struct {
 	code   string // error code; empty drops the connection instead
 	lose   bool   // handle the request, then drop the connection
 	hold   chan struct{}
-	date   time.Time // Date header to send with the error, if set
+	date   time.Time     // Date header to send with the error, if set
+	retry  time.Duration // Retry-After header to send with the error, if set
 }
 
 var (
@@ -89,12 +130,18 @@ func New(t testing.TB) *Server {
 		byRequestID: map[string]*login{},
 		members:     map[string]*Member{},
 		sessions:    map[string]*Member{},
+		devices:     map[string]*Device{},
+		lines:       map[string]*Line{},
+		shareReplay: map[string]replay{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login-requests", s.createLoginRequest)
 	mux.HandleFunc("GET /v1/auth/login-requests/{id}", s.getLoginRequest)
 	mux.HandleFunc("GET /v1/me", s.getMe)
 	mux.HandleFunc("DELETE /v1/auth/session", s.deleteSession)
+	mux.HandleFunc("POST /v1/devices", s.registerDevice)
+	mux.HandleFunc("POST /v1/lines", s.createLine)
+	mux.HandleFunc("PATCH /v1/lines/{id}", s.updateLine)
 	s.Server = httptest.NewServer(s.injectFailures(mux))
 	t.Cleanup(s.Close)
 	return s
@@ -201,6 +248,23 @@ func (s *Server) LoseNextResponse(route string) {
 	s.failures = append(s.failures, failure{route: route, lose: true})
 }
 
+// FailNextRetryAfter is FailNext with a Retry-After header, as the API sends
+// with 429 rate_limited.
+func (s *Server) FailNextRetryAfter(route string, status int, code string, retryAfter time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = append(s.failures, failure{route: route, status: status, code: code, retry: retryAfter})
+}
+
+// SetOffline makes the API unreachable, dropping every connection, until it
+// is called with false. Unlike FailNext, it also defeats the HTTP client's
+// own retry of a GET on a dropped keep-alive connection.
+func (s *Server) SetOffline(offline bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.offline = offline
+}
+
 // FailNext makes the next request whose "METHOD path" starts with route
 // answer status with {error: code}. An empty code drops the connection, as
 // an unreachable API would.
@@ -234,7 +298,14 @@ func (s *Server) injectFailures(next http.Handler) http.Handler {
 				break
 			}
 		}
+		offline := s.offline
 		s.mu.Unlock()
+		if offline {
+			if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
 		if f == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -256,6 +327,9 @@ func (s *Server) injectFailures(next http.Handler) http.Handler {
 		}
 		if !f.date.IsZero() {
 			w.Header().Set("Date", f.date.UTC().Format(http.TimeFormat))
+		}
+		if f.retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(f.retry.Seconds())))
 		}
 		writeError(w, f.status, f.code)
 	})

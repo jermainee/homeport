@@ -61,3 +61,37 @@ func TestUnreadableInstallIDIsReplaced(t *testing.T) {
 		t.Errorf("reopened install id = %q, want %q", again, id)
 	}
 }
+
+func TestAgentKeyIsKeptPerMember(t *testing.T) {
+	dir := t.TempDir()
+	a, b := uuid.NewV7().String(), uuid.NewV7().String()
+
+	keyA, err := open(t, dir).AgentKey(a)
+	if err != nil {
+		t.Fatalf("AgentKey: %v", err)
+	}
+	again, err := open(t, dir).AgentKey(a)
+	if err != nil || !keyA.Equal(again) {
+		t.Errorf("reopened key differs (err %v)", err)
+	}
+	keyB, err := open(t, dir).AgentKey(b)
+	if err != nil || keyA.Equal(keyB) {
+		t.Errorf("two members share a key (err %v)", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "members", a, "agent-key.pem"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("key file mode = %v, %v; want 0600", info.Mode().Perm(), err)
+	}
+}
+
+func TestMemberIDsThatAreNotUUIDsNeverBecomePaths(t *testing.T) {
+	p := open(t, t.TempDir())
+	for _, id := range []string{"", "..", "../../evil", "01A1D66C-C114-7AE5-A7DF-12CFE002795D"} {
+		if _, err := p.AgentKey(id); err == nil {
+			t.Errorf("AgentKey(%q) succeeded", id)
+		}
+		if err := p.SaveShare(id, profile.Share{}); err == nil {
+			t.Errorf("SaveShare(%q) succeeded", id)
+		}
+	}
+}
