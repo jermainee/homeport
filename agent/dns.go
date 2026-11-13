@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +132,8 @@ func (a *Agent) resolve(ctx context.Context, query []byte, pol *policy) []byte {
 	switch {
 	case q.Class != dnsmessage.ClassINET:
 		reply.RCode = dnsmessage.RCodeNotImplemented
+	case homeOnlyName(q.Name.String()):
+		reply.RCode = dnsmessage.RCodeNameError
 	case q.Type == dnsmessage.TypeA || q.Type == dnsmessage.TypeAAAA:
 		addrs, reply.RCode = a.lookup(ctx, q, pol)
 	case q.Type == dnsmessage.TypeHTTPS || q.Type == dnsmessage.TypeSVCB:
@@ -139,6 +142,32 @@ func (a *Agent) resolve(ctx context.Context, query []byte, pol *policy) []byte {
 		reply.RCode = dnsmessage.RCodeNotImplemented
 	}
 	return packDNS(reply, &q, addrs, edns)
+}
+
+// homeZones are names that exist only inside a network, never on the
+// internet: mDNS (.local), loopback, RFC 8375's home.arpa, the private-use
+// .internal, and zones home routers serve for their LAN.
+var homeZones = []string{
+	"local", "localhost", "home.arpa", "internal",
+	"lan", "home", "localdomain", "fritz.box",
+}
+
+// homeOnlyName reports whether name can only resolve inside the home
+// network: a single label, which routers answer for LAN hosts, or a name in
+// one of homeZones. The agent answers these with NXDOMAIN without a lookup,
+// because a lookup would send mDNS or router queries into the home network,
+// and how fast it came back would reveal which devices exist there.
+func homeOnlyName(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if !strings.Contains(name, ".") {
+		return true
+	}
+	for _, zone := range homeZones {
+		if name == zone || strings.HasSuffix(name, "."+zone) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookup resolves an A or AAAA question and keeps the addresses the policy

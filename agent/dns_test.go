@@ -148,17 +148,17 @@ func TestDNSQueriesAreAnsweredThroughTheResolver(t *testing.T) {
 
 func TestDNSAnswersNeverRevealHomeNetworkAddresses(t *testing.T) {
 	res := &fakeResolver{answers: map[string][]netip.Addr{
-		"ip4 mixed.homeport.test.": {netip.MustParseAddr("192.168.178.20"), netip.MustParseAddr("11.22.33.44")},
-		"ip4 fritz.box.":           {netip.MustParseAddr("192.168.178.1")},
-		"ip4 localhost.":           {netip.MustParseAddr("127.0.0.1")},
-		"ip4 myhome.dyndns.test.":  {testObservedIP},
+		"ip4 mixed.homeport.test.":  {netip.MustParseAddr("192.168.178.20"), netip.MustParseAddr("11.22.33.44")},
+		"ip4 rebind.homeport.test.": {netip.MustParseAddr("192.168.178.1")},
+		"ip6 rebind.homeport.test.": {netip.MustParseAddr("fd00::1")},
+		"ip4 myhome.dyndns.test.":   {testObservedIP},
 	}}
 	s := startDNS(t, res)
 
 	got := exchange(t, s,
 		query(t, 1, "mixed.homeport.test.", dnsmessage.TypeA),
-		query(t, 2, "fritz.box.", dnsmessage.TypeA),
-		query(t, 3, "localhost.", dnsmessage.TypeA),
+		query(t, 2, "rebind.homeport.test.", dnsmessage.TypeA),
+		query(t, 3, "rebind.homeport.test.", dnsmessage.TypeAAAA),
 		query(t, 4, "myhome.dyndns.test.", dnsmessage.TypeA),
 	)
 	if addrs := answerAddrs(got[1]); !slices.Equal(addrs, []netip.Addr{netip.MustParseAddr("11.22.33.44")}) {
@@ -168,6 +168,33 @@ func TestDNSAnswersNeverRevealHomeNetworkAddresses(t *testing.T) {
 		if m := got[id]; m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
 			t.Fatalf("response %d = %v with %d answers, want success without answers", id, m.RCode, len(m.Answers))
 		}
+	}
+}
+
+func TestDNSNamesThatOnlyExistAtHomeAreNeverLookedUp(t *testing.T) {
+	// Looking these up would send mDNS or router queries into the home
+	// network, and their timing would reveal which devices exist there.
+	res := &fakeResolver{}
+	s := startDNS(t, res)
+	names := []string{
+		"iphone.local.", "LOCAL.", "localhost.", "db.localhost.", "nas.home.arpa.",
+		"printer.lan.", "router.home.", "box.internal.", "fritz.box.", "host.localdomain.",
+		"nas.", // a single label: the router answers those for LAN hosts
+	}
+	var queries [][]byte
+	for i, name := range names {
+		queries = append(queries, query(t, uint16(i+1), name, dnsmessage.TypeA))
+	}
+	got := exchange(t, s, queries...)
+	for i, name := range names {
+		if m := got[uint16(i+1)]; m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 {
+			t.Errorf("%s: %v with %d answers, want NXDOMAIN", name, m.RCode, len(m.Answers))
+		}
+	}
+	res.mu.Lock()
+	defer res.mu.Unlock()
+	if len(res.lookups) != 0 {
+		t.Fatalf("looked up %v, want no lookups", res.lookups)
 	}
 }
 
