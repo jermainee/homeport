@@ -1,0 +1,5 @@
+# Created by go run ./cmd/homeport-agent; never commit an agent key
+*.key
+
+# go build ./cmd/homeport-agent
+/homeport-agent

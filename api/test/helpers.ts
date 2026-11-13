@@ -5,18 +5,24 @@ import worker from "../src/index";
 
 export const BASE_URL = "https://api.homeport.test";
 
+interface FetchHandler {
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response>;
+}
+
 /** Sends a request to the Worker, optionally with some env values replaced. */
-export async function call(
+export function call(path: string, init?: RequestInit, envOverrides: Partial<Env> = {}): Promise<Response> {
+  return callWith(worker, path, init, envOverrides);
+}
+
+/** Sends a request to an app built with test dependencies (see createApp). */
+export async function callWith(
+  app: FetchHandler,
   path: string,
   init?: RequestInit,
   envOverrides: Partial<Env> = {},
 ): Promise<Response> {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(
-    new Request(new URL(path, BASE_URL), init),
-    { ...env, ...envOverrides },
-    ctx,
-  );
+  const response = await app.fetch(new Request(new URL(path, BASE_URL), init), { ...env, ...envOverrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
 }

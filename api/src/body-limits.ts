@@ -8,12 +8,15 @@ export const DEFAULT_MAX_BODY_BYTES = 16 * KB;
 
 /**
  * Larger limits, copied from each operation's `x-max-body-bytes` in
- * contracts/control-api.openapi.yaml. A full batch of 100 events stays under
- * 128 KB.
+ * contracts/control-api.openapi.yaml, plus Stripe's webhook. A full batch of
+ * 100 events stays under 128 KB.
  */
 const MAX_BODY_BYTES: Readonly<Record<string, number>> = {
   "/v1/gateway/usage": 128 * KB,
   "/v1/gateway/line-events": 128 * KB,
+  // Not in the contract: Stripe sends whole objects, and an event Homeport
+  // refuses is retried for days. The signature is checked after reading.
+  "/v1/stripe/webhook": 256 * KB,
 };
 
 /** The largest request body `path` accepts. */

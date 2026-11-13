@@ -20,8 +20,9 @@ type Meter struct {
 }
 
 type counter struct {
-	up, down atomic.Uint64
-	addrs    []netip.Addr
+	up, down  atomic.Uint64
+	addrs     []netip.Addr
+	suspended bool // guarded by Meter.mu
 }
 
 // NewMeter returns an empty meter.
@@ -66,6 +67,17 @@ func (m *Meter) Remove(peer PeerID) (up, down uint64) {
 	return c.up.Load(), c.down.Load()
 }
 
+// SetSuspended stops (true) or resumes (false) a peer's traffic. Packets
+// from or to a suspended peer are dropped uncounted. Once SetSuspended(true)
+// returns, the peer's counts no longer change, so they can be read as final.
+func (m *Meter) SetSuspended(peer PeerID, suspended bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c := m.byPeer[peer]; c != nil {
+		c.suspended = suspended
+	}
+}
+
 // Usage returns the bytes counted for the peer that owns addr.
 func (m *Meter) Usage(addr netip.Addr) (up, down uint64) {
 	m.mu.RLock()
@@ -79,10 +91,12 @@ func (m *Meter) Usage(addr netip.Addr) (up, down uint64) {
 
 // countUp records a packet from a peer. It reports false for unknown sources.
 func (m *Meter) countUp(src netip.Addr, n uint64) bool {
+	// Hold the read lock while counting, so SetSuspended and Remove wait
+	// for counts in flight and the counts they leave are final.
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	c := m.byAddr[src]
-	m.mu.RUnlock()
-	if c == nil {
+	if c == nil || c.suspended {
 		return false
 	}
 	c.up.Add(n)
@@ -92,9 +106,9 @@ func (m *Meter) countUp(src netip.Addr, n uint64) bool {
 // countDown records a packet to a peer. It reports false for unknown destinations.
 func (m *Meter) countDown(dst netip.Addr, n uint64) bool {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	c := m.byAddr[dst]
-	m.mu.RUnlock()
-	if c == nil {
+	if c == nil || c.suspended {
 		return false
 	}
 	c.down.Add(n)

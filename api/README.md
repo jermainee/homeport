@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in, sessions, `request_id` idempotency, sharing devices, lines and WireGuard peers. Later PRs add the credits ledger, Stripe Identity, Checkout and the gateway endpoints.
+So far it covers email magic-link sign-in, sessions, `request_id` idempotency, the credits ledger, the Stripe Identity check, sharing devices, lines and WireGuard peers. Later PRs add Checkout and the gateway endpoints.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ npm run dev
 | Script | What it does |
 | --- | --- |
 | `npm run dev` | `wrangler dev` with a local D1 database |
-| `npm test` | Vitest inside the Workers runtime (`@cloudflare/vitest-plugin`); migrations are applied in `test/apply-migrations.ts` |
+| `npm test` | Vitest inside the Workers runtime (`@cloudflare/vitest-plugin`); migrations are applied in `test/apply-migrations.ts`, and responses are checked against the contract (see below) |
 | `npm run lint` | ESLint with type-aware rules, including `no-floating-promises` |
 | `npm run typecheck` | `tsc` for `src/` and `test/` |
 | `npm run types` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc`; CI fails if it is stale |
@@ -39,6 +39,12 @@ npm run dev
 | `EMAIL_MODE` | `log` writes sign-in links to the log, and works only when `ENVIRONMENT=dev`. Real delivery comes in a later PR; until then, other values return `503 email_unavailable` | `disabled` |
 | `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails. Without a valid http(s) URL no link is sent (`503 email_unavailable`) | empty |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
+| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions | |
+| `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with read access to Identity verification results and detailed results; reads document number and birth date for the identity hash | |
+| `STRIPE_WEBHOOK_SECRET` | Secret. Signing secret of the webhook endpoint (`whsec_`), or the one `stripe listen` prints | |
+| `IDENTITY_HASH_KEY` | Secret. HMAC key of the identity hash. Changing it breaks the duplicate check for members verified before | |
+
+Secrets are listed in `wrangler.jsonc` (`secrets.required`), set with `wrangler secret put`, and locally in `.dev.vars` (see `.dev.vars.example`; use a Stripe sandbox's test keys).
 
 ## Sign-in
 
@@ -73,17 +79,17 @@ sequenceDiagram
    - `401 unauthorized` for a missing or malformed token;
    - `404 not_found` for a token that belongs to another request;
    - `410 login_request_expired` once the request has expired.
-5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. Credits are all 0 until the ledger lands.
+5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. `credits` are the member's ledger balances (see Credits ledger).
 6. `DELETE /v1/auth/session` revokes the session it is called with: `204`, or `401`.
 
 No response carries a secret, so replaying one by `request_id` is harmless.
 
 ### `request_id`
 
-Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
+Every POST under `/v1`, except Stripe's webhook, carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
 
 - A retry with the same `request_id` and body gets the first response again, status and body.
-- The same `request_id` with another body, on another endpoint, or from another signed-in member, gets `409 idempotency_conflict`. Behind a session the member is part of the request, so no member sees another member's response.
+- The same `request_id` with another body, on another endpoint, or from another signed-in member, gets `409 idempotency_conflict`. Behind a session the member is part of the request, so no member sees another member's response (such as a Stripe verification URL). Member endpoints use `memberIdempotent`, which runs `requireSession` before `idempotent`.
 - A `request_id` older than 24 hours gets `400 request_id_expired`. One more than 1 hour in the future gets `400 invalid_request`.
 - While the first request is still running, a retry gets `429 rate_limited` with `Retry-After: 1`. A first request that stays silent for a minute (an evicted isolate, a cancelled request) is taken over by the next retry.
 - 5xx responses are not kept, so a retry runs again.
@@ -97,8 +103,41 @@ Every POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once 
 - Sessions last 90 days from approval.
 - The match code is a six-digit number. It is not a secret, so it is stored as is.
 - Request schemas are closed: an unknown field gets `400 invalid_request`. Errors are `{error, message?}`.
-- Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says (`src/body-limits.ts`).
+- Request bodies over the route's limit get `413 payload_too_large`: 16 KB by default, 128 KB for the gateway batch endpoints, as each operation's `x-max-body-bytes` in the contract says, and 256 KB for Stripe's webhook (`src/body-limits.ts`).
 - Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
+
+## Credits ledger
+
+All prices and billing constants live in `src/pricing.ts`; no other file holds a price. The ledger is in `src/ledger/`.
+
+- **Double-entry, append-only.** Every booking is a `ledger_transactions` row with at least two `ledger_entries` (signed whole credits) that sum to zero. Triggers abort every `UPDATE` and `DELETE` of either table, so a correction is a new, reversing transaction. Each booking ends by inserting its id into the `ledger_balance_checks` view, whose trigger aborts the whole batch if the entries do not balance.
+- **Accounts.** Each member has `purchased`, `earned_pending` and `earned_cashable`, created by a trigger when the member is created. The platform has `platform_revenue`, `credits_issued` (the source of sold credits) and `dev_grants`. Each account caches its balance, which a trigger moves with every entry.
+- **Idempotent.** Each transaction has a unique `idempotency_key` naming the business event (`usage:<usage_key>`, `dev_grant:<id>`, ...). A retry finds it and books nothing.
+- **One guarded batch per change.** D1 has no interactive transactions. A change reads the `ledger_version` of every member whose balance it changes, with the balances it decides on, then writes everything in one `db.batch`. The batch's first statement bumps those versions, guarded by the values read, and sets a fresh `ledger_nonce`; every later statement runs only while that nonce is still there for every claimed member. If another change committed first, the batch writes nothing and the change reads again and retries (`src/ledger/guarded-batch.ts`). A usage charge claims both the user and the line's owner, because the owner's own spend splits its debit by the balances it read.
+- **Spend order.** Usage takes `purchased` first, then `earned_pending`, then `earned_cashable`. Metered usage is always booked, even past the balance; the shortfall makes `purchased` negative. `GET /v1/me` shows a negative account as 0.
+- **Usage charges.** `chargeUsage` adds bytes to a meter's running total (`meter_totals`, for example per WireGuard peer). The user pays `floor(total × 10 / 10^6)` minus what the meter already charged, and the line's owner earns `floor(total × 5 / 10^6)` minus what it already paid into `earned_pending`; the platform keeps the difference. Rounding therefore never adds up across usage events. Each piece of usage is recorded once in `usage_charges` by its `usage_key`, even when it books less than a credit. A meter never changes payer or payee (a trigger aborts it). `usage_charges` rows are not ledger rows: they can be deleted once a retry of their usage can no longer arrive, which the cleanup job for expired rows will do.
+- **Reservations.** A quota lease reserves credits (`credit_reservations`) without booking anything: available credits are the balance minus what open, unexpired reservations still hold. Usage charged against a reservation reduces what it holds, and releasing it frees the rest. The check and the insert run behind the member's guard, so concurrent leases never reserve more than the member has. Reserving an id again returns `reserved` and holds nothing more.
+- **Sold credits stay purchased.** `grantCredits` with source `credits_issued` lands only in `purchased`, so bought credits can never become cashable.
+
+## Contract checks in tests
+
+`vitest.config.ts` loads `@homeport/contracts` (`file:../contracts`, installed as a copy through `install-links=true` in `.npmrc`) in Node and exposes it to tests as the `CONTRACT` service binding, because ajv cannot compile schemas inside workerd. `expectContract(method, pathTemplate, response)` in `test/contract.ts` checks a response's status and body against `contracts/control-api.openapi.yaml`. Run `npm install` again after the contract changes.
+
+## Identity check (Stripe Identity)
+
+Every member passes Stripe Identity (ID document and live selfie) before Share or Use turns on.
+
+1. `POST /v1/identity/sessions` (Bearer, `{request_id}`) creates a VerificationSession (`type: document`, `require_matching_selfie`, `require_live_capture`, `metadata.member_id`) and answers `201 {url}`, the Stripe-hosted page the app opens. A verified member gets `409 identity_already_verified`, and a member who started 5 checks in the last 24 hours gets `429 rate_limited` with `Retry-After` (Stripe bills each submitted check). The Stripe idempotency key is `identity_session:<request_id>`.
+2. Stripe calls `POST /v1/stripe/webhook`. The handler checks the `Stripe-Signature` header on the raw body (`Stripe.webhooks.constructEventAsync` with the SubtleCrypto provider; 400 `invalid_signature` otherwise), skips an event id it already handled (`stripe_events`), and answers 200. A failure answers 500, so Stripe delivers the event again.
+3. Events change `members.identity_status` only for sessions Homeport created for that member (`identity_sessions`):
+   - `verified`: verifies the member. It always applies, since verification is final.
+   - `processing`: `processing`. `requires_input` and `canceled`: `requires_input`. These apply only while the member is not verified, only for the member's newest check (an abandoned check that ends later says nothing about the current one), and only if no newer event was applied (Stripe does not keep order).
+4. **One person, one account.** In the `verified` handler, inside Stripe's 48-hour window, the restricted key reads the document number, issuing country and birth date. Their HMAC (`IDENTITY_HASH_KEY`) is stored as `members.identity_hash`, which is unique. A member whose hash another member already has stays at `requires_input` (`identity_failure = 'duplicate_identity'`), as does a live-mode document without those fields. Test mode (`livemode: false`) skips the hash and the check, since every test document is the same, and reads nothing sensitive. Document numbers are compared after Unicode NFKC normalization, without case, spaces or punctuation; letters and digits of every script count. Only the result and the hash are stored; the document data stays with Stripe.
+5. `requireVerifiedIdentity` (`src/identity/require-verified.ts`) answers `403 identity_required` until the member is verified. Lines, the available list and new WireGuard peers sit behind it.
+
+Locally: `stripe listen --forward-to localhost:8787/v1/stripe/webhook` prints the signing secret for `.dev.vars`.
+
+Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` checks the real adapter's requests with a recording `fetch`.
 
 ## Sharing and using lines
 
@@ -117,11 +156,14 @@ All endpoints follow the contract (`registerDevice`, `createLine`, `updateLine`,
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
+- `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines before credit packs can be bought.
 - `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway, so lines and WireGuard configs can be created locally before gateways authenticate (`PUT /v1/gateway/self`, a later PR).
 
 ## Database
 
 - `migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`.
+- `migrations/0002_credit_ledger.sql` adds `members.ledger_version` and `members.ledger_nonce`, and creates `ledger_accounts`, `ledger_transactions`, `ledger_entries`, the `ledger_balance_checks` view, `meter_totals`, `usage_charges` and `credit_reservations`, with their triggers.
+- `migrations/0003_stripe_identity.sql` adds `members.identity_hash` (unique), `identity_failure` and `identity_event_created`, and creates `identity_sessions` and `stripe_events`.
 - `migrations/0004_lines_and_peers.sql` creates `gateways`, `devices`, `lines`, `wireguard_peers` and `member_links`, and indexes `auth_sessions.install_id`.
 
 Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.

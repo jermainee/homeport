@@ -7,8 +7,19 @@ export function randomToken(bytes = 32): string {
 
 /** Lowercase hex SHA-256 of a string. Tokens and secrets are stored only in this form. */
 export async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
+}
+
+/** Lowercase hex HMAC-SHA256 of `message` under `key`. */
+export async function hmacSha256Hex(key: string, message: string): Promise<string> {
+  const hmacKey = await crypto.subtle.importKey("raw", encoder.encode(key), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  return hex(await crypto.subtle.sign("HMAC", hmacKey, encoder.encode(message)));
+}
+
+function hex(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** A uniformly random six-digit code, such as "042917". */
