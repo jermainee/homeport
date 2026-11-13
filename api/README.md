@@ -2,7 +2,7 @@
 
 Homeport's control plane: a Cloudflare Worker (TypeScript, [Hono](https://hono.dev)) with a D1 database.
 
-So far it covers email magic-link sign-in and sessions. Later PRs add the credits ledger, Stripe Identity, Checkout, lines and WireGuard peers.
+So far it covers email magic-link sign-in, sessions and `request_id` idempotency. Later PRs add the credits ledger, Stripe Identity, Checkout, lines and WireGuard peers.
 
 ## Requirements
 
@@ -42,48 +42,69 @@ npm run dev
 
 ## Sign-in
 
-The desktop app signs in by polling, so it needs no custom URL scheme.
+The desktop app signs in by polling, so it needs no custom URL scheme. The endpoints follow the contract in [`contracts/control-api.openapi.yaml`](../contracts/control-api.openapi.yaml) (operations `createLoginRequest`, `pollLoginRequest` and `getMe`).
 
 ```mermaid
 sequenceDiagram
   participant App
   participant API
   participant Browser
-  App->>API: POST /v1/auth/login-requests {email, install_id?}
-  API-->>App: 201 {login_request_id, poll_secret, match_code, expires_at}
+  Note over App: creates session_token = hpm_ + 32 random bytes
+  App->>API: POST /v1/auth/login-requests {request_id, email, session_token_sha256}
+  API-->>App: 201 {login_request_id, match_code, expires_at}
   API-)Browser: email with /auth/confirm?token=…
   Browser->>API: GET /auth/confirm?token=…
   API-->>Browser: confirm page showing the match code
   Browser->>API: POST /auth/confirm (Confirm button)
+  Note over API: approval activates the session token
   loop every few seconds
-    App->>API: POST /v1/auth/login-requests/{id}/poll {poll_secret}
-    API-->>App: 202 pending, then 200 {session_token, expires_at}
+    App->>API: POST /v1/auth/login-requests/{id}/poll {request_id, session_token}
+    API-->>App: 202 pending, then 200 {status: "approved", member_id, expires_at}
   end
   App->>API: GET /v1/me (Authorization: Bearer session_token)
 ```
 
-1. `POST /v1/auth/login-requests` takes `{email, install_id?}`. It returns `{login_request_id, poll_secret, match_code, expires_at}` and sends the link. The app shows the match code.
-2. Opening the link shows a confirm page with the same match code. Opening it changes nothing, so mail scanners that prefetch links cannot sign anyone in. The member checks that the codes agree and clicks Confirm. The form posts the code back, and the API confirms only if it agrees with the request's code. The member is created on first sign-in.
-3. `POST /v1/auth/login-requests/{id}/poll` with `{poll_secret}` returns `202 {status: "pending"}` until the link is confirmed. After that it returns `200 {status: "confirmed", session_token, expires_at}`, exactly once. A wrong secret or unknown id gives `404`. An expired request gives `410 {error: "expired"}`, and a request whose session was already handed out gives `410 {error: "already_collected"}`.
-4. `GET /v1/me` with `Authorization: Bearer <session_token>` returns the member, or `401` without a live session.
-5. `DELETE /v1/auth/session` revokes the session it is called with.
+1. The app creates its session token, `hpm_` plus 32 random bytes in base64url, and keeps it.
+2. `POST /v1/auth/login-requests` takes `{request_id, email, session_token_sha256}`. It returns `{login_request_id, match_code, expires_at}` and sends the link. The response is the same whether or not the email belongs to a member. The app shows the match code.
+3. Opening the link shows a confirm page with the same match code. Opening it changes nothing, so mail scanners that prefetch links cannot sign anyone in. The member checks that the codes agree and clicks Confirm. The form posts the code back, and the API approves only if it agrees with the request's code. Approval creates the member on first sign-in and activates the app's session token.
+4. `POST /v1/auth/login-requests/{id}/poll` takes `{request_id, session_token}`, with a new `request_id` for each poll. Responses:
+   - `202 {status: "pending"}` until the member approves;
+   - `200 {status: "approved", member_id, expires_at}` on every poll after that, until the request expires (`expires_at` is when the session token stops working);
+   - `404 not_found` for a token that doesn't match;
+   - `410 login_request_expired` once the request has expired.
+5. `GET /v1/me` with `Authorization: Bearer <session_token>` returns `{member_id, email, identity_status, credits}`, or `401` without a live session. Credits are all 0 until the ledger lands.
+6. `DELETE /v1/auth/session` revokes the session it is called with.
 
-Rules the code enforces:
+No response carries a secret, so replaying one by `request_id` is harmless.
 
-- Link tokens, poll secrets and session tokens are 256-bit random values, stored only as SHA-256 hashes.
+### `request_id`
+
+Every JSON POST under `/v1` carries a `request_id`, a UUIDv7 the client creates once and reuses on retries (`src/idempotency.ts`).
+
+- A retry with the same `request_id` and body gets the first response again, status and body.
+- The same `request_id` with another body, or on another endpoint, gets `409 idempotency_conflict`.
+- A `request_id` older than 24 hours gets `400 request_id_expired`. One more than 1 hour in the future gets `400 invalid_request`.
+- While the first request is still running, a retry gets `429 rate_limited` with `Retry-After: 1`.
+- 5xx responses are not kept, so a retry runs again.
+- Records live 25 hours. Only a SHA-256 fingerprint of method, path and body is stored, never the body.
+
+### Rules the code enforces
+
+- The API stores the session token and the link token only as SHA-256 hashes. A session token can start only one login request.
 - A link is single-use and expires 15 minutes after the request, together with the request.
-- Once confirmed, a request stays open for at least 5 more minutes, so a confirmation just before expiry still signs the app in.
-- Sessions last 90 days.
+- Once approved, a request answers polls for at least 5 more minutes, so an approval just before expiry still reaches the app.
+- Sessions last 90 days from approval.
 - The match code is a six-digit number. It is not a secret, so it is stored as is.
-- Request bodies over 16 KB are rejected with `413`.
+- Request schemas are closed: an unknown field gets `400 invalid_request`. Errors are `{error, message?}`.
+- Request bodies over 16 KB get `413 payload_too_large`.
 - Logs and traces drop query strings (`observability.redact_query_string`), so link tokens never reach them.
 
 ## Dev-only routes
 
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
-- `POST /dev/login-requests/{id}/confirm` with `{poll_secret}` confirms a login request without the email link, so automated tests can sign in.
+- `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
 
 ## Database
 
-`migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens` and `auth_sessions`. Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.
+`migrations/0001_magic_link_auth.sql` creates `members`, `login_requests`, `magic_link_tokens`, `auth_sessions` and `idempotency_records`. Timestamps are Unix epoch milliseconds. Schema changes ship as new numbered migration files; the deploy workflow (a later PR) applies them.

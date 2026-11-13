@@ -6,7 +6,7 @@ export interface SessionVariables {
   sessionToken: string;
 }
 
-/** Rejects the request with 401 unless it carries a live session as a Bearer token. */
+/** Rejects the request with 401 unless it carries a live session token as a Bearer token. */
 export const requireSession = createMiddleware<{ Bindings: Env; Variables: SessionVariables }>(
   async (c, next) => {
     const token = bearerToken(c.req.header("authorization"));
@@ -21,7 +21,8 @@ export const requireSession = createMiddleware<{ Bindings: Env; Variables: Sessi
   },
 );
 
+/** The token from `Authorization: Bearer <token>`; the scheme is case-insensitive (RFC 7235). */
 function bearerToken(header: string | undefined): string | null {
-  const match = /^Bearer ([A-Za-z0-9_-]+)$/i.exec(header ?? "");
+  const match = /^bearer (\S+)$/i.exec(header ?? "");
   return match?.[1] ?? null;
 }

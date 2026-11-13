@@ -1,6 +1,6 @@
 import { Hono } from "hono";
-import { confirmWithPollSecret } from "./auth/login-requests";
-import { readJsonObject } from "./http";
+import { approveWithSessionToken } from "./auth/login-requests";
+import { apiError, invalidRequest, readJsonObject } from "./http";
 
 /**
  * Shortcuts for local development and automated tests. Every route here
@@ -9,26 +9,27 @@ import { readJsonObject } from "./http";
 export const devRoutes = new Hono<{ Bindings: Env }>();
 
 devRoutes.use(async (c, next) => {
-  if (c.env.ENVIRONMENT !== "dev") return c.json({ error: "not_found" }, 404);
+  if (c.env.ENVIRONMENT !== "dev") return apiError(c, 404, "not_found");
   await next();
 });
 
+/** Approves a login request as if the member had confirmed the emailed link. */
 devRoutes.post("/login-requests/:id/confirm", async (c) => {
   const body = await readJsonObject(c.req.raw);
-  const pollSecret = body?.["poll_secret"];
-  if (typeof pollSecret !== "string") return c.json({ error: "invalid_poll_secret" }, 400);
+  const sessionToken = body?.["session_token"];
+  if (typeof sessionToken !== "string") return invalidRequest(c, "session_token is required");
 
-  const result = await confirmWithPollSecret(c.env.DB, {
+  const result = await approveWithSessionToken(c.env.DB, {
     id: c.req.param("id"),
-    pollSecret,
+    sessionToken,
     now: Date.now(),
   });
   switch (result) {
     case "not_found":
-      return c.json({ error: "not_found" }, 404);
+      return apiError(c, 404, "not_found");
     case "expired":
-      return c.json({ error: "expired" }, 410);
-    case "confirmed":
-      return c.json({ status: "confirmed" });
+      return apiError(c, 410, "login_request_expired");
+    case "approved":
+      return c.json({ status: "approved" });
   }
 });

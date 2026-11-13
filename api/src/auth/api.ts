@@ -1,27 +1,41 @@
 import { Hono } from "hono";
-import { sendSignInEmail } from "../email";
-import { readJsonObject } from "../http";
+import { signInMailer } from "../email";
+import { apiError, hasOnlyFields, invalidRequest } from "../http";
+import { idempotent, type IdempotentVariables } from "../idempotency";
 import { createLoginRequest, pollLoginRequest } from "./login-requests";
 import { requireSession, type SessionVariables } from "./middleware";
-import { revokeSession } from "./sessions";
+import { SESSION_TOKEN, revokeSession } from "./sessions";
 
-export const authApi = new Hono<{ Bindings: Env; Variables: SessionVariables }>();
+export const authApi = new Hono<{
+  Bindings: Env;
+  Variables: SessionVariables & IdempotentVariables;
+}>();
 
-authApi.post("/login-requests", async (c) => {
-  const body = await readJsonObject(c.req.raw);
-  const email = parseEmail(body?.["email"]);
-  if (!email) return c.json({ error: "invalid_email" }, 400);
-  const installId = parseInstallId(body?.["install_id"]);
-  if (installId === undefined) return c.json({ error: "invalid_install_id" }, 400);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-  const request = await createLoginRequest(c.env.DB, { email, installId, now: Date.now() });
+authApi.post("/login-requests", idempotent, async (c) => {
+  const body = c.get("body");
+  if (!hasOnlyFields(body, ["request_id", "email", "session_token_sha256"])) {
+    return invalidRequest(c, "unknown field");
+  }
+  const email = parseEmail(body["email"]);
+  if (!email) return invalidRequest(c, "email must be an email address of at most 254 characters");
+  const sessionTokenHash = body["session_token_sha256"];
+  if (typeof sessionTokenHash !== "string" || !SHA256_HEX.test(sessionTokenHash)) {
+    return invalidRequest(c, "session_token_sha256 must be 64 lowercase hex characters");
+  }
 
-  await sendSignInEmail(c.env, { to: email, token: request.linkToken, matchCode: request.matchCode });
+  const mailer = signInMailer(c.env);
+  if (!mailer) return apiError(c, 503, "email_unavailable");
+
+  const request = await createLoginRequest(c.env.DB, { email, sessionTokenHash, now: Date.now() });
+  if (!request) return invalidRequest(c, "session_token_sha256 is already in use; create a new token");
+
+  await mailer.send({ to: email, token: request.linkToken, matchCode: request.matchCode });
 
   return c.json(
     {
       login_request_id: request.id,
-      poll_secret: request.pollSecret,
       match_code: request.matchCode,
       expires_at: new Date(request.expiresAt).toISOString(),
     },
@@ -29,30 +43,31 @@ authApi.post("/login-requests", async (c) => {
   );
 });
 
-authApi.post("/login-requests/:id/poll", async (c) => {
-  const body = await readJsonObject(c.req.raw);
-  const pollSecret = body?.["poll_secret"];
-  if (typeof pollSecret !== "string") return c.json({ error: "invalid_poll_secret" }, 400);
+authApi.post("/login-requests/:id/poll", idempotent, async (c) => {
+  const body = c.get("body");
+  if (!hasOnlyFields(body, ["request_id", "session_token"])) return invalidRequest(c, "unknown field");
+  const sessionToken = body["session_token"];
+  if (typeof sessionToken !== "string" || !SESSION_TOKEN.test(sessionToken)) {
+    return invalidRequest(c, "session_token must be hpm_ and 43 base64url characters");
+  }
 
   const result = await pollLoginRequest(c.env.DB, {
     id: c.req.param("id"),
-    pollSecret,
+    sessionToken,
     now: Date.now(),
   });
   switch (result.status) {
     case "not_found":
-      return c.json({ error: "not_found" }, 404);
+      return apiError(c, 404, "not_found");
     case "expired":
-      return c.json({ error: "expired" }, 410);
-    case "already_collected":
-      return c.json({ error: "already_collected" }, 410);
+      return apiError(c, 410, "login_request_expired");
     case "pending":
       return c.json({ status: "pending" }, 202);
-    case "confirmed":
+    case "approved":
       return c.json({
-        status: "confirmed",
-        session_token: result.sessionToken,
-        expires_at: new Date(result.expiresAt).toISOString(),
+        status: "approved",
+        member_id: result.memberId,
+        expires_at: new Date(result.sessionExpiresAt).toISOString(),
       });
   }
 });
@@ -67,11 +82,4 @@ function parseEmail(value: unknown): string | null {
   const email = value.trim().toLowerCase();
   if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
   return email;
-}
-
-/** The optional id the app picks once per install: null when absent, undefined when invalid. */
-function parseInstallId(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) return undefined;
-  return value;
 }

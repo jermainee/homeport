@@ -8,10 +8,10 @@ meApi.use(requireSession);
 meApi.get("/", (c) => {
   const member = c.get("member");
   return c.json({
-    id: member.id,
+    member_id: member.id,
     email: member.email,
-    status: member.status,
     identity_status: member.identityStatus,
-    created_at: new Date(member.createdAt).toISOString(),
+    // The credits ledger arrives in a later PR; until then no member has credits.
+    credits: { purchased: 0, earned_pending: 0, earned_cashable: 0 },
   });
 });

@@ -1,54 +1,61 @@
 import { randomMatchCode, randomToken, sha256Hex } from "../crypto";
-import { newSession } from "./sessions";
+import { SESSION_TTL_MS } from "./sessions";
 
 /** How long a sign-in link, and the login request behind it, stays valid. */
 export const LOGIN_REQUEST_TTL_MS = 15 * 60 * 1000;
 
 /**
- * How long the app has to collect its session after the link is confirmed,
- * so a confirmation just before the link expires still signs the app in.
+ * How long polls keep answering "approved" after the member approves, so a
+ * confirmation just before the link expires still reaches the app.
  */
-export const COLLECT_WINDOW_MS = 5 * 60 * 1000;
+export const APPROVED_POLL_WINDOW_MS = 5 * 60 * 1000;
 
 export interface NewLoginRequest {
   id: string;
-  pollSecret: string;
   matchCode: string;
   linkToken: string;
   expiresAt: number;
 }
 
+/**
+ * Starts a sign-in for the session token whose SHA-256 the app sent. Returns
+ * null when that token already belongs to another login request or session.
+ */
 export async function createLoginRequest(
   db: D1Database,
-  input: { email: string; installId: string | null; now: number },
-): Promise<NewLoginRequest> {
+  input: { email: string; sessionTokenHash: string; now: number },
+): Promise<NewLoginRequest | null> {
   const id = crypto.randomUUID();
-  const pollSecret = randomToken();
   const linkToken = randomToken();
   const matchCode = randomMatchCode();
   const expiresAt = input.now + LOGIN_REQUEST_TTL_MS;
-  const [pollSecretHash, linkTokenHash] = await Promise.all([
-    sha256Hex(pollSecret),
-    sha256Hex(linkToken),
-  ]);
 
-  await db.batch([
+  const [created] = await db.batch([
     db
       .prepare(
-        `INSERT INTO login_requests
-           (id, email, poll_secret_hash, match_code, install_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO login_requests (id, email, session_token_hash, match_code, created_at, expires_at)
+         SELECT ?, ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash = ?)
+         ON CONFLICT (session_token_hash) DO NOTHING`,
       )
-      .bind(id, input.email, pollSecretHash, matchCode, input.installId, input.now, expiresAt),
+      .bind(
+        id,
+        input.email,
+        input.sessionTokenHash,
+        matchCode,
+        input.now,
+        expiresAt,
+        input.sessionTokenHash,
+      ),
     db
       .prepare(
         `INSERT INTO magic_link_tokens (token_hash, login_request_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
+         SELECT ?, id, ?, ? FROM login_requests WHERE id = ?`,
       )
-      .bind(linkTokenHash, id, input.now, expiresAt),
+      .bind(await sha256Hex(linkToken), input.now, expiresAt, id),
   ]);
-
-  return { id, pollSecret, matchCode, linkToken, expiresAt };
+  if (created?.meta.changes !== 1) return null;
+  return { id, matchCode, linkToken, expiresAt };
 }
 
 export interface PendingLink {
@@ -85,8 +92,8 @@ async function findPendingLinkByHash(
 export type ConfirmResult = "confirmed" | "invalid_link" | "code_mismatch";
 
 /**
- * Confirms a login request from its emailed link. The link token is used up
- * only when the match code agrees, and the member is created on first sign-in.
+ * Approves a login request from its emailed link. The link token is used up
+ * only when the match code agrees.
  */
 export async function confirmLink(
   db: D1Database,
@@ -107,30 +114,31 @@ export async function confirmLink(
     .run();
   if (used.meta.changes !== 1) return "invalid_link";
 
-  await markConfirmed(db, { loginRequestId: link.loginRequestId, email: link.email, now: input.now });
+  await approve(db, { loginRequestId: link.loginRequestId, email: link.email, now: input.now });
   return "confirmed";
 }
 
 /**
- * Confirms a login request with its poll secret instead of the emailed link.
- * Only the dev routes call this, so automated tests can sign in without email.
+ * Approves a login request with its session token instead of the emailed
+ * link. Only the dev routes call this, so automated tests can sign in.
  */
-export async function confirmWithPollSecret(
+export async function approveWithSessionToken(
   db: D1Database,
-  input: { id: string; pollSecret: string; now: number },
-): Promise<"confirmed" | "not_found" | "expired"> {
-  const request = await findRequestBySecret(db, input.id, input.pollSecret);
+  input: { id: string; sessionToken: string; now: number },
+): Promise<"approved" | "not_found" | "expired"> {
+  const request = await findRequestByToken(db, input.id, input.sessionToken);
   if (!request) return "not_found";
   if (request.expiresAt <= input.now) return "expired";
-  await markConfirmed(db, { loginRequestId: input.id, email: request.email, now: input.now });
-  return "confirmed";
+  await approve(db, { loginRequestId: input.id, email: request.email, now: input.now });
+  return "approved";
 }
 
 /**
  * Creates the member on first sign-in, ties the login request to them and
- * keeps the request open for at least COLLECT_WINDOW_MS so the app can collect.
+ * activates its session token, in one transaction. The request stays open for
+ * at least APPROVED_POLL_WINDOW_MS so the app's poll sees the approval.
  */
-async function markConfirmed(
+async function approve(
   db: D1Database,
   input: { loginRequestId: string; email: string; now: number },
 ): Promise<void> {
@@ -149,7 +157,17 @@ async function markConfirmed(
                 member_id = (SELECT m.id FROM members m WHERE m.email = login_requests.email)
           WHERE id = ? AND confirmed_at IS NULL`,
       )
-      .bind(input.now, input.now + COLLECT_WINDOW_MS, input.loginRequestId),
+      .bind(input.now, input.now + APPROVED_POLL_WINDOW_MS, input.loginRequestId),
+    // A session that already exists (approved before, maybe signed out since)
+    // is left as it is.
+    db
+      .prepare(
+        `INSERT INTO auth_sessions (token_hash, member_id, created_at, expires_at)
+         SELECT session_token_hash, member_id, ?, ?
+           FROM login_requests WHERE id = ? AND confirmed_at IS NOT NULL
+         ON CONFLICT (token_hash) DO NOTHING`,
+      )
+      .bind(input.now, input.now + SESSION_TTL_MS, input.loginRequestId),
   ]);
 }
 
@@ -157,76 +175,61 @@ export type PollResult =
   | { status: "not_found" }
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "already_collected" }
-  | { status: "confirmed"; sessionToken: string; expiresAt: number };
+  | { status: "approved"; memberId: string; sessionExpiresAt: number };
 
 /**
- * What the app sees when it polls its login request with the poll secret.
- * A confirmed request hands out its session token exactly once.
+ * What the app sees when it polls its login request with its session token.
+ * Once approved, every poll answers approved until the request expires.
  */
 export async function pollLoginRequest(
   db: D1Database,
-  input: { id: string; pollSecret: string; now: number },
+  input: { id: string; sessionToken: string; now: number },
 ): Promise<PollResult> {
-  const request = await findRequestBySecret(db, input.id, input.pollSecret);
+  const request = await findRequestByToken(db, input.id, input.sessionToken);
   if (!request) return { status: "not_found" };
-  if (request.completedAt !== null) return { status: "already_collected" };
   if (request.expiresAt <= input.now) return { status: "expired" };
-  if (request.confirmedAt === null) return { status: "pending" };
-
-  // One batch is one transaction: the session is inserted only while the
-  // request is still uncompleted, and the same batch completes it, so two
-  // concurrent polls cannot both get a session.
-  const session = await newSession(input.now);
-  const [inserted] = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO auth_sessions (token_hash, member_id, install_id, created_at, expires_at)
-         SELECT ?, member_id, install_id, ?, ?
-           FROM login_requests
-          WHERE id = ? AND confirmed_at IS NOT NULL AND completed_at IS NULL AND expires_at > ?`,
-      )
-      .bind(session.tokenHash, input.now, session.expiresAt, input.id, input.now),
-    db
-      .prepare(`UPDATE login_requests SET completed_at = ? WHERE id = ? AND completed_at IS NULL`)
-      .bind(input.now, input.id),
-  ]);
-  if (inserted?.meta.changes !== 1) return { status: "already_collected" };
-  return { status: "confirmed", sessionToken: session.token, expiresAt: session.expiresAt };
+  if (request.memberId === null || request.sessionExpiresAt === null) return { status: "pending" };
+  return {
+    status: "approved",
+    memberId: request.memberId,
+    sessionExpiresAt: request.sessionExpiresAt,
+  };
 }
 
 interface StoredRequest {
   email: string;
   expiresAt: number;
-  confirmedAt: number | null;
-  completedAt: number | null;
+  memberId: string | null;
+  sessionExpiresAt: number | null;
 }
 
-/** The login request with this id, if `pollSecret` is its poll secret. */
-async function findRequestBySecret(
+/** The login request with this id, if `sessionToken` is the token it was started with. */
+async function findRequestByToken(
   db: D1Database,
   id: string,
-  pollSecret: string,
+  sessionToken: string,
 ): Promise<StoredRequest | null> {
   const row = await db
     .prepare(
-      `SELECT email, poll_secret_hash, expires_at, confirmed_at, completed_at
-         FROM login_requests WHERE id = ?`,
+      `SELECT r.email, r.session_token_hash, r.expires_at, r.member_id,
+              s.expires_at AS session_expires_at
+         FROM login_requests r LEFT JOIN auth_sessions s ON s.token_hash = r.session_token_hash
+        WHERE r.id = ?`,
     )
     .bind(id)
     .first<{
       email: string;
-      poll_secret_hash: string;
+      session_token_hash: string;
       expires_at: number;
-      confirmed_at: number | null;
-      completed_at: number | null;
+      member_id: string | null;
+      session_expires_at: number | null;
     }>();
-  if (!row || !timingSafeEqual(await sha256Hex(pollSecret), row.poll_secret_hash)) return null;
+  if (!row || !timingSafeEqual(await sha256Hex(sessionToken), row.session_token_hash)) return null;
   return {
     email: row.email,
     expiresAt: row.expires_at,
-    confirmedAt: row.confirmed_at,
-    completedAt: row.completed_at,
+    memberId: row.member_id,
+    sessionExpiresAt: row.session_expires_at,
   };
 }
 

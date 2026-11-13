@@ -4,7 +4,6 @@ import { routePath } from "hono/route";
 import { authApi } from "./auth/api";
 import { confirmPages } from "./auth/confirm";
 import { devRoutes } from "./dev";
-import { EmailUnavailableError } from "./email";
 import { meApi } from "./me";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -25,9 +24,6 @@ app.route("/dev", devRoutes);
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
 app.onError((error, c) => {
-  if (error instanceof EmailUnavailableError) {
-    return c.json({ error: "email_unavailable" }, 503);
-  }
   // Log only what went wrong and where, never request bodies or headers.
   console.error(
     JSON.stringify({
