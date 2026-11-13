@@ -77,6 +77,19 @@ describe("POST /v1/devices", () => {
     });
   });
 
+  it("allows 10 new devices a day, then answers 429 with Retry-After", async () => {
+    const { sessionToken } = await verifiedMember();
+    for (let i = 0; i < 10; i++) {
+      expect((await register(sessionToken, { agent_public_key: randomKey() })).status).toBe(201);
+    }
+
+    const response = await register(sessionToken, { agent_public_key: randomKey() });
+
+    expect(response.status).toBe(429);
+    expect(Number(response.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await expectContract("POST", "/v1/devices", response)).toMatchObject({ error: "rate_limited" });
+  });
+
   it("returns 401 without a session", async () => {
     const response = await send("POST", "/v1/devices", "hpm_not-a-session", { request_id: uuidv7() });
 

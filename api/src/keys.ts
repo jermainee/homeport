@@ -18,7 +18,13 @@ export async function ed25519SpkiSha256(publicKeyBase64: string): Promise<string
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** A string of 1 to 64 characters, as the contract's device and peer names. */
+/**
+ * A string of 1 to 64 characters, as the contract's device and peer names.
+ * Characters are code points, as JSON Schema counts them, not UTF-16 units.
+ */
 export function isName(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 1 && value.length <= 64;
+  if (typeof value !== "string") return false;
+  // Counts code points on purpose: the contract's maxLength does, not grapheme clusters.
+  const characters = Array.from(value).length;
+  return characters >= 1 && characters <= 64;
 }

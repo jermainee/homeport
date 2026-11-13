@@ -19,6 +19,12 @@ export function ownerIsLinkedSql(member: string, owner: string): string {
 export const MAX_USERS_PER_LINE = 3;
 
 /**
+ * Active WireGuard peers one member may have. All peers share one pool of
+ * tunnel addresses, so without a cap one account could use it up.
+ */
+export const MAX_PEERS_PER_MEMBER = 20;
+
+/**
  * SQL condition: the line `line` has room for the member `member`, who may
  * already use it. Both arguments are SQL expressions.
  */

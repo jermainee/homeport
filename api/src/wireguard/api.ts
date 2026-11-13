@@ -5,7 +5,7 @@ import { apiError, hasOnlyFields, invalidRequest } from "../http";
 import { type IdempotentVariables, idempotent } from "../idempotency";
 import { requireVerifiedIdentity } from "../identity/require-verified";
 import { KEY32, isName } from "../keys";
-import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
+import { MAX_PEERS_PER_MEMBER, lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
 
 /**
@@ -53,23 +53,24 @@ wireguardApi.post("/peers", verifiedRequest, async (c) => {
   const line = await db
     .prepare(
       `SELECT l.member_id, g.wg_public_key, g.wg_endpoint, ${ownerIsLinkedSql("?2", "l.member_id")} AS linked
-         FROM lines l JOIN gateways g ON g.id = l.gateway_id
+         FROM lines l
+         JOIN gateways g ON g.id = l.gateway_id
+         JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
         WHERE l.id = ?1 AND l.sharing_enabled = 1`,
     )
     .bind(lineId, memberId)
     .first<{ member_id: string; wg_public_key: string; wg_endpoint: string; linked: number }>();
-  // A line that is not sharing is not offered to anyone.
+  // A line that is not sharing, or whose owner is suspended, is offered to no one.
   if (!line) return apiError(c, 404, "not_found");
   // No self-dealing: never the member's own line, or a linked member's.
   if (line.linked) return apiError(c, 403, "line_not_allowed");
 
-  // One statement takes the lowest free address and checks the line still
-  // has room. D1 runs it atomically, so concurrent requests never share an
-  // address or overfill a line.
-  const peerId = crypto.randomUUID();
-  let inserted: D1Result;
+  // One statement takes the lowest free address and checks the line's room
+  // and the member's peer cap. D1 runs it atomically, so concurrent requests
+  // never share an address or overfill a line.
+  let peer: PeerRow | null;
   try {
-    inserted = await db
+    peer = await db
       .prepare(
         `INSERT INTO wireguard_peers (id, member_id, line_id, name, public_key, address_index, created_at)
          SELECT ?1, ?2, ?3, ?4, ?5, free.host, ?6
@@ -81,27 +82,34 @@ wireguardApi.post("/peers", verifiedRequest, async (c) => {
                             AND NOT EXISTS (SELECT 1 FROM wireguard_peers q
                                              WHERE q.deleted_at IS NULL AND q.address_index = p.address_index + 1))
                  END AS host) AS free
-          WHERE free.host <= ${LAST_PEER_HOST} AND ${lineHasRoomSql("?3", "?2")}`,
+          WHERE free.host <= ${LAST_PEER_HOST} AND ${lineHasRoomSql("?3", "?2")}
+            AND (SELECT COUNT(*) FROM wireguard_peers mine
+                  WHERE mine.member_id = ?2 AND mine.deleted_at IS NULL) < ${MAX_PEERS_PER_MEMBER}
+         RETURNING id, name, line_id, public_key, address_index, created_at`,
       )
-      .bind(peerId, memberId, lineId, name, publicKey, Date.now())
-      .run();
+      .bind(crypto.randomUUID(), memberId, lineId, name, publicKey, Date.now())
+      .first<PeerRow>();
   } catch (error) {
     if (error instanceof Error && error.message.includes("wireguard_peers.public_key")) {
       return apiError(c, 409, "public_key_taken");
     }
     throw error;
   }
-  if (inserted.meta.changes !== 1) {
-    const room = await db.prepare(`SELECT ${lineHasRoomSql("?1", "?2")} AS room`).bind(lineId, memberId).first<{ room: number }>();
-    if (!room?.room) return apiError(c, 409, "line_full");
+  if (!peer) {
+    const limits = await db
+      .prepare(
+        `SELECT ${lineHasRoomSql("?1", "?2")} AS room,
+                (SELECT COUNT(*) FROM wireguard_peers WHERE member_id = ?2 AND deleted_at IS NULL) AS peers`,
+      )
+      .bind(lineId, memberId)
+      .first<{ room: number; peers: number }>();
+    if (!limits?.room) return apiError(c, 409, "line_full");
+    if (limits.peers >= MAX_PEERS_PER_MEMBER) {
+      return apiError(c, 429, "rate_limited", `at most ${MAX_PEERS_PER_MEMBER} peers; delete one first`);
+    }
     throw new Error("no free tunnel address");
   }
 
-  const peer = await db
-    .prepare(`SELECT id, name, line_id, public_key, address_index, created_at FROM wireguard_peers WHERE id = ?`)
-    .bind(peerId)
-    .first<PeerRow>();
-  if (!peer) throw new Error("peer missing after insert");
   return c.json(
     {
       peer: peerBody(peer),

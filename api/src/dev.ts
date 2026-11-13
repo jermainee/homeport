@@ -37,6 +37,9 @@ devRoutes.post("/login-requests/:id/confirm", async (c) => {
 
 const GATEWAY_FIELDS = ["wg_public_key", "wg_endpoint", "quic_endpoint", "quic_server_name", "quic_spki_sha256", "version"];
 const HOST_PORT = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):[0-9]{1,5}$/;
+const HOSTNAME = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+// The contract's Version pattern.
+const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 /**
  * Stores a gateway as PUT /v1/gateway/self will once gateways authenticate,
@@ -53,6 +56,8 @@ devRoutes.put("/gateways/:id", async (c) => {
     !KEY32.test(gateway["wg_public_key"] ?? "") ||
     !HOST_PORT.test(gateway["wg_endpoint"] ?? "") ||
     !HOST_PORT.test(gateway["quic_endpoint"] ?? "") ||
+    !HOSTNAME.test(gateway["quic_server_name"] ?? "") ||
+    !SEMVER.test(gateway["version"] ?? "") ||
     !/^[0-9a-f]{64}$/.test(gateway["quic_spki_sha256"] ?? "")
   ) {
     return invalidRequest(c, "malformed gateway field");

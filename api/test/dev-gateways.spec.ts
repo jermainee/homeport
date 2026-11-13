@@ -31,6 +31,8 @@ describe("PUT /dev/gateways/{id}", () => {
     ["an unknown field", { ...GATEWAY, region: "fra" }],
     ["a malformed key", { ...GATEWAY, wg_public_key: "nope" }],
     ["an endpoint without a port", { ...GATEWAY, wg_endpoint: "fra1.gw.homeport.example" }],
+    ["a server name that is not a hostname", { ...GATEWAY, quic_server_name: "" }],
+    ["a version that is not semver", { ...GATEWAY, version: "latest" }],
   ])("rejects %s with 400", async (_case, body) => {
     const response = await putGateway(crypto.randomUUID(), body);
 

@@ -158,6 +158,45 @@ describe("POST /v1/wireguard/peers", () => {
     expect(listed.lines.map((line) => line.line_id)).not.toContain(lineId);
   });
 
+  it("allows a member 20 active peers, then answers 429, so no one can use up the addresses", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const peers = [];
+    for (let i = 0; i < 20; i++) peers.push((await createdPeer(sessionToken, lineId)).peer);
+
+    const over = await createPeer(sessionToken, lineId);
+    await send("DELETE", `/v1/wireguard/peers/${peers[0]?.peer_id ?? ""}`, sessionToken);
+    const afterDelete = await createPeer(sessionToken, lineId);
+
+    expect(over.status).toBe(429);
+    expect(await expectContract("POST", "/v1/wireguard/peers", over)).toMatchObject({ error: "rate_limited" });
+    expect(afterDelete.status).toBe(201);
+  });
+
+  it("refuses a line whose owner is suspended", async () => {
+    const owner = await verifiedMember();
+    const lineId = await sharingLine(owner.sessionToken, BERLIN);
+    await env.DB.prepare(`UPDATE members SET status = 'suspended' WHERE id = ?`).bind(owner.memberId).run();
+    const { sessionToken } = await verifiedMember();
+
+    const response = await createPeer(sessionToken, lineId);
+    const listed = await (await send("GET", "/v1/lines/available", sessionToken)).json<{ lines: { line_id: string }[] }>();
+
+    expect(response.status).toBe(404);
+    expect(listed.lines.map((line) => line.line_id)).not.toContain(lineId);
+  });
+
+  it("counts a name's length in characters, as the contract does", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+
+    const emoji = await createPeer(sessionToken, lineId, randomKey(), "📱".repeat(64));
+    const tooLong = await createPeer(sessionToken, lineId, randomKey(), "📱".repeat(65));
+
+    expect(emoji.status).toBe(201);
+    expect(tooLong.status).toBe(400);
+  });
+
   it("returns 404 for an unknown line and for a line that is not sharing", async () => {
     const owner = await verifiedMember();
     const lineId = await sharingLine(owner.sessionToken, BERLIN);

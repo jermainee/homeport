@@ -6,6 +6,10 @@ import { KEY32, ed25519SpkiSha256, isName } from "./keys";
 
 const PLATFORMS = ["linux", "macos", "windows"];
 
+/** New devices a member may register per DEVICE_WINDOW_MS; registering a known key again is free. */
+export const MAX_NEW_DEVICES_PER_WINDOW = 10;
+export const DEVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Sharing agents' keys (contract operation registerDevice). Registering
  * needs no identity check: the app registers its agent key when it is
@@ -29,13 +33,27 @@ devicesApi.post("/", memberIdempotent, async (c) => {
 
   const db = c.env.DB;
   const memberId = c.get("member").id;
+  const now = Date.now();
+  const [known, recent] = await db.batch<{ member_id?: string; count?: number; oldest?: number | null }>([
+    db.prepare(`SELECT member_id FROM devices WHERE agent_public_key = ?`).bind(agentKey),
+    db
+      .prepare(`SELECT COUNT(*) AS count, MIN(created_at) AS oldest FROM devices WHERE member_id = ? AND created_at > ?`)
+      .bind(memberId, now - DEVICE_WINDOW_MS),
+  ]);
+  const recentCount = recent?.results[0]?.count ?? 0;
+  if (!known?.results[0] && recentCount >= MAX_NEW_DEVICES_PER_WINDOW) {
+    const freeAt = (recent?.results[0]?.oldest ?? now) + DEVICE_WINDOW_MS;
+    c.header("retry-after", String(Math.max(1, Math.ceil((freeAt - now) / 1000))));
+    return apiError(c, 429, "rate_limited", `at most ${MAX_NEW_DEVICES_PER_WINDOW} new devices a day`);
+  }
+
   const spkiSha256 = await ed25519SpkiSha256(agentKey);
   const inserted = await db
     .prepare(
       `INSERT INTO devices (id, member_id, name, platform, agent_public_key, spki_sha256, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     )
-    .bind(crypto.randomUUID(), memberId, name, platform, agentKey, spkiSha256, Date.now())
+    .bind(crypto.randomUUID(), memberId, name, platform, agentKey, spkiSha256, now)
     .run();
   const device = await db
     .prepare(`SELECT id, member_id, spki_sha256 FROM devices WHERE agent_public_key = ?`)
