@@ -57,6 +57,8 @@ CREATE TABLE idempotency_records (
   -- NULL while the first request is still running.
   response_status INTEGER,
   response_body TEXT,
+  -- When a request last claimed this id; a claim silent for a minute is taken over.
+  claimed_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );

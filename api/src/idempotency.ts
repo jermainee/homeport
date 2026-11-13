@@ -9,6 +9,11 @@ export const REQUEST_ID_MAX_AGE_MS = 24 * HOUR_MS;
 export const REQUEST_ID_MAX_SKEW_MS = HOUR_MS;
 /** How long a record is kept after first sight; covers the whole accepted window. */
 export const RECORD_TTL_MS = 25 * HOUR_MS;
+/**
+ * A claim without a stored response after this long belongs to a request that
+ * died (evicted isolate, cancelled request), so a retry takes it over.
+ */
+export const CLAIM_TIMEOUT_MS = 60 * 1000;
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -42,36 +47,41 @@ export const idempotent = createMiddleware<{ Bindings: Env; Variables: Idempoten
     }
 
     const db = c.env.DB;
-    const fingerprint = await sha256Hex(
-      `${c.req.method} ${new URL(c.req.url).pathname}\n${canonicalJson(body)}`,
-    );
+    const fingerprint = await requestFingerprint(c.req.method, new URL(c.req.url).pathname, body);
     const claim = await db
       .prepare(
-        `INSERT INTO idempotency_records (request_id, fingerprint, created_at, expires_at)
-         VALUES (?, ?, ?, ?) ON CONFLICT (request_id) DO NOTHING`,
+        `INSERT INTO idempotency_records (request_id, fingerprint, claimed_at, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT (request_id) DO NOTHING`,
       )
-      .bind(requestId, fingerprint, now, now + RECORD_TTL_MS)
+      .bind(requestId, fingerprint, now, now, now + RECORD_TTL_MS)
       .run();
 
     if (claim.meta.changes !== 1) {
       const record = await db
         .prepare(
-          `SELECT fingerprint, response_status, response_body
+          `SELECT fingerprint, claimed_at, response_status, response_body
              FROM idempotency_records WHERE request_id = ?`,
         )
         .bind(requestId)
-        .first<{ fingerprint: string; response_status: number | null; response_body: string | null }>();
+        .first<{
+          fingerprint: string;
+          claimed_at: number;
+          response_status: number | null;
+          response_body: string | null;
+        }>();
       if (!record || record.fingerprint !== fingerprint) {
         return apiError(c, 409, "idempotency_conflict", "request_id was used with another request");
       }
-      if (record.response_status === null || record.response_body === null) {
+      if (record.response_status !== null && record.response_body !== null) {
+        return new Response(record.response_body, {
+          status: record.response_status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (!(await takeOverAbandonedClaim(db, requestId, record.claimed_at, now))) {
         c.header("retry-after", "1");
         return apiError(c, 429, "rate_limited", "the first request with this request_id is still running");
       }
-      return new Response(record.response_body, {
-        status: record.response_status,
-        headers: { "content-type": "application/json" },
-      });
     }
 
     c.set("body", body);
@@ -89,6 +99,36 @@ export const idempotent = createMiddleware<{ Bindings: Env; Variables: Idempoten
       .run();
   },
 );
+
+/** SHA-256 of method, path and canonical body: what "the same request" means. */
+export function requestFingerprint(
+  method: string,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<string> {
+  return sha256Hex(`${method} ${path}\n${canonicalJson(body)}`);
+}
+
+/**
+ * Claims a record whose request went silent for CLAIM_TIMEOUT_MS. The guarded
+ * UPDATE lets only one of several concurrent retries win.
+ */
+async function takeOverAbandonedClaim(
+  db: D1Database,
+  requestId: string,
+  claimedAt: number,
+  now: number,
+): Promise<boolean> {
+  if (claimedAt > now - CLAIM_TIMEOUT_MS) return false;
+  const taken = await db
+    .prepare(
+      `UPDATE idempotency_records SET claimed_at = ?
+        WHERE request_id = ? AND response_status IS NULL AND claimed_at = ?`,
+    )
+    .bind(now, requestId, claimedAt)
+    .run();
+  return taken.meta.changes === 1;
+}
 
 /** Milliseconds since the Unix epoch, from the first 48 bits of a UUIDv7. */
 function uuidV7Timestamp(id: string): number {

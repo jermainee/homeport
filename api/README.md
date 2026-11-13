@@ -42,7 +42,7 @@ npm run dev
 
 ## Sign-in
 
-The desktop app signs in by polling, so it needs no custom URL scheme. The endpoints follow the contract in [`contracts/control-api.openapi.yaml`](../contracts/control-api.openapi.yaml) (operations `createLoginRequest`, `pollLoginRequest` and `getMe`).
+The desktop app signs in by polling, so it needs no custom URL scheme. The endpoints follow the contract in `contracts/control-api.openapi.yaml` (operations `createLoginRequest`, `pollLoginRequest` and `getMe`; added in jermainee/homeport#7).
 
 ```mermaid
 sequenceDiagram
@@ -84,7 +84,7 @@ Every JSON POST under `/v1` carries a `request_id`, a UUIDv7 the client creates 
 - A retry with the same `request_id` and body gets the first response again, status and body.
 - The same `request_id` with another body, or on another endpoint, gets `409 idempotency_conflict`.
 - A `request_id` older than 24 hours gets `400 request_id_expired`. One more than 1 hour in the future gets `400 invalid_request`.
-- While the first request is still running, a retry gets `429 rate_limited` with `Retry-After: 1`.
+- While the first request is still running, a retry gets `429 rate_limited` with `Retry-After: 1`. A first request that stays silent for a minute (an evicted isolate, a cancelled request) is taken over by the next retry.
 - 5xx responses are not kept, so a retry runs again.
 - Records live 25 hours. Only a SHA-256 fingerprint of method, path and body is stored, never the body.
 

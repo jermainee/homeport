@@ -1,4 +1,6 @@
+import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { requestFingerprint } from "../src/idempotency";
 import {
   confirm,
   loginRequestBody,
@@ -107,5 +109,40 @@ describe("request_id", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "invalid_request" });
+  });
+});
+
+describe("a request_id whose first request has not answered yet", () => {
+  async function seedClaim(body: Record<string, unknown>, claimedAt: number) {
+    const fingerprint = await requestFingerprint("POST", "/v1/auth/login-requests", body);
+    await env.DB.prepare(
+      `INSERT INTO idempotency_records (request_id, fingerprint, claimed_at, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(body["request_id"], fingerprint, claimedAt, claimedAt, claimedAt + 25 * HOUR)
+      .run();
+  }
+
+  it("gets 429 rate_limited with Retry-After while the first request may still be running", async () => {
+    const body = await loginRequestBody(uniqueEmail(), newSessionToken());
+    await seedClaim(body, Date.now() - 5000);
+
+    const retry = await postJson("/v1/auth/login-requests", body);
+
+    expect(retry.status).toBe(429);
+    expect(retry.headers.get("retry-after")).toBe("1");
+    expect(await retry.json()).toMatchObject({ error: "rate_limited" });
+  });
+
+  it("is taken over by a retry once the first request has been silent for a minute", async () => {
+    const body = await loginRequestBody(uniqueEmail(), newSessionToken());
+    await seedClaim(body, Date.now() - 61_000);
+
+    const retry = await postJson("/v1/auth/login-requests", body);
+    const again = await postJson("/v1/auth/login-requests", body);
+
+    expect(retry.status).toBe(201);
+    expect(again.status).toBe(201);
+    expect(await again.json()).toEqual(await retry.json());
   });
 });
