@@ -30,10 +30,11 @@ type AuthService struct {
 	api     *apiclient.Client
 	profile *profile.Profile
 
-	mu      sync.Mutex
-	gen     uint64        // bumped by Cancel and SignOut
-	attempt *pendingLogin // a Start whose outcome is unknown, reused on retry
-	pending *pendingLogin // the sign-in the API accepted, which Poll checks
+	mu            sync.Mutex
+	gen           uint64        // bumped by Cancel and SignOut
+	attempt       *pendingLogin // a Start whose outcome is unknown, reused on retry
+	pending       *pendingLogin // the sign-in the API accepted, which Poll checks
+	beforeSignOut []func(context.Context)
 }
 
 // pendingLogin is one sign-in attempt and, once the API accepts it, the
@@ -237,7 +238,11 @@ func retryable(err error) bool {
 func (s *AuthService) SignOut(ctx context.Context) error {
 	s.mu.Lock()
 	s.forgetLocked()
+	hooks := s.beforeSignOut
 	s.mu.Unlock()
+	for _, fn := range hooks {
+		fn(ctx)
+	}
 
 	sess, ok, _ := s.profile.Session() // an unreadable file is cleared below
 	if ok {
@@ -249,3 +254,13 @@ func (s *AuthService) SignOut(ctx context.Context) error {
 }
 
 const signOutTimeout = 5 * time.Second
+
+// BeforeSignOut adds fn to what SignOut does first, while the session still
+// works: ShareService turns Share off there.
+//
+//wails:ignore
+func (s *AuthService) BeforeSignOut(fn func(context.Context)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeSignOut = append(s.beforeSignOut, fn)
+}

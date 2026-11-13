@@ -1,5 +1,5 @@
-// Package apiclient calls the member endpoints of the Homeport control API,
-// as contracts/control-api.openapi.yaml describes them.
+// Package apiclient calls the member and share endpoints of the Homeport
+// control API, as contracts/control-api.openapi.yaml describes them.
 package apiclient
 
 import (
@@ -203,4 +203,55 @@ func (c *Client) Me(ctx context.Context, sessionToken string) (Member, error) {
 // already doesn't work is an *Error with status 401.
 func (c *Client) DeleteSession(ctx context.Context, sessionToken string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/auth/session", sessionToken, nil, nil, http.StatusNoContent)
+}
+
+// Device is a registered sharing agent key.
+type Device struct {
+	ID         string `json:"device_id"`
+	SPKISHA256 string `json:"spki_sha256"`
+}
+
+// RegisterDevice registers the sharing agent's Ed25519 key, given as raw
+// standard base64. platform is linux, macos or windows. Registering a key the
+// member registered before returns that device.
+func (c *Client) RegisterDevice(ctx context.Context, sessionToken, requestID, name, platform, agentPublicKey string) (Device, error) {
+	body := map[string]string{
+		"request_id":       requestID,
+		"name":             name,
+		"platform":         platform,
+		"agent_public_key": agentPublicKey,
+	}
+	var out Device
+	err := c.do(ctx, http.MethodPost, "/v1/devices", sessionToken, body, &out, http.StatusCreated, http.StatusOK)
+	return out, err
+}
+
+// AgentGateway is where a line's sharing agent dials out to. SPKISHA256 is
+// the lowercase hex SHA-256 of the gateway certificate's SPKI, which the
+// agent pins.
+type AgentGateway struct {
+	QUICEndpoint string `json:"quic_endpoint"`
+	ServerName   string `json:"server_name"`
+	SPKISHA256   string `json:"spki_sha256"`
+}
+
+// LineCreated is a device's line and its gateway.
+type LineCreated struct {
+	ID      string       `json:"line_id"`
+	Gateway AgentGateway `json:"gateway"`
+}
+
+// CreateLine creates the line deviceID shares, or returns the line it has.
+// It needs a verified identity (403 identity_required).
+func (c *Client) CreateLine(ctx context.Context, sessionToken, requestID, deviceID string) (LineCreated, error) {
+	body := map[string]string{"request_id": requestID, "device_id": deviceID}
+	var out LineCreated
+	err := c.do(ctx, http.MethodPost, "/v1/lines", sessionToken, body, &out, http.StatusCreated, http.StatusOK)
+	return out, err
+}
+
+// UpdateLine turns sharing on lineID on or off.
+func (c *Client) UpdateLine(ctx context.Context, sessionToken, lineID string, sharingEnabled bool) error {
+	body := map[string]bool{"sharing_enabled": sharingEnabled}
+	return c.do(ctx, http.MethodPatch, "/v1/lines/"+url.PathEscape(lineID), sessionToken, body, nil, http.StatusOK)
 }
