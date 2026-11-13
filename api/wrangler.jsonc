@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "homeport-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  // Production-safe defaults. Local development overrides them in .dev.vars
+  // (copy .dev.vars.example).
+  "vars": {
+    // "dev" enables the /dev routes and EMAIL_MODE=log. Anything else is production.
+    "ENVIRONMENT": "production",
+    // "log" writes sign-in links to the log instead of sending them (dev only).
+    // Real email delivery comes in a later PR; until then other values return 503.
+    "EMAIL_MODE": "disabled",
+    // Origin used to build the links in sign-in emails.
+    "PUBLIC_BASE_URL": "http://localhost:8787"
+  },
+  // Keeps `wrangler types` independent of a local .dev.vars file.
+  "secrets": {
+    "required": []
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "homeport",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
