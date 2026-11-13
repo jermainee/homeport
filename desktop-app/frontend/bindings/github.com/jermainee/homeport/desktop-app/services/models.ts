@@ -11,6 +11,69 @@ export interface Credits {
 }
 
 /**
+ * ErrorCode tells the frontend what went wrong, so it can say so in words
+ * the member understands.
+ */
+export enum ErrorCode {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * ErrOffline: the API could not be reached.
+     */
+    ErrOffline = "offline",
+
+    /**
+     * ErrInvalidEmail: the API rejected the email address.
+     */
+    ErrInvalidEmail = "invalid_email",
+
+    /**
+     * ErrClockSkew: this computer's clock is more than an hour off, so the
+     * API rejects the request's timestamp.
+     */
+    ErrClockSkew = "clock_skew",
+
+    /**
+     * ErrRateLimited: too many attempts; wait a moment.
+     */
+    ErrRateLimited = "rate_limited",
+
+    /**
+     * ErrEmailUnavailable: the API can't send sign-in links right now.
+     */
+    ErrEmailUnavailable = "email_unavailable",
+
+    /**
+     * ErrNoSignIn: there is no sign-in in progress to poll.
+     */
+    ErrNoSignIn = "no_sign_in",
+
+    /**
+     * ErrIdentityRequired: the member hasn't passed the identity check, so
+     * Share and Use stay off.
+     */
+    ErrIdentityRequired = "identity_required",
+
+    /**
+     * ErrGatewayUnavailable: no gateway can take the line yet.
+     */
+    ErrGatewayUnavailable = "gateway_unavailable",
+
+    /**
+     * ErrSignedOut: the session is gone, so the member has to sign in again.
+     */
+    ErrSignedOut = "signed_out",
+
+    /**
+     * ErrUnexpected: anything else. The message has the details for logs.
+     */
+    ErrUnexpected = "unexpected",
+};
+
+/**
  * LoginStart is a started sign-in, as the sign-in screen shows it.
  */
 export interface LoginStart {
@@ -59,4 +122,78 @@ export interface Member {
  */
 export interface PollResult {
     "status": LoginStatus;
+}
+
+/**
+ * ShareState is what Share is doing, as the Share screen shows it.
+ */
+export enum ShareState {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * ShareOff: the member turned Share off.
+     */
+    ShareOff = "off",
+
+    /**
+     * ShareConnecting: Share is on, and the line is being set up or the
+     * agent is dialing the gateway.
+     */
+    ShareConnecting = "connecting",
+
+    /**
+     * ShareOnline: the gateway accepted the agent; members can use the line.
+     */
+    ShareOnline = "online",
+
+    /**
+     * SharePaused: another VPN carries this computer's default route, so the
+     * agent stays away until it is gone.
+     */
+    SharePaused = "paused",
+
+    /**
+     * ShareOffline: Share is on, but the API or the gateway can't be reached
+     * (Error says which); it keeps trying.
+     */
+    ShareOffline = "offline",
+
+    /**
+     * ShareError: Share turned itself off because of Error, which trying
+     * again won't fix by itself.
+     */
+    ShareError = "error",
+};
+
+/**
+ * ShareStatus is Share's state and the agent's counters, as the Share
+ * screen and the tray show them.
+ */
+export interface ShareStatus {
+    "state": ShareState;
+
+    /**
+     * Sharing is the switch: whether the member wants Share on.
+     */
+    "sharing": boolean;
+
+    /**
+     * Error says why Share is offline or stopped.
+     */
+    "error"?: ErrorCode;
+
+    /**
+     * BytesToday is the data this computer relayed today, local time, as
+     * the agent counts it: payload to and from destinations. The gateway's
+     * count, which credits follow, includes packet headers too.
+     */
+    "bytesToday": number;
+
+    /**
+     * FlowsActive is the number of connections relayed right now.
+     */
+    "flowsActive": number;
 }

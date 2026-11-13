@@ -7,7 +7,6 @@ require (
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	github.com/jermainee/homeport/relay-protocol v0.0.0 // indirect
 	github.com/quic-go/quic-go v0.65.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
@@ -17,6 +16,7 @@ require (
 
 require (
 	github.com/jermainee/homeport/agent v0.0.0
+	github.com/jermainee/homeport/relay-protocol v0.0.0
 	github.com/wailsapp/wails/v3 v3.1.0
 )
 
