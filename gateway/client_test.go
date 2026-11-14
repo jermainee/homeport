@@ -58,9 +58,12 @@ type testClient struct {
 	dev *device.Device
 }
 
-func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr) *testClient {
+// newClient connects a client with key that sends from ip and any more
+// tunnel addresses.
+func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr, more ...netip.Addr) *testClient {
 	t.Helper()
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{ip}, []netip.Addr{netip.MustParseAddr("10.77.0.1")}, 1280)
+	addrs := append([]netip.Addr{ip}, more...)
+	tunDev, tnet, err := netstack.CreateNetTUN(addrs, []netip.Addr{netip.MustParseAddr("10.77.0.1")}, 1280)
 	if err != nil {
 		t.Fatalf("create client tun: %v", err)
 	}
@@ -85,7 +88,7 @@ func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr)
 func (c *testClient) handshakeWithin(t *testing.T, limit time.Duration) time.Duration {
 	t.Helper()
 	start := time.Now()
-	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("203.0.113.10:9"))
+	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("11.22.33.44:9"))
 	if err != nil {
 		t.Fatalf("dial UDP: %v", err)
 	}
@@ -153,7 +156,18 @@ func (c *testClient) tryGet(url string, timeout time.Duration) error {
 // udpRoundTrip sends one datagram through the tunnel and returns the reply.
 func (c *testClient) udpRoundTrip(t *testing.T, dst netip.AddrPort, payload []byte) []byte {
 	t.Helper()
-	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, dst)
+	return c.udpRoundTripFrom(t, netip.Addr{}, dst, payload)
+}
+
+// udpRoundTripFrom is udpRoundTrip from the client's address src, or from
+// any of its addresses if src is the zero Addr.
+func (c *testClient) udpRoundTripFrom(t *testing.T, src netip.Addr, dst netip.AddrPort, payload []byte) []byte {
+	t.Helper()
+	var laddr netip.AddrPort
+	if src.IsValid() {
+		laddr = netip.AddrPortFrom(src, 0)
+	}
+	uc, err := c.net.DialUDPAddrPort(laddr, dst)
 	if err != nil {
 		t.Fatalf("dial UDP: %v", err)
 	}

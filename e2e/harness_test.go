@@ -50,11 +50,12 @@ var (
 	peerIP          = netip.MustParseAddr("10.77.0.2")
 	virtualResolver = netip.MustParseAddr("10.77.0.1")
 
-	// The client sends its flows to public-looking destinations, as a
-	// member would. A real gateway drops packets addressed to loopback, so
-	// the agent's test routes send these to the loopback test servers.
-	tcpDst = netip.MustParseAddrPort("203.0.113.10:80")
-	udpDst = netip.MustParseAddrPort("203.0.113.10:7")
+	// The client sends its flows to public destinations, as a member
+	// would. The gateway refuses loopback and every other special-purpose
+	// range, documentation ranges included, so the agent's test routes send
+	// these to the loopback test servers.
+	tcpDst = netip.MustParseAddrPort("11.22.33.44:80")
+	udpDst = netip.MustParseAddrPort("11.22.33.44:7")
 )
 
 // waitFor bounds every wait for something that should happen soon.

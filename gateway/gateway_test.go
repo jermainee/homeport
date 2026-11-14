@@ -32,7 +32,7 @@ func TestFetchThroughGatewayIsMeteredExactly(t *testing.T) {
 	}
 	client := newClient(t, gw, key, peerIP)
 
-	got := client.get(t, "http://203.0.113.10/")
+	got := client.get(t, "http://11.22.33.44/")
 	if sum(got) != sum(body) {
 		t.Fatalf("body differs: got %d bytes", len(got))
 	}
@@ -63,7 +63,7 @@ func TestRemovedPeerIsCutOff(t *testing.T) {
 		t.Fatalf("add peer: %v", err)
 	}
 	client := newClient(t, gw, key, peerIP)
-	if got := string(client.get(t, "http://203.0.113.10/")); got != "hello" {
+	if got := string(client.get(t, "http://11.22.33.44/")); got != "hello" {
 		t.Fatalf("before removal: got %q", got)
 	}
 
@@ -71,7 +71,7 @@ func TestRemovedPeerIsCutOff(t *testing.T) {
 		t.Fatalf("remove peer: %v", err)
 	}
 
-	if err := client.tryGet("http://203.0.113.10/", 2*time.Second); err == nil {
+	if err := client.tryGet("http://11.22.33.44/", 2*time.Second); err == nil {
 		t.Fatal("removed peer could still fetch")
 	}
 }
@@ -88,7 +88,7 @@ func TestRefusedFlowResetsTheClientAtOnce(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("the handshake completed; a refused flow must be reset before it opens")
@@ -116,7 +116,7 @@ func TestReAddingAPeerKeepsItsUsage(t *testing.T) {
 		t.Fatalf("add peer: %v", err)
 	}
 	client := newClient(t, gw, key, peer.IPv4)
-	client.get(t, "http://203.0.113.10/")
+	client.get(t, "http://11.22.33.44/")
 	before := waitStable(t, 300*time.Millisecond, func() gateway.Usage { return gw.PeerUsage(peer.IPv4) })
 
 	if err := gw.AddPeer(peer); err != nil {
@@ -151,7 +151,7 @@ func TestRemovePeerReturnsItsFinalUsage(t *testing.T) {
 		t.Fatalf("add peer: %v", err)
 	}
 	client := newClient(t, gw, key, peerIP)
-	client.get(t, "http://203.0.113.10/")
+	client.get(t, "http://11.22.33.44/")
 	c := waitStable(t, 300*time.Millisecond, func() counters {
 		return counters{gw.PeerUsage(peerIP), client.tun.sent.Load(), client.tun.received.Load()}
 	})
@@ -181,13 +181,13 @@ func TestPendingFlowsAreCappedPerPeer(t *testing.T) {
 	defer cancel()
 	for port := uint16(1); port <= 2; port++ {
 		go func() {
-			_, _ = client.net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), port))
+			_, _ = client.net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(netip.MustParseAddr("11.22.33.44"), port))
 		}()
 	}
 	waitUntil(t, func() bool { return dialer.parked.Load() == 2 })
 
 	start := time.Now()
-	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:3"))
+	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:3"))
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("a third pending flow was accepted")
@@ -229,7 +229,7 @@ func TestCloseClosesUpstreamConnections(t *testing.T) {
 	client := newClient(t, gw, key, peerIP)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	conn, err := client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
 	if err != nil {
 		t.Fatalf("dial through gateway: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestUDPFlowIsRelayedAndMetered(t *testing.T) {
 	}
 	client := newClient(t, gw, key, peerIP)
 
-	reply := client.udpRoundTrip(t, netip.MustParseAddrPort("203.0.113.10:7"), []byte("ping"))
+	reply := client.udpRoundTrip(t, netip.MustParseAddrPort("11.22.33.44:7"), []byte("ping"))
 	if string(reply) != "ping" {
 		t.Fatalf("got %q, want the echo", reply)
 	}

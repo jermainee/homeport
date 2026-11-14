@@ -21,9 +21,9 @@ The wire format is [`relay-protocol/`](../relay-protocol/README.md).
 
 The policy runs in the dialer's `Control` hook, on the address the socket is about to connect to. The agent refuses a flow with `POLICY` if:
 
-- the destination is in a private, local or special-purpose range: `0/8`, `10/8`, `100.64/10`, `127/8`, `169.254/16`, `172.16/12`, `192.0.0/24`, `192.168/16`, `198.18/15`, the documentation ranges, multicast, `240/4`, `::/96`, `fc00::/7`, `fe80::/10`, `fec0::/10`, IPv6 multicast and the other non-global IPv6 ranges. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are checked by the IPv4 address inside them.
+- the destination is in a private, local or special-purpose range (`relayprotocol.SpecialPurpose`, which the gateway applies too): `0/8`, `10/8`, `100.64/10`, `127/8`, `169.254/16`, `172.16/12`, `192.0.0/24`, `192.168/16`, `198.18/15`, the documentation ranges, multicast, `240/4`, `::/96`, `fc00::/7`, `fe80::/10`, `fec0::/10`, IPv6 multicast and the other non-global IPv6 ranges. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are checked by the IPv4 address inside them.
 - the destination is the line's own public IP (`hello_ack`'s `observed_ip`);
-- the destination is on a network of one of the machine's own interfaces, which keeps an IPv6 home `/64` or a LAN with public IPv4 addresses out of reach;
+- the destination is on a network of one of the machine's own interfaces, which keeps a LAN with public IPv4 addresses out of reach. Each global IPv6 address (`2000::/3`) counts as the `/56` around it, the prefix most ISPs delegate to a home, so the home's other `/64`s (guest, IoT) and an address DHCPv6 reports as a `/128` are covered too;
 - the port is 25, 465 or 587 (mail).
 
 DNS answers get the same address rules: an answer that points into the home network is dropped. Names that exist only inside a network (`.local`, `localhost`, `home.arpa`, `.internal`, `.lan`, `.home`, `.localdomain`, `fritz.box` and single-label names) get NXDOMAIN without a lookup. A lookup would send mDNS or router queries into the home network, and its timing would reveal which devices exist there.

@@ -288,10 +288,18 @@ Every session ties a verified buyer to a verified seller, the exit refuses the t
 - No inbound connections, no port forwarding, no hosting.
 - Allowed use: personal use by the verified buyer. Banned: reselling, scraping, account farming, bots, ad fraud.
 
+**Isolation between members**
+
+- Members who use lines never reach each other. Each device has its own tunnel address, and the gateway ends every flow in its own network stack: it never routes a packet from one device to another.
+- The gateway refuses every flow to the tunnel networks (10.77.0.0/16 and fd77::/64), except DNS on the virtual resolver 10.77.0.1, before any agent sees it. A device cannot reach another member's device, an open port on it, or the gateway's other ports.
+- WireGuard drops every packet whose source is not the sending device's own tunnel address, so no device can send as another.
+- The gateway sends no ICMP, so another member's address never answers a ping.
+- Two members on the same line share only its exit. A flow reaches the agent as a destination alone, without the member's identity, and each device is metered on its own.
+
 **Seller home network protection**
 
-- The agent refuses all private, local and special ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, multicast, fc00::/7, fe80::/10 and the other ranges that are not globally reachable, plus the seller's own public IP.
-- It also refuses the networks of the seller's own machine. On an IPv6 home network every device has a global address, so this keeps the home's /64 out of reach.
+- The gateway and the agent both refuse all private, local and special ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, multicast, fc00::/7, fe80::/10 and the other ranges that are not globally reachable. The gateway refuses them before any agent sees the flow; the agent refuses them again, so a bug on either side alone opens nothing. One list in `relay-protocol` serves both.
+- The agent also refuses the seller's own public IP and the networks of the seller's own machine. On an IPv6 home network every device has a global address, so it treats each of the machine's global IPv6 addresses as the /56 around it, the prefix most ISPs delegate to a home. That covers the home's other /64s, such as a guest or IoT network. A home with a larger delegation (a /48) keeps the /56 around the machine out of reach, but not the rest.
 - Its DNS answers never point into the home network, and it does not look up names that exist only there, such as `.local` and single-label names. Buyers cannot map the seller's devices through DNS.
 - It pauses sharing while another VPN carries the seller's default route, so buyers' traffic never leaves through someone else's tunnel.
 - It runs without admin rights in socket mode, updates itself from signed releases, and is open source so sellers can audit it.
@@ -313,9 +321,18 @@ Every session ties a verified buyer to a verified seller, the exit refuses the t
 4. Authorities receive buyer identity only on a valid legal order.
 5. Severe or repeated abuse means a permanent ban, enforced through the identity hash.
 
-**Buyer protection from sellers**
+**Buyer protection from sellers: the trust model**
 
-A seller's machine can see which servers a buyer connects to, as any ISP can, but not the content of encrypted HTTPS traffic. Buyers are told this up front. Sellers are identity-verified and bound by terms; a tampered agent or a byte-count mismatch leads to a ban and forfeiture of pending earnings.
+A buyer's traffic passes three parties besides the website. What each can see and change:
+
+| Party | Sees | Could change | What protects the buyer |
+| --- | --- | --- | --- |
+| Homeport's gateway | Everything inside the tunnel, as any VPN provider does: destinations, DNS names, unencrypted content | Unencrypted traffic | It logs session metadata only, never destinations or content. HTTPS stays end to end between the buyer's device and the website. |
+| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | DNS answers and unencrypted traffic | HTTPS stays end to end. Sellers are identity-verified and bound by terms. |
+| The seller's ISP and home network | The same as the seller's machine | DNS answers and unencrypted traffic | HTTPS stays end to end. |
+| Other members | Nothing | Nothing | Isolation between members (above) |
+
+Buyers are told this up front. A tampered agent or a byte-count mismatch leads to a ban and forfeiture of pending earnings.
 
 ## Legal and compliance (Germany and EU)
 

@@ -5,7 +5,9 @@ Homeport's edge gateway. It terminates members' WireGuard tunnels in userspace, 
 ## How it works
 
 - One wireguard-go device serves every peer. Each peer may only send from its own tunnel addresses (`/32` and `/128`), so a packet's source address identifies the peer.
-- `internal/wgstack` is a gVisor network stack in promiscuous mode with spoofing on. It accepts flows to any destination through gVisor's TCP and UDP forwarders.
+- `internal/wgstack` is a gVisor network stack in promiscuous mode with spoofing on. It ends every TCP and UDP flow itself, through gVisor's TCP and UDP forwarders, and never routes a packet from one peer to another.
+- **Isolation:** before the access check, each flow's destination is checked. The virtual resolver's DNS port (`Config.DNS`, port 53) is allowed. Everything in `relayprotocol.SpecialPurpose` is refused before any agent sees it: the tunnel networks (`10.77.0.0/16`, `fd77::/64`), so members never reach each other or the gateway's other ports, and every private, local or special-purpose range a home can number its devices in. IPv4-mapped destinations are refused too. The agent applies the same list again.
+- The stack sends peers no ICMP. In promiscuous mode gVisor's IPv6 layer would answer echo requests for any address, so another member's address would seem to answer a ping.
 - A TCP handshake with the client completes only after the `FlowDialer` has connected the far side. A refused flow reaches the client as a reset.
 - The meter counts inner IP packets at the boundary between WireGuard and the stack, in both directions. These are the bytes members are charged for (10 credits per MB, see `AGENTS.md`). Packets from or to unknown tunnel addresses are dropped uncounted.
 - Down bytes are counted when the stack hands a packet to WireGuard. If WireGuard then drops it, for example a TCP retransmission to a peer that just went offline, it still counts.
