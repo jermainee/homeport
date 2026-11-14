@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Homeport control API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     The contract between the Homeport control API (`api/`), the edge gateway
     (`gateway/`) and the apps. Both sides build against this file.
@@ -233,9 +233,9 @@ paths:
                   externalValue: examples/gateway/lease-denied.json
         "403":
           description: |
-            The peer is unknown, deleted or suspended, or its member is no
-            longer allowed to use the line. The gateway closes the session at
-            once.
+            The peer is unknown, deleted or suspended, its member is no
+            longer allowed to use the line, or `line_id` is not one of the
+            peer's lines (any more). The gateway closes the session at once.
           content:
             application/json:
               schema:
@@ -870,6 +870,87 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
   /v1/wireguard/peers/{peer_id}:
+    patch:
+      tags: [use]
+      operationId: updateWireguardPeer
+      summary: Move a WireGuard peer to another line, or change its failover
+      description: |
+        The device keeps its `.conf` file: the file names the gateway, and
+        the line a peer exits through is chosen on the gateway. Within about
+        30 seconds, at its next config poll, the gateway ends the peer's
+        session on the old line, and the peer's next flow exits through the
+        new one.
+
+        A new `line_id` gets the same checks as `createWireguardPeer`. It must
+        also be on the same gateway as the peer's current line, since that is
+        the gateway the device's `.conf` file names.
+      security:
+        - memberSession: []
+      parameters:
+        - $ref: "#/components/parameters/PeerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WireguardPeerUpdate"
+            examples:
+              move:
+                summary: Move to another line, failover within the city only
+                externalValue: examples/member/wireguard-peer-update.json
+        x-max-body-bytes: 16384
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireguardPeer"
+              examples:
+                updated:
+                  summary: The peer on its new line
+                  externalValue: examples/member/wireguard-peer.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `identity_required`, or `line_not_allowed`: the line is the
+            member's own, or linked to them.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [identity_required, line_not_allowed]
+        "404":
+          description: |
+            The peer does not exist or belongs to someone else, or the line
+            is not shared (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: |
+            `line_full`, or `line_on_other_gateway`: the line is served by
+            another gateway than the one the device's `.conf` file names.
+            Create a new peer for that line instead.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      error:
+                        enum: [line_full, line_on_other_gateway]
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
     delete:
       tags: [use]
       operationId: deleteWireguardPeer
@@ -1132,10 +1213,17 @@ components:
     GatewayConfig:
       type: object
       additionalProperties: false
-      required: [etag, peers, lines, topup_hostnames]
+      required: [etag, peers, lines, topup_hostnames, failback_seconds]
       properties:
         etag:
           $ref: "#/components/schemas/ETag"
+        failback_seconds:
+          description: |
+            How long a line must be online without a break before a peer's
+            session on a later line of its order moves back to it (see
+            `fallback_line_ids`).
+          type: integer
+          minimum: 0
         topup_hostnames:
           description: |
             Hosts a peer without credits can still reach: the gateway forwards
@@ -1157,7 +1245,7 @@ components:
     GatewayPeer:
       type: object
       additionalProperties: false
-      required: [peer_id, member_id, public_key, ipv4, ipv6, line_id]
+      required: [peer_id, member_id, public_key, ipv4, ipv6, line_id, fallback_line_ids]
       properties:
         peer_id:
           $ref: "#/components/schemas/Id"
@@ -1175,8 +1263,30 @@ components:
           type: string
           format: ipv6
         line_id:
-          description: The line the peer's traffic exits through.
+          description: |
+            The line the member chose for the peer. The peer's traffic exits
+            through it whenever it is online.
           $ref: "#/components/schemas/Id"
+        fallback_line_ids:
+          description: |
+            Lines that take over while `line_id` is offline, best first:
+            lines in the same city, then lines in the same country, as the
+            peer's `failover` setting allows. Each is listed in `lines`, so it
+            is on this gateway, and none is the member's own or linked to
+            them. Empty when failover is off or no line qualifies.
+
+            A session exits through one line from start to end. The gateway
+            starts each session on the first online line of `line_id`, then
+            `fallback_line_ids`. When the session's line goes offline, the
+            gateway ends the session, and the peer's next flow starts one on
+            the next online line. A session on a fallback line ends once a
+            line earlier in that order has been online for `failback_seconds`
+            without a break, so the peer moves back to its chosen line.
+            Ending a session resets the peer's open flows.
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Id"
     GatewayLine:
       type: object
       additionalProperties: false
@@ -1202,6 +1312,14 @@ components:
         session_id:
           description: The gateway's session for this peer, as in usage events.
           $ref: "#/components/schemas/UuidV7"
+        line_id:
+          description: |
+            The line the session exits through: the peer's `line_id` or one
+            of its `fallback_line_ids`. The lease and the session's usage
+            events name this line, and its owner earns from the session.
+            Defaults to the peer's `line_id`. A renewal names the line of the
+            lease it supersedes.
+          $ref: "#/components/schemas/Id"
         supersedes_lease_id:
           description: The session's current lease, when this is a renewal.
           $ref: "#/components/schemas/Id"
@@ -1697,14 +1815,26 @@ components:
     WireguardPeer:
       type: object
       additionalProperties: false
-      required: [peer_id, name, line_id, public_key, ipv4, ipv6, created_at]
+      required: [peer_id, name, line_id, failover, exit_line, public_key, ipv4, ipv6, created_at]
       properties:
         peer_id:
           $ref: "#/components/schemas/Id"
         name:
           type: string
         line_id:
+          description: The line the member chose. The peer exits through it whenever it is online.
           $ref: "#/components/schemas/Id"
+        failover:
+          $ref: "#/components/schemas/Failover"
+        exit_line:
+          description: |
+            The line the peer's current session exits through, as the
+            gateway last reported it: `line_id`, or a fallback line while
+            `line_id` is offline. Null when the peer has no session, or the
+            gateway reported none in the last 3 minutes.
+          anyOf:
+            - $ref: "#/components/schemas/ExitLine"
+            - type: "null"
         public_key:
           $ref: "#/components/schemas/Key32"
         ipv4:
@@ -1715,3 +1845,41 @@ components:
           format: ipv6
         created_at:
           $ref: "#/components/schemas/Timestamp"
+    ExitLine:
+      type: object
+      additionalProperties: false
+      required: [line_id, country, city, since]
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        country:
+          description: ISO 3166-1 alpha-2 code, or null when the line's country is unknown.
+          type: [string, "null"]
+          pattern: "^[A-Z]{2}$"
+        city:
+          type: [string, "null"]
+        since:
+          description: When the session on this line started.
+          $ref: "#/components/schemas/Timestamp"
+    Failover:
+      description: |
+        Where the peer's traffic goes while its line is offline:
+        - `country` (default): another line in the same city, else one in
+          the same country;
+        - `city`: another line in the same city only;
+        - `off`: nowhere; the peer has no connection until its line is back.
+
+        It moves back to its own line once that line has been online for 5
+        minutes. A fallback line is shared, on the same gateway, has room
+        for the member, and is never the member's own or linked to them.
+      type: string
+      enum: [country, city, "off"]
+    WireguardPeerUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        line_id:
+          $ref: "#/components/schemas/Id"
+        failover:
+          $ref: "#/components/schemas/Failover"

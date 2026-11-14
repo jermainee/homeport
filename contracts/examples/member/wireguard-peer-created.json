@@ -3,6 +3,8 @@
     "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
     "name": "iPhone",
     "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+    "failover": "country",
+    "exit_line": null,
     "public_key": "ID8qVleL1sxlKXgzZQbzTPuAdlP3h/m37nfq8+IB9DA=",
     "ipv4": "10.77.0.2",
     "ipv6": "fd77:6870::2",
