@@ -272,24 +272,34 @@ func TestTheSessionStopsAtTheLeaseAndClosesAfterGrace(t *testing.T) {
 	})
 	// The gateway's clock: grace starts when the lease runs out, lasts
 	// grace_seconds and ends at the next one-second step after grace_until.
-	// The top-up line's own time can trail that clock read by the flow
-	// reset before it, so grace_until is the reference. The close is
-	// logged just after its clock read, which is at or after grace_until.
-	var graceUntil, closedAt time.Time
+	// Each line is logged just after its clock read, so the top-up line
+	// comes just after grace's start (grace_until less the grace) and the
+	// close comes at or after grace_until.
+	var toppedUpAt, graceUntil, closedAt time.Time
 	graceSeconds := -1.0
 	for _, rec := range logRecords(t, s.gwLogs) {
+		at, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(rec["time"]))
 		switch {
 		case rec["msg"] == "session top-up only":
+			toppedUpAt = at
 			graceUntil, _ = time.Parse(time.RFC3339Nano, fmt.Sprint(rec["grace_until"]))
 			graceSeconds, _ = rec["grace_seconds"].(float64)
 		case rec["msg"] == "session ended" && rec["reason"] == "grace over":
-			closedAt, _ = time.Parse(time.RFC3339Nano, fmt.Sprint(rec["time"]))
+			closedAt = at
 		}
 	}
-	if graceUntil.IsZero() || graceSeconds != grace {
+	switch graceStart := graceUntil.Add(-grace * time.Second); {
+	case graceUntil.IsZero() || graceSeconds != grace:
 		t.Errorf("the top-up line gives grace_until %v and grace_seconds %v, want a time and %d", graceUntil, graceSeconds, grace)
-	} else if d := closedAt.Sub(graceUntil); d < 0 || d > 2*time.Second {
-		t.Errorf("the session closed %v after grace_until (%v, closed at %v), want within a step and a second", d, graceUntil, closedAt)
+	case closedAt.IsZero():
+		t.Error(`no session ended with reason "grace over"`)
+	default:
+		if d := toppedUpAt.Sub(graceStart); d < 0 || d > time.Second {
+			t.Errorf("the top-up line came %v after grace began (%v), want just after", d, graceStart)
+		}
+		if d := closedAt.Sub(graceUntil); d < 0 || d > 2*time.Second {
+			t.Errorf("the session closed %v after grace_until (%v, closed at %v), want within a step and a second", d, graceUntil, closedAt)
+		}
 	}
 
 	// The session is closed: the peer is cut off, and nothing more is metered.
