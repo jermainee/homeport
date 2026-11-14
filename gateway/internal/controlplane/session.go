@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/jermainee/homeport/gateway"
@@ -22,6 +23,12 @@ const (
 	renewLead    = time.Minute      // renew this long before the current lease expires
 	cooldown     = time.Minute      // a closed session's peer is cut off this long
 	defaultGrace = 5 * time.Minute  // top-up-only time before any lease said otherwise
+
+	// OfflineHold is how long a session stays on its line after the line
+	// goes offline, so an agent that reconnects within seconds keeps the
+	// peer on its line (and its IP) instead of moving it.
+	OfflineHold     = 10 * time.Second
+	defaultFailback = 5 * time.Minute // until a config says otherwise
 )
 
 type sessionState int
@@ -98,20 +105,24 @@ func (c *Controller) Access(ctx context.Context, p gateway.Peer) gateway.Access 
 	}
 }
 
-// startSessionLocked starts a session for ps and asks for its lease. It
-// does not when the peer's line is offline or is the member's own: no flow
+// startSessionLocked starts a session for ps on the first online line of
+// its order (its own line, then its fallback lines), sends its flows there
+// and asks for its lease. It does not when none of them is online: no flow
 // could pass then, and the bytes so far go into the next session.
 func (c *Controller) startSessionLocked(ps *peerState, now time.Time) bool {
-	line, ok := c.lines[ps.peer.LineID]
-	if !ok || line.OwnerMemberID == ps.peer.MemberID {
-		return false
-	}
 	c.lineMu.Lock()
-	ip, online := c.lineIPs[ps.peer.LineID]
+	lineID, ip := "", netip.Addr{}
+	for _, id := range ps.cfg.lines() {
+		if addr, online := c.lineIPs[id]; online && c.usableLocked(ps, id) {
+			lineID, ip = id, addr
+			break
+		}
+	}
 	c.lineMu.Unlock()
-	if !online {
+	if lineID == "" {
 		return false
 	}
+	c.gw.SetPeerLine(ps.peer.PublicKey, lineID)
 	start := now.Truncate(time.Millisecond)
 	s := &session{
 		id:          newUUIDv7(now),
@@ -119,7 +130,7 @@ func (c *Controller) startSessionLocked(ps *peerState, now time.Time) bool {
 		startedAt:   start,
 		periodStart: start,
 		exitIP:      ip,
-		lineID:      ps.peer.LineID,
+		lineID:      lineID,
 		denyGrace:   -1,
 	}
 	ps.sess = s
@@ -160,7 +171,49 @@ func (c *Controller) Step() {
 	}
 }
 
+// usableLocked reports whether the peer's sessions may exit through the
+// line: it is in the config and not the member's own.
+func (c *Controller) usableLocked(ps *peerState, lineID string) bool {
+	line, ok := c.lines[lineID]
+	return ok && line.OwnerMemberID != ps.peer.MemberID
+}
+
+// moveReasonLocked says why an active session should end so that the peer's
+// next flow starts one on another line, or "" when it stays: its line is no
+// longer one of the peer's, has been offline for OfflineHold, or a line
+// earlier in the peer's order has been online for the config's failback
+// time. Sessions in grace stay where they are until grace ends.
+func (c *Controller) moveReasonLocked(ps *peerState, s *session, now time.Time) string {
+	if s.state != stateActive {
+		return ""
+	}
+	order := ps.cfg.lines()
+	at := slices.Index(order, s.lineID)
+	if at < 0 || !c.usableLocked(ps, s.lineID) {
+		return "line no longer the peer's"
+	}
+	c.lineMu.Lock()
+	defer c.lineMu.Unlock()
+	if down, ok := c.lineDown[s.lineID]; ok && now.Sub(down) >= OfflineHold {
+		return "line offline"
+	}
+	for _, id := range order[:at] {
+		if up, ok := c.lineUp[id]; ok && c.usableLocked(ps, id) && now.Sub(up) >= c.failback {
+			return "earlier line back online"
+		}
+	}
+	return ""
+}
+
 func (c *Controller) stepSessionLocked(ps *peerState, s *session, u gateway.Usage, now time.Time) {
+	if reason := c.moveReasonLocked(ps, s, now); reason != "" {
+		// The peer stays on: its next flow starts a session on its best
+		// online line. Its open flows end here, so none stays on the old
+		// line, and the final event holds the resets' bytes.
+		c.gw.ResetPeerFlows(ps.peer.PublicKey)
+		c.endSessionLocked(ps, c.usageLocked(ps), now, reason)
+		return
+	}
 	if s.state == stateGrace && !now.Before(s.graceUntil) {
 		c.closeSessionLocked(ps, now, "grace over")
 		return
@@ -200,7 +253,7 @@ func (c *Controller) requestLeaseLocked(ps *peerState, s *session, now time.Time
 	if s.requestID == "" {
 		s.requestID = newUUIDv7(now)
 	}
-	req := LeaseRequest{RequestID: s.requestID, PeerID: ps.cfg.PeerID, SessionID: s.id}
+	req := LeaseRequest{RequestID: s.requestID, PeerID: ps.cfg.PeerID, SessionID: s.id, LineID: s.lineID}
 	if s.lease != nil {
 		req.SupersedesLeaseID = s.lease.LeaseID
 	}

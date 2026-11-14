@@ -36,10 +36,13 @@ type GatewaySelf struct {
 
 // Config is the body of GET /v1/gateway/config.
 type Config struct {
-	ETag           string       `json:"etag"`
-	TopUpHostnames []string     `json:"topup_hostnames"`
-	Peers          []ConfigPeer `json:"peers"`
-	Lines          []ConfigLine `json:"lines"`
+	ETag           string   `json:"etag"`
+	TopUpHostnames []string `json:"topup_hostnames"`
+	// FailbackSeconds is how long a line must be online without a break
+	// before a session on a later line of a peer's order moves back to it.
+	FailbackSeconds int          `json:"failback_seconds"`
+	Peers           []ConfigPeer `json:"peers"`
+	Lines           []ConfigLine `json:"lines"`
 }
 
 // ConfigPeer is a WireGuard peer the gateway serves.
@@ -49,7 +52,21 @@ type ConfigPeer struct {
 	PublicKey string `json:"public_key"`
 	IPv4      string `json:"ipv4"`
 	IPv6      string `json:"ipv6"`
-	LineID    string `json:"line_id"`
+	LineID    string `json:"line_id"` // the line the member chose
+	// FallbackLineIDs take over while LineID is offline, best first.
+	FallbackLineIDs []string `json:"fallback_line_ids"`
+}
+
+// lines is the order in which the peer's sessions pick a line: its own
+// line, then its fallback lines.
+func (p ConfigPeer) lines() []string {
+	return append([]string{p.LineID}, p.FallbackLineIDs...)
+}
+
+// sameDevice reports whether a and b are the same WireGuard device: the
+// same key, addresses and member. Its lines may differ.
+func sameDevice(a, b ConfigPeer) bool {
+	return a.PeerID == b.PeerID && a.MemberID == b.MemberID && a.PublicKey == b.PublicKey && a.IPv4 == b.IPv4 && a.IPv6 == b.IPv6
 }
 
 // ConfigLine is a shared line whose agent may connect.
@@ -64,6 +81,7 @@ type LeaseRequest struct {
 	RequestID         string `json:"request_id"`
 	PeerID            string `json:"peer_id"`
 	SessionID         string `json:"session_id"`
+	LineID            string `json:"line_id"` // the line the session exits through
 	SupersedesLeaseID string `json:"supersedes_lease_id,omitempty"`
 }
 
