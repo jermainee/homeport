@@ -180,7 +180,7 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 	s := newStack(t)
 	s.get("/blob/1000") // the handshake, the session and its lease are done now
 
-	for _, dst := range []string{"10.0.0.1:80", "192.168.1.1:80", netip.AddrPortFrom(tcpDst.Addr(), 25).String()} {
+	for _, dst := range []string{"10.0.0.1:80", "192.168.1.1:80", "10.77.0.1:80", netip.AddrPortFrom(tcpDst.Addr(), 25).String()} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		start := time.Now()
 		conn, err := s.client.Net.DialContext(ctx, "tcp", dst)
@@ -196,12 +196,13 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 			t.Errorf("a connection to %s was refused after %v", dst, elapsed)
 		}
 	}
-	// The agent refused them by its policy, never dialing them. When the
-	// refusal takes longer than the client's SYN timeout (1 s, as under the
-	// race detector), a retransmitted SYN can reach the gateway after its
-	// RST and is refused as a flow of its own, so a destination may be
-	// refused more than once.
-	want := map[string]int{"special_range": 2, "blocked_port": 1}
+	// The gateway refused the home networks and its own tunnel address
+	// before the agent saw them. The agent refused the mail port by its
+	// policy, never dialing it. When the refusal takes longer than the
+	// client's SYN timeout (1 s, as under the race detector), a
+	// retransmitted SYN can reach the gateway after its RST and is refused
+	// as a flow of its own, so a destination may be refused more than once.
+	want := map[string]int{"blocked_port": 1}
 	var got map[string]int
 	waitUntil(t, "the agent logged its refusals", func() bool {
 		got = map[string]int{}

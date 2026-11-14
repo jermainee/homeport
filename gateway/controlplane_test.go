@@ -164,7 +164,7 @@ func TestGatewayRunsFromTheControlAPI(t *testing.T) {
 	}
 	client := newClient(t, gw, clientKey, netip.MustParseAddr("10.77.0.2"))
 
-	if got := client.get(t, "http://203.0.113.10/"); len(got) != 300_000 {
+	if got := client.get(t, "http://11.22.33.44/"); len(got) != 300_000 {
 		t.Fatalf("got %d bytes through the gateway", len(got))
 	}
 	final := waitStable(t, 300*time.Millisecond, func() gateway.Usage { return gw.PeerUsage(netip.MustParseAddr("10.77.0.2")) })

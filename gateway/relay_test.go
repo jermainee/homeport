@@ -176,12 +176,12 @@ func TestFlowsAreRelayedToTheLinesAgent(t *testing.T) {
 	}
 	client := newClient(t, gw, key, peerIP)
 
-	if got := string(client.get(t, "http://203.0.113.10/")); got != "hello from home" {
+	if got := string(client.get(t, "http://11.22.33.44/")); got != "hello from home" {
 		t.Fatalf("got %q through the agent", got)
 	}
 	open := <-agent.opens
-	if open.Kind != relayprotocol.KindTCP || open.Dst != netip.MustParseAddrPort("203.0.113.10:80") {
-		t.Fatalf("agent got %+v, want TCP to 203.0.113.10:80", open)
+	if open.Kind != relayprotocol.KindTCP || open.Dst != netip.MustParseAddrPort("11.22.33.44:80") {
+		t.Fatalf("agent got %+v, want TCP to 11.22.33.44:80", open)
 	}
 }
 
@@ -249,7 +249,7 @@ func assertResetQuickly(t *testing.T, c *testClient) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("the connection opened; it should have been refused")
@@ -317,7 +317,7 @@ func TestNewAgentConnectionReplacesTheOld(t *testing.T) {
 	}
 
 	waitClosed(t, f.agent.conn)
-	if got := string(f.client.get(t, "http://203.0.113.10/")); got != "from the new agent" {
+	if got := string(f.client.get(t, "http://11.22.33.44/")); got != "from the new agent" {
 		t.Fatalf("got %q; flows should go to the newer connection", got)
 	}
 }
@@ -354,14 +354,14 @@ func TestDNSQueriesBecomeDNSFlows(t *testing.T) {
 func TestUDPFlowsAreRelayedAsFrames(t *testing.T) {
 	f := newRelayFixture(t, echoFrames(""), "member-user")
 
-	reply := f.client.udpRoundTrip(t, netip.MustParseAddrPort("203.0.113.10:7"), []byte("ping"))
+	reply := f.client.udpRoundTrip(t, netip.MustParseAddrPort("11.22.33.44:7"), []byte("ping"))
 
 	if string(reply) != "ping" {
 		t.Fatalf("got %q back", reply)
 	}
 	open := <-f.agent.opens
-	if open.Kind != relayprotocol.KindUDP || open.Dst != netip.MustParseAddrPort("203.0.113.10:7") {
-		t.Fatalf("agent got %+v, want UDP to 203.0.113.10:7", open)
+	if open.Kind != relayprotocol.KindUDP || open.Dst != netip.MustParseAddrPort("11.22.33.44:7") {
+		t.Fatalf("agent got %+v, want UDP to 11.22.33.44:7", open)
 	}
 }
 
@@ -400,7 +400,7 @@ func TestAgentResetReachesTheClientAsAReset(t *testing.T) {
 	}, "member-user")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := f.client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	conn, err := f.client.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

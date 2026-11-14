@@ -186,7 +186,11 @@ func (s *Stack) WriteNotify() {
 }
 
 // Read hands the stack's outgoing packets to WireGuard, counting each one
-// against the peer it goes to.
+// against the peer it goes to. ICMP is never sent: in promiscuous mode,
+// gVisor's IPv6 layer answers echo requests for any destination, which
+// would let a peer see another member's tunnel address, or any address,
+// answer as if it were reachable. The gateway has no other ICMP for peers:
+// every TCP and UDP flow ends at its own stack.
 func (s *Stack) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	for {
 		var view *buffer.View
@@ -202,7 +206,7 @@ func (s *Stack) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		}
 		packet := bufs[0][offset : offset+n]
 		dst, ok := destinationOf(packet)
-		if !ok || !s.meter.countDown(dst, uint64(len(packet))) {
+		if !ok || isICMP(packet) || !s.meter.countDown(dst, uint64(len(packet))) {
 			continue
 		}
 		sizes[0] = n
@@ -541,6 +545,18 @@ func destinationOf(packet []byte) (netip.Addr, bool) {
 		return addrFrom(header.IPv6(packet).DestinationAddress()), true
 	}
 	return netip.Addr{}, false
+}
+
+// isICMP reports whether one of the stack's own packets carries ICMP or
+// ICMPv6. The stack puts no extension headers before ICMPv6.
+func isICMP(packet []byte) bool {
+	switch packet[0] >> 4 {
+	case 4:
+		return header.IPv4(packet).TransportProtocol() == header.ICMPv4ProtocolNumber
+	case 6:
+		return header.IPv6(packet).TransportProtocol() == header.ICMPv6ProtocolNumber
+	}
+	return false
 }
 
 var _ tun.Device = (*Stack)(nil)

@@ -25,7 +25,7 @@ WireGuard client ──WireGuard──▶ gateway ──QUIC──▶ agent ─�
 
 ### Destinations
 
-The client sends its flows to public-looking addresses, as a member would: TCP to `203.0.113.10:80`, UDP to `203.0.113.10:7`, and DNS for `origin.homeport.test` to the virtual resolver `10.77.0.1`. The gateway drops packets addressed to loopback, so the agent's e2e hook `RouteTestOrigin` connects those two destinations to the loopback origin. Only the agent's last step, the socket, differs from production. The agent's resolver is a fake that answers `origin.homeport.test` with `203.0.113.10`.
+The client sends its flows to public addresses, as a member would: TCP to `11.22.33.44:80`, UDP to `11.22.33.44:7`, and DNS for `origin.homeport.test` to the virtual resolver `10.77.0.1`. The gateway refuses loopback and every other special-purpose range (documentation ranges such as `203.0.113.0/24` included), so the agent's e2e hook `RouteTestOrigin` connects those two destinations to the loopback origin. Only the agent's last step, the socket, differs from production. The agent's resolver is a fake that answers `origin.homeport.test` with `11.22.33.44`.
 
 ### What the tests check
 

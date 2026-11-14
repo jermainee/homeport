@@ -89,7 +89,7 @@ func newOrigins(t *testing.T) byPort {
 	}
 }
 
-// getTLS fetches https://203.0.113.10/ through the tunnel, naming host in
+// getTLS fetches https://11.22.33.44/ through the tunnel, naming host in
 // the ClientHello.
 func (c *testClient) getTLS(host string, timeout time.Duration) error {
 	httpClient := &http.Client{
@@ -100,7 +100,7 @@ func (c *testClient) getTLS(host string, timeout time.Duration) error {
 			TLSClientConfig:   &tls.Config{ServerName: host, InsecureSkipVerify: true}, // #nosec G402 -- test origin
 		},
 	}
-	resp, err := httpClient.Get("https://203.0.113.10/")
+	resp, err := httpClient.Get("https://11.22.33.44/")
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (c *testClient) getTLS(host string, timeout time.Duration) error {
 func TestAccessControlIsAskedForEachFlowWithThePeer(t *testing.T) {
 	f := newAccessFixture(t, gateway.AccessFull, newOrigins(t))
 
-	if err := f.client.tryGet("http://203.0.113.10/", 5*time.Second); err != nil {
+	if err := f.client.tryGet("http://11.22.33.44/", 5*time.Second); err != nil {
 		t.Fatalf("GET with full access: %v", err)
 	}
 
@@ -137,13 +137,13 @@ func TestTopUpAccessAllowsOnlyDNSAndTLSToTheTopUpHosts(t *testing.T) {
 	if err := f.client.getTLS("other.example", 3*time.Second); err == nil {
 		t.Error("TLS to another host was allowed")
 	}
-	if err := f.client.tryGet("http://203.0.113.10/", 3*time.Second); err == nil {
+	if err := f.client.tryGet("http://11.22.33.44/", 3*time.Second); err == nil {
 		t.Error("plain HTTP was allowed")
 	}
 	if got := f.client.udpRoundTrip(t, netip.MustParseAddrPort("10.77.0.1:53"), []byte("query")); string(got) != "query" {
 		t.Errorf("DNS through the virtual resolver answered %q", got)
 	}
-	if err := f.client.tryUDP(netip.MustParseAddrPort("203.0.113.10:53"), time.Second); err == nil {
+	if err := f.client.tryUDP(netip.MustParseAddrPort("11.22.33.44:53"), time.Second); err == nil {
 		t.Error("DNS to another resolver was allowed")
 	}
 }
@@ -227,7 +227,7 @@ func (c *testClient) dialHeld(t *testing.T) net.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("203.0.113.10:80"))
+	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
 	if err != nil {
 		t.Fatalf("dial through the tunnel: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestFlowIsDecidedAgainWhenAResetRacesItsDecision(t *testing.T) {
 		t.Fatalf("add peer: %v", err)
 	}
 
-	if err := newClient(t, gw, key, peerIP).tryGet("http://203.0.113.10/", 3*time.Second); err == nil {
+	if err := newClient(t, gw, key, peerIP).tryGet("http://11.22.33.44/", 3*time.Second); err == nil {
 		t.Error("plain HTTP went through on a full-access answer that a reset had overtaken")
 	}
 }

@@ -58,9 +58,12 @@ type testClient struct {
 	dev *device.Device
 }
 
-func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr) *testClient {
+// newClient connects a client with key that sends from ip and any more
+// tunnel addresses.
+func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr, more ...netip.Addr) *testClient {
 	t.Helper()
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{ip}, []netip.Addr{netip.MustParseAddr("10.77.0.1")}, 1280)
+	addrs := append([]netip.Addr{ip}, more...)
+	tunDev, tnet, err := netstack.CreateNetTUN(addrs, []netip.Addr{netip.MustParseAddr("10.77.0.1")}, 1280)
 	if err != nil {
 		t.Fatalf("create client tun: %v", err)
 	}
@@ -85,7 +88,7 @@ func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr)
 func (c *testClient) handshakeWithin(t *testing.T, limit time.Duration) time.Duration {
 	t.Helper()
 	start := time.Now()
-	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("203.0.113.10:9"))
+	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("11.22.33.44:9"))
 	if err != nil {
 		t.Fatalf("dial UDP: %v", err)
 	}

@@ -54,7 +54,10 @@ type Config struct {
 	// waiting on the Dialer; more are refused with a reset. 0 means 64.
 	MaxPendingFlowsPerPeer int
 
-	// Access decides what each peer may reach. Nil allows everything.
+	// Access decides what each peer may reach. Nil gives every peer
+	// AccessFull. Either way, no peer reaches another member, the gateway
+	// (except DNS on the virtual resolver) or a private or other
+	// special-purpose range.
 	Access AccessControl
 
 	// OnLineEvent, if set, is called when a line's agent connects or
@@ -186,11 +189,7 @@ func New(cfg Config) (*Server, error) {
 		dialer = router{s}
 	}
 	s.meter = wgstack.NewMeter()
-	var pol wgstack.Policy
-	if cfg.Access != nil {
-		pol = policy{s}
-	}
-	st, err := wgstack.New(cfg.MTU, s.meter, dialer, pol, cfg.MaxPendingFlowsPerPeer)
+	st, err := wgstack.New(cfg.MTU, s.meter, dialer, policy{s}, cfg.MaxPendingFlowsPerPeer)
 	if err != nil {
 		s.closeRelay()
 		return nil, fmt.Errorf("gateway: %w", err)
@@ -295,11 +294,18 @@ func (r router) DialUDP(ctx context.Context, f Flow) (net.Conn, error) {
 	return r.s.relay.DialUDP(ctx, lineID, f.Dst)
 }
 
-// policy asks Config.Access what each new flow's peer may reach.
+// policy decides each new flow: first whether any peer may reach its
+// destination, then what Config.Access lets this peer reach.
 type policy struct{ s *Server }
 
 func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
 	s := p.s
+	if !destinationAllowed(s.cfg.DNS, f.Dst) {
+		return wgstack.Admission{}
+	}
+	if s.cfg.Access == nil {
+		return wgstack.Admission{Allow: true}
+	}
 	s.mu.Lock()
 	peer, ok := s.peers[s.byAddr[f.Peer]]
 	s.mu.Unlock()
@@ -318,6 +324,21 @@ func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
 		}
 	}
 	return wgstack.Admission{}
+}
+
+// destinationAllowed reports whether any peer may open a flow to dst: the
+// virtual resolver's DNS port (dns:53), or a globally reachable address.
+// Everything else is refused before it reaches an agent, whatever the line
+// or the agent's own policy: the tunnel networks, so members never reach
+// each other or the gateway, and every private, local or special-purpose
+// range a home can number its devices in. An IPv4-mapped address never
+// appears in a real packet, and relay-protocol cannot carry one, so it is
+// refused too.
+func destinationAllowed(dns netip.Addr, dst netip.AddrPort) bool {
+	if dst == netip.AddrPortFrom(dns, 53) {
+		return true
+	}
+	return !dst.Addr().Is4In6() && !relayprotocol.SpecialPurpose(dst.Addr())
 }
 
 // lineFor returns the line a peer's flows exit through. A member never
