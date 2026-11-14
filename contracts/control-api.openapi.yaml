@@ -798,6 +798,55 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/IdentityRequired"
+  /v1/lines/regions:
+    get:
+      tags: [use]
+      operationId: listLineRegions
+      summary: Where the member can get a line
+      description: |
+        The countries that have free lines for the member, with how many.
+        With `country`, that country alone, and its cities. A line counts
+        when it is sharing, online, has room for the member, and is not the
+        member's own or linked to them by household, device, card or
+        Connect account. A line whose city is not known counts for its
+        country only.
+
+        The counts are at most about a minute old, so a line that just came
+        online or filled up may be counted wrongly for that long. The
+        member's own and linked lines, and full lines the member already
+        uses, are accounted for at once.
+
+        Countries are ordered by code. Cities are ordered by most lines
+        first, then by name.
+      security:
+        - memberSession: []
+      parameters:
+        - name: country
+          in: query
+          required: false
+          description: Only this country, with its cities.
+          schema:
+            $ref: "#/components/schemas/CountryCode"
+      responses:
+        "200":
+          description: Regions with free lines. Empty when there are none.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineRegions"
+              examples:
+                countries:
+                  summary: Every country with free lines
+                  externalValue: examples/member/line-regions.json
+                cities:
+                  summary: Germany and its cities
+                  externalValue: examples/member/line-regions-country.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
   /v1/wireguard/peers:
     post:
       tags: [use]
@@ -1823,6 +1872,47 @@ components:
           type: boolean
         online:
           type: boolean
+    CountryCode:
+      description: ISO 3166-1 alpha-2 code.
+      type: string
+      pattern: "^[A-Z]{2}$"
+    LineRegions:
+      type: object
+      additionalProperties: false
+      required: [countries]
+      properties:
+        countries:
+          type: array
+          items:
+            $ref: "#/components/schemas/CountryRegion"
+    CountryRegion:
+      type: object
+      additionalProperties: false
+      required: [country, lines]
+      properties:
+        country:
+          $ref: "#/components/schemas/CountryCode"
+        lines:
+          description: Free lines in the country, those in unknown cities included.
+          type: integer
+          minimum: 1
+        cities:
+          description: Only when the request names the country.
+          type: array
+          items:
+            $ref: "#/components/schemas/CityRegion"
+    CityRegion:
+      type: object
+      additionalProperties: false
+      required: [city, lines]
+      properties:
+        city:
+          type: string
+          minLength: 1
+        lines:
+          description: Free lines in the city.
+          type: integer
+          minimum: 1
     WireguardPeerCreate:
       type: object
       additionalProperties: false

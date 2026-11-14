@@ -1,0 +1,6 @@
+{
+  "countries": [
+    { "country": "DE", "lines": 42 },
+    { "country": "PT", "lines": 7 }
+  ]
+}

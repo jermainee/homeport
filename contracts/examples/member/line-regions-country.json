@@ -1,0 +1,13 @@
+{
+  "countries": [
+    {
+      "country": "DE",
+      "lines": 42,
+      "cities": [
+        { "city": "Berlin", "lines": 17 },
+        { "city": "Munich", "lines": 9 },
+        { "city": "Frankfurt am Main", "lines": 6 }
+      ]
+    }
+  ]
+}

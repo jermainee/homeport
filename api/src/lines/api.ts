@@ -1,8 +1,10 @@
 import { Hono } from "hono";
 import type { SessionVariables } from "../auth/middleware";
+import { COUNTRY } from "../formats";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { requireVerifiedMember } from "../identity/require-verified";
+import { lineRegions } from "./regions";
 import { lineHasRoomSql, ownerIsLinkedSql } from "./rules";
 
 /**
@@ -108,6 +110,14 @@ linesApi.get("/available", requireVerifiedMember, async (c) => {
   });
 });
 
+linesApi.get("/regions", requireVerifiedMember, async (c) => {
+  const country = c.req.query("country");
+  if (country !== undefined && !COUNTRY.test(country)) {
+    return invalidRequest(c, "country must be an ISO 3166-1 alpha-2 code");
+  }
+  return c.json({ countries: await lineRegions(c.env.DB, c.get("member").id, country) });
+});
+
 linesApi.patch("/:id", requireVerifiedMember, async (c) => {
   const body = await readJsonObject(c.req.raw);
   const sharing = body?.["sharing_enabled"];
@@ -125,5 +135,5 @@ linesApi.patch("/:id", requireVerifiedMember, async (c) => {
 
 /** An ISO 3166-1 alpha-2 code, or null. Cloudflare sends "XX" or "T1" (Tor) when it does not know. */
 function countryCode(value: string | null | undefined): string | null {
-  return value && /^[A-Z]{2}$/.test(value) && value !== "XX" ? value : null;
+  return value && COUNTRY.test(value) && value !== "XX" ? value : null;
 }

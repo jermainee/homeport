@@ -1,0 +1,209 @@
+import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, describe, expect, it } from "vitest";
+import worker from "../src/index";
+import { RECOUNT_CRON, RECOUNT_STALE_MS } from "../src/lines/regions";
+import { expectContract } from "./contract";
+import { MAX_USERS_PER_LINE } from "../src/pricing";
+import { announcedGateway, gatewayCall, peerOn } from "./gateway-fixtures";
+import { signIn, uniqueEmail, uuidv7 } from "./helpers";
+import { link, send, sharingLine, verifiedMember } from "./share-fixtures";
+
+interface CityRegion {
+  city: string;
+  lines: number;
+}
+
+interface CountryRegion {
+  country: string;
+  lines: number;
+  cities?: CityRegion[];
+}
+
+type Member = { sessionToken: string; memberId: string };
+
+let gateway: { gatewayId: string; token: string };
+
+beforeAll(async () => {
+  gateway = await announcedGateway();
+});
+
+// User-assigned ISO 3166 codes, one per test, so counts don't add up across tests.
+const freeCodes = ["QM", "QN", "QO", "QP", "QQ", "QR", "QS", "QT", "QU", "QV", "QW", "QY", "QZ", "XA", "XB", "XC"];
+function freshCountry(): string {
+  const code = freeCodes.shift();
+  if (!code) throw new Error("out of test country codes");
+  return code;
+}
+
+/** A shared line in `country`/`city` whose agent is connected to the gateway. */
+async function onlineLine(country: string, city?: string, owner?: Member): Promise<string> {
+  const member = owner ?? (await verifiedMember());
+  const cf = { country, ...(city ? { city } : {}) } as Partial<IncomingRequestCfProperties>;
+  const lineId = await sharingLine(member.sessionToken, cf);
+  await env.DB.prepare(`UPDATE lines SET gateway_id = ? WHERE id = ?`).bind(gateway.gatewayId, lineId).run();
+  const response = await gatewayCall(gateway.token, "POST", "/v1/gateway/line-events", {
+    events: [
+      {
+        event_id: uuidv7(),
+        line_id: lineId,
+        type: "online",
+        observed_ip: "203.0.113.47",
+        agent_version: "0.1.0",
+        at: new Date().toISOString(),
+      },
+    ],
+  });
+  if (response.status !== 200) throw new Error(`line event failed: ${response.status}`);
+  return lineId;
+}
+
+/** Runs the cron trigger that recounts the free lines in each region. */
+async function recount(scheduledTime = Date.now()): Promise<void> {
+  const ctx = createExecutionContext();
+  worker.scheduled(createScheduledController({ scheduledTime, cron: RECOUNT_CRON }), env, ctx);
+  await waitOnExecutionContext(ctx);
+}
+
+async function regions(sessionToken: string, country?: string): Promise<CountryRegion[]> {
+  const response = await send("GET", `/v1/lines/regions${country ? `?country=${country}` : ""}`, sessionToken);
+  expect(response.status).toBe(200);
+  return (await expectContract<{ countries: CountryRegion[] }>("GET", "/v1/lines/regions", response)).countries;
+}
+
+describe("GET /v1/lines/regions", () => {
+  it("counts the free, online lines in each country", async () => {
+    const [here, there] = [freshCountry(), freshCountry()];
+    await onlineLine(here, "Alpha");
+    await onlineLine(here, "Beta");
+    await onlineLine(there);
+
+    await recount();
+    const countries = await regions((await verifiedMember()).sessionToken);
+
+    expect(countries).toContainEqual({ country: here, lines: 2 });
+    expect(countries).toContainEqual({ country: there, lines: 1 });
+  });
+
+  it("lists a country's cities, most lines first, when asked for that country", async () => {
+    const [here, elsewhere] = [freshCountry(), freshCountry()];
+    await onlineLine(here, "Beta");
+    await onlineLine(here, "Alpha");
+    await onlineLine(here, "Gamma");
+    await onlineLine(here, "Gamma");
+    await onlineLine(here);
+    await onlineLine(elsewhere, "Delta");
+
+    await recount();
+    const countries = await regions((await verifiedMember()).sessionToken, here);
+
+    expect(countries).toEqual([
+      {
+        country: here,
+        lines: 5,
+        cities: [
+          { city: "Gamma", lines: 2 },
+          { city: "Alpha", lines: 1 },
+          { city: "Beta", lines: 1 },
+        ],
+      },
+    ]);
+  });
+
+  it("returns no countries for a country without free lines", async () => {
+    await recount();
+    expect(await regions((await verifiedMember()).sessionToken, freshCountry())).toEqual([]);
+  });
+
+  it("counts only the lines the member could get: online, served, not linked, with room", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await onlineLine(here, "Alpha");
+    // Not counted: offline, the member's own, linked, owner suspended or unverified, full.
+    await sharingLine((await verifiedMember()).sessionToken, { country: here, city: "Alpha" } as Partial<IncomingRequestCfProperties>);
+    await onlineLine(here, "Alpha", member);
+    const household = await verifiedMember();
+    await link(member.memberId, household.memberId, "household");
+    await onlineLine(here, "Alpha", household);
+    const suspended = await verifiedMember();
+    await onlineLine(here, "Alpha", suspended);
+    await env.DB.prepare(`UPDATE members SET status = 'suspended' WHERE id = ?`).bind(suspended.memberId).run();
+    const lapsed = await verifiedMember();
+    await onlineLine(here, "Alpha", lapsed);
+    await env.DB.prepare(`UPDATE members SET identity_status = 'unverified' WHERE id = ?`).bind(lapsed.memberId).run();
+    const full = await onlineLine(here, "Alpha");
+    for (let i = 0; i < MAX_USERS_PER_LINE; i++) await peerOn(full);
+    await recount();
+
+    expect(await regions(member.sessionToken, here)).toEqual([
+      { country: here, lines: 1, cities: [{ city: "Alpha", lines: 1 }] },
+    ]);
+    expect(await regions(member.sessionToken)).toContainEqual({ country: here, lines: 1 });
+  });
+
+  it("still counts a full line the member already uses", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    const mine = await onlineLine(here, "Alpha");
+    await peerOn(mine, member);
+    for (let i = 1; i < MAX_USERS_PER_LINE; i++) await peerOn(mine);
+    await recount();
+
+    expect(await regions(member.sessionToken, here)).toEqual([
+      { country: here, lines: 1, cities: [{ city: "Alpha", lines: 1 }] },
+    ]);
+  });
+
+  it("counts a line that came online from the next recount, a minute later at most", async () => {
+    const here = freshCountry();
+    await recount();
+    await onlineLine(here, "Alpha");
+    const member = await verifiedMember();
+
+    const before = await regions(member.sessionToken, here);
+    await recount();
+    const after = await regions(member.sessionToken, here);
+
+    expect(before).toEqual([]);
+    expect(after).toEqual([{ country: here, lines: 1, cities: [{ city: "Alpha", lines: 1 }] }]);
+  });
+
+  it("recounts on request when no recount ran for a while, as in local development", async () => {
+    const here = freshCountry();
+    await recount(Date.now() - RECOUNT_STALE_MS - 1_000);
+    await onlineLine(here, "Alpha");
+
+    expect(await regions((await verifiedMember()).sessionToken, here)).toEqual([
+      { country: here, lines: 1, cities: [{ city: "Alpha", lines: 1 }] },
+    ]);
+  });
+
+  it("leaves out a line linked to the member at once, without waiting for a recount", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    const owner = await verifiedMember();
+    await onlineLine(here, "Alpha", owner);
+    await onlineLine(here, "Beta");
+    await recount();
+
+    await link(owner.memberId, member.memberId, "card");
+
+    expect(await regions(member.sessionToken, here)).toEqual([
+      { country: here, lines: 1, cities: [{ city: "Beta", lines: 1 }] },
+    ]);
+  });
+
+  it.each(["de", "DEU", "D1", ""])("rejects country=%j with 400", async (country) => {
+    const response = await send("GET", `/v1/lines/regions?country=${country}`, (await verifiedMember()).sessionToken);
+
+    expect(response.status).toBe(400);
+    expect(await expectContract("GET", "/v1/lines/regions", response)).toMatchObject({ error: "invalid_request" });
+  });
+
+  it("returns 403 identity_required before the member is verified", async () => {
+    const response = await send("GET", "/v1/lines/regions", (await signIn(uniqueEmail())).sessionToken);
+
+    expect(response.status).toBe(403);
+    expect(await expectContract("GET", "/v1/lines/regions", response)).toEqual({ error: "identity_required" });
+  });
+});

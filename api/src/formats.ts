@@ -6,6 +6,9 @@ export const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 /** UuidV7: created by the sender; its timestamp orders and expires it. */
 export const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/** CountryCode: an ISO 3166-1 alpha-2 code. */
+export const COUNTRY = /^[A-Z]{2}$/;
+
 /** Sha256Hex: 64 lowercase hex characters. */
 export const SHA256_HEX = /^[0-9a-f]{64}$/;
 
