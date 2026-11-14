@@ -188,6 +188,23 @@ func TestBuyCreditsRetriesWithTheSameRequest(t *testing.T) {
 	}
 }
 
+func TestBuyCreditsStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
+	f := newUse(t)
+	f.api.LoseNextResponse("POST /v1/checkout/sessions")
+	if _, err := f.use.BuyCredits(t.Context()); err == nil {
+		t.Fatal("BuyCredits succeeded although the answer was lost")
+	}
+	f.api.FailNext("POST /v1/checkout/sessions", http.StatusBadRequest, "request_id_expired")
+
+	if _, err := f.use.BuyCredits(t.Context()); err != nil {
+		t.Fatalf("BuyCredits a day later: %v", err)
+	}
+
+	if sessions := f.api.CheckoutSessions(t, email); len(sessions) != 2 {
+		t.Errorf("checkouts started = %d, want the lost one and a new one", len(sessions))
+	}
+}
+
 func TestBuyCreditsWhileTooManyCheckoutsSaysWait(t *testing.T) {
 	f := newUse(t)
 	f.api.FailNext("POST /v1/checkout/sessions", http.StatusTooManyRequests, "rate_limited")
@@ -205,13 +222,18 @@ type saver struct {
 	mu        sync.Mutex
 	path      string
 	suggested []string
+	during    func() // runs while the dialog is open, if set
 }
 
 func (s *saver) Choose(suggested string) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.suggested = append(s.suggested, suggested)
-	return s.path, nil
+	path, during := s.path, s.during
+	s.mu.Unlock()
+	if during != nil {
+		during()
+	}
+	return path, nil
 }
 
 func TestLinesListsTheLinesTheMemberCanUse(t *testing.T) {
@@ -404,6 +426,28 @@ func TestAddDeviceRetriesWithTheSameKeyAndRequest(t *testing.T) {
 	}
 }
 
+func TestAddDeviceStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
+	f := newUse(t)
+	line := f.offerBerlin()
+	f.api.LoseNextResponse("POST /v1/wireguard/peers")
+	if _, err := f.use.AddDevice(t.Context(), line, "iPhone"); err == nil {
+		t.Fatal("AddDevice succeeded although the answer was lost")
+	}
+	f.api.FailNext("POST /v1/wireguard/peers", http.StatusBadRequest, "request_id_expired")
+
+	got, config := f.addDevice(t, line, "iPhone")
+
+	// The lost peer's key is gone with the expired request, so the new
+	// config has a peer and key of its own.
+	peers := f.api.Peers(t, email)
+	if len(peers) != 2 || got.Device.PeerID != peers[1].PeerID {
+		t.Fatalf("device %s, peers %+v; want a second peer", got.Device.PeerID, peers)
+	}
+	if k := publicKeyOf(t, privateKey(t, config)); k != peers[1].PublicKey {
+		t.Errorf("config's key belongs to %s, but the new peer has %s", k, peers[1].PublicKey)
+	}
+}
+
 func TestAddDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -515,6 +559,24 @@ func TestSaveConfigSuggestsAFileNameWireGuardAccepts(t *testing.T) {
 		if !tunnel.MatchString(dev.FileName) || !strings.HasPrefix(dev.FileName, "Homeport") {
 			t.Errorf("%q: file name %q, want Homeport… with at most 15 characters WireGuard allows", name, dev.FileName)
 		}
+	}
+}
+
+// The config can go while the save dialog is open, say when the session
+// ends; then nothing is saved, rather than an empty file.
+func TestSaveConfigAfterTheConfigWentDuringTheDialog(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.saver.path = filepath.Join(t.TempDir(), "late.conf")
+	f.saver.during = func() { f.use.SignOut(t.Context()) }
+
+	saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
+
+	if code := errCode(err); saved || code != services.ErrConfigGone {
+		t.Errorf("SaveConfig = %v, %v; want nothing saved and code %q", saved, err, services.ErrConfigGone)
+	}
+	if _, err := os.Stat(f.saver.path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file was written for a config that is gone (%v)", err)
 	}
 }
 

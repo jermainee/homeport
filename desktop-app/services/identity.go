@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"uuid"
 
 	"github.com/jermainee/homeport/desktop-app/internal/apiclient"
 	"github.com/jermainee/homeport/desktop-app/internal/profile"
@@ -45,14 +44,10 @@ type IdentityService struct {
 	profile *profile.Profile
 	openURL func(string) error
 
-	mu      sync.Mutex
-	attempt *identityAttempt // a Start whose outcome is unknown, reused on retry
-	check   *identityCheck   // the check started in this run, until its outcome
-}
+	start retained[struct{}] // a Start whose outcome is unknown, reused on retry
 
-type identityAttempt struct {
-	memberID  string
-	requestID string
+	mu    sync.Mutex
+	check *identityCheck // the check started in this run, until its outcome
 }
 
 // identityCheck is a check the member started from this app. The API keeps
@@ -86,28 +81,20 @@ func (s *IdentityService) Start(ctx context.Context) (IdentityCheck, error) {
 		return IdentityCheck{State: IdentityVerified}, nil
 	}
 
-	// A retry after an unknown outcome reuses the attempt, so the API
-	// replays the first check's page instead of starting a second check.
-	s.mu.Lock()
-	a := s.attempt
-	if a == nil || a.memberID != sess.MemberID {
-		a = &identityAttempt{memberID: sess.MemberID, requestID: uuid.NewV7().String()}
-		s.attempt = a
+	// A retry after an unknown outcome gets the first check's page again
+	// instead of starting a second check.
+	var url string
+	err = s.start.send(sess.MemberID, nil, nil, func(requestID string, _ struct{}) (err error) {
+		url, err = s.api.CreateIdentitySession(ctx, sess.Token, requestID)
+		return err
+	})
+	if apiCode(err) == "identity_already_verified" {
+		s.forget()
+		return IdentityCheck{State: IdentityVerified}, nil
 	}
-	s.mu.Unlock()
-
-	url, err := s.api.CreateIdentitySession(ctx, sess.Token, a.requestID)
 	if err != nil {
-		if apiCode(err) == "identity_already_verified" {
-			s.forget()
-			return IdentityCheck{State: IdentityVerified}, nil
-		}
-		if !retryable(err) {
-			s.dropAttempt(a)
-		}
 		return IdentityCheck{}, serviceError(err)
 	}
-	s.dropAttempt(a)
 	if err := s.openURL(url); err != nil {
 		return IdentityCheck{}, &Error{Code: ErrUnexpected, err: err}
 	}
@@ -164,17 +151,10 @@ func (s *IdentityService) Poll(ctx context.Context) (IdentityCheck, error) {
 func (s *IdentityService) SignOut(context.Context) { s.forget() }
 
 func (s *IdentityService) forget() {
+	s.start.reset()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.attempt, s.check = nil, nil
-}
-
-func (s *IdentityService) dropAttempt(a *identityAttempt) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.attempt == a {
-		s.attempt = nil
-	}
+	s.check = nil
 }
 
 // session returns the signed-in member's session, or ErrSignedOut.

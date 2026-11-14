@@ -120,5 +120,7 @@ describe("for a member who isn't verified", () => {
       expect(app.querySelector("#share-line")?.textContent).toBe("Finish the check in your browser"),
     );
     expect(announcer.textContent).toBe("Finish the check in your browser.");
+    // A member who closed Stripe's page can open a new check at once.
+    expect(app.querySelector('[data-action="identity-verify"]')?.textContent?.trim()).toBe("Start a new check");
   });
 });

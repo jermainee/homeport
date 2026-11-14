@@ -86,6 +86,35 @@ describe("opening Use", () => {
     expect(use.view).toEqual({ kind: "verify" });
   });
 
+  it("keeps a removal that finished while a refresh was on its way", async () => {
+    await open();
+    let answer!: (d: typeof laptop[]) => void;
+    api.devices = () => new Promise((r) => (answer = r));
+    const refreshing = use.refresh();
+
+    use.askRemove(laptop.peerId);
+    await use.confirmRemove();
+    answer([laptop]); // the list from before the removal
+    await refreshing;
+
+    expect(ready().devices).toEqual([]);
+  });
+
+  it("keeps credits that arrived while a refresh was on its way", async () => {
+    await open();
+    let answer!: (b: typeof balance) => void;
+    api.balance = () => new Promise((r) => (answer = r));
+    const refreshing = use.refresh();
+    api.checkoutPolls = [{ arrived: true, balance: bought }];
+    await use.buy();
+    await vi.advanceTimersByTimeAsync(CHECKOUT_POLL_MS);
+
+    answer(balance); // the balance from before the purchase
+    await refreshing;
+
+    expect(ready().balance).toEqual(bought);
+  });
+
   it("refreshes in place, keeping what is on screen", async () => {
     await open();
     api.balanceAnswer = bought;
@@ -114,6 +143,28 @@ describe("buying credits", () => {
     expect(ready().balance).toEqual(bought);
     await vi.advanceTimersByTimeAsync(CHECKOUT_POLL_MS * 3);
     expect(api.count("pollCheckout")).toBe(2);
+  });
+
+  it("opens a new Checkout while waiting, for a member who left the first", async () => {
+    await open();
+    await use.buy();
+    expect(ready().checkout).toEqual({ phase: "waiting" });
+
+    await use.buy();
+
+    expect(api.count("buyCredits")).toBe(2);
+    expect(ready().checkout).toEqual({ phase: "waiting" });
+  });
+
+  it("opens a new Checkout after waiting gave up", async () => {
+    await open();
+    await use.buy();
+    await vi.advanceTimersByTimeAsync(CHECKOUT_GIVE_UP_MS + CHECKOUT_POLL_MS);
+
+    await use.buy();
+
+    expect(api.count("buyCredits")).toBe(2);
+    expect(ready().checkout).toEqual({ phase: "waiting" });
   });
 
   it("is busy while Checkout opens, and ignores a second press", async () => {

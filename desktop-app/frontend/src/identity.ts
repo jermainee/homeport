@@ -131,9 +131,16 @@ export class Identity {
     if (inProgress(state)) this.#poll();
   }
 
+  // #failed shows why a press didn't work. A check that was in progress
+  // is followed on, so the screen never waits for nothing.
   #failed(state: IdentityState, error: ErrorCode): void {
     if (this.#disposed) return;
-    this.#set(error === "signed_out" ? { kind: "signedOut" } : { kind: "status", state, error });
+    if (error === "signed_out") {
+      this.#set({ kind: "signedOut" });
+      return;
+    }
+    this.#set({ kind: "status", state, error });
+    if (inProgress(state)) this.#poll();
   }
 
   #poll(): void {

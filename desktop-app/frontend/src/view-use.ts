@@ -43,8 +43,10 @@ export function identityParts(v: Extract<IdentityView, { kind: "status" }>): Ide
     `<p class="status ${v.offline ? "is-offline" : ""}"><span class="beacon" aria-hidden="true"></span>${
       v.offline ? "Homeport can't be reached. Trying again…" : text
     }</p>`;
-  const following = (text: string) =>
-    v.stalled || v.busy ? `<div class="panel-actions">${checkButton}</div>` : `<div class="panel-actions">${beacon(text)}</div>`;
+  // While a check is in progress, a beacon shows the app is following it;
+  // once polling gave up, or while Check again asks, the button takes its
+  // place.
+  const following = (text: string) => (v.stalled || checking ? checkButton : beacon(text));
 
   let parts: IdentityParts;
   switch (v.state) {
@@ -52,20 +54,18 @@ export function identityParts(v: Extract<IdentityView, { kind: "status" }>): Ide
       parts = {
         line: "Finish the check in your browser",
         note: "Stripe asks for a photo of your ID and a selfie. This screen moves on by itself once you're done.",
-        actions: following("Waiting for the check…"),
-      };
-      if (v.stalled) {
-        parts.actions = `<div class="panel-actions">${checkButton}
+        // A member who closed Stripe's page can start over at once.
+        actions: `<div class="panel-actions">${following("Waiting for the check…")}
           <button class="button quiet" type="button" data-action="identity-verify" ${busyAttrs(starting)}>${
             starting ? "Opening the check…" : "Start a new check"
-          }</button></div>`;
-      }
+          }</button></div>`,
+      };
       break;
     case "processing":
       parts = {
         line: "Your identity is being checked",
         note: "This usually takes a few minutes. Share and Use turn on once it's done.",
-        actions: following("Checking…"),
+        actions: `<div class="panel-actions">${following("Checking…")}</div>`,
       };
       break;
     case "requires_input":
@@ -158,8 +158,9 @@ function balanceLine(v: Ready): string {
 
 function checkoutPart(c: Checkout): string {
   const opening = c.phase === "opening";
-  const paying = c.phase === "waiting" || c.phase === "stalled";
-  const button = `<button class="button primary" type="button" data-action="use-buy" ${busyAttrs(opening || paying)}>
+  // Buy credits stays available while the app waits, so a member who left
+  // Checkout can open a new one.
+  const button = `<button class="button primary" type="button" data-action="use-buy" ${busyAttrs(opening)}>
       ${opening ? "Opening Checkout…" : "Buy credits"}
     </button>`;
   switch (c.phase) {
@@ -254,13 +255,23 @@ function lineOption(l: Line, picked: boolean): string {
 }
 
 function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
+  if (v.lines.length === 0) {
+    return `
+    <section class="panel use-step" aria-labelledby="add-title">
+      <div class="step-head">
+        <h2 id="add-title" tabindex="-1">Add a device</h2>
+        <p class="panel-line empty">Nobody shares a line you can use right now. Lines appear here when members turn Share on.</p>
+      </div>
+      <div class="panel-actions">
+        <button class="button quiet" type="button" data-action="use-cancel-add">Back</button>
+      </div>
+    </section>`;
+  }
   const nameError = s.error === "invalid_name";
-  const lines = v.lines.length
-    ? `<fieldset class="lines">
+  const lines = `<fieldset class="lines">
         <legend class="label">Line</legend>
         <div class="group line-list">${v.lines.map((l) => lineOption(l, l.lineId === s.lineId)).join("")}</div>
-      </fieldset>`
-    : `<p class="empty">Nobody shares a line you can use right now. Lines appear here when members turn Share on.</p>`;
+      </fieldset>`;
   return `
     <section class="panel use-step" aria-labelledby="add-title">
       <div class="step-head">

@@ -169,6 +169,35 @@ describe("polling", () => {
   });
 });
 
+describe("a press that fails during a check", () => {
+  it("keeps following the check after Check again failed", async () => {
+    open("unverified");
+    await identity.verify();
+    await vi.advanceTimersByTimeAsync(IDENTITY_GIVE_UP_MS + IDENTITY_POLL_MS);
+    expect(identity.view).toMatchObject({ stalled: true });
+    api.polls = [serviceError("offline")];
+
+    await identity.check();
+    expect(identity.view).toEqual({ kind: "status", state: "waiting", error: "offline" });
+    api.status = "processing";
+    await tick();
+
+    expect(identity.view).toEqual({ kind: "status", state: "processing" });
+  });
+
+  it("keeps following the check after a new check couldn't start", async () => {
+    open("processing");
+    api.startAnswer = serviceError("rate_limited");
+
+    await identity.verify();
+    expect(identity.view).toEqual({ kind: "status", state: "processing", error: "rate_limited" });
+    api.status = "verified";
+    await tick();
+
+    expect(identity.view).toEqual({ kind: "status", state: "verified" });
+  });
+});
+
 describe("Check again", () => {
   it("asks once and shows the answer", async () => {
     open("unverified");

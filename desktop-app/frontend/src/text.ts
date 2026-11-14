@@ -35,14 +35,19 @@ export function useErrorText(code: ErrorCode): string {
   }
 }
 
+let regions: Intl.DisplayNames | undefined;
+
 /** A country's name in the member's language, from its ISO code. */
 export function countryName(code: string): string {
   try {
-    return new Intl.DisplayNames(undefined, { type: "region" }).of(code) ?? code;
+    regions ??= new Intl.DisplayNames(undefined, { type: "region" });
+    return regions.of(code) ?? code;
   } catch {
     return code;
   }
 }
+
+const upTo1 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 
 /**
  * Says roughly how much data a byte count is, for what credits buy: whole
@@ -51,7 +56,7 @@ export function countryName(code: string): string {
 export function formatAbout(bytes: number): string {
   const gb = bytes / 1e9;
   if (gb < 1) return `${whole.format(bytes / 1e6)} MB`;
-  if (gb < 10) return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(gb)} GB`;
+  if (gb < 10) return `${upTo1.format(gb)} GB`;
   return `${whole.format(gb)} GB`;
 }
 

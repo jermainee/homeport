@@ -100,6 +100,26 @@ func TestVerifyIdentityRetriesWithTheSameRequest(t *testing.T) {
 	}
 }
 
+// A retry the next day finds its request_id expired; the app starts the
+// check anew instead of failing once.
+func TestVerifyIdentityStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
+	f := newIdentity(t)
+	f.api.LoseNextResponse("POST /v1/identity/sessions")
+	if _, err := f.identity.Start(t.Context()); err == nil {
+		t.Fatal("Start succeeded although the answer was lost")
+	}
+	f.api.FailNext("POST /v1/identity/sessions", http.StatusBadRequest, "request_id_expired")
+
+	if _, err := f.identity.Start(t.Context()); err != nil {
+		t.Fatalf("Start a day later: %v", err)
+	}
+
+	sessions := f.api.IdentitySessions(t, email)
+	if urls := f.browser.URLs(); len(sessions) != 2 || !slices.Equal(urls, sessions[1:]) {
+		t.Errorf("browser opened %q, want the new check's page of %q", urls, sessions)
+	}
+}
+
 func TestVerifyIdentityWhenAlreadyVerifiedOpensNothing(t *testing.T) {
 	f := newIdentity(t)
 	f.api.Verify(t, email)

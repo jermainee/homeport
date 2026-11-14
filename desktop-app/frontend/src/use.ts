@@ -112,6 +112,10 @@ export class Use {
   #listeners = new Set<(v: UseView) => void>();
   #stopPolling: (() => void) | undefined;
   #disposed = false;
+  // Bumped whenever the devices or the balance change other than by a
+  // refresh, so a refresh that started earlier doesn't undo the change.
+  #devicesVersion = 0;
+  #balanceVersion = 0;
 
   constructor(
     private readonly api: UseApi,
@@ -151,6 +155,8 @@ export class Use {
   /** refresh reloads the balance, lines and devices without a loading state. */
   async refresh(): Promise<void> {
     if (this.#view.kind !== "ready") return;
+    const devicesVersion = this.#devicesVersion;
+    const balanceVersion = this.#balanceVersion;
     let data: [Balance, Line[], Device[]];
     try {
       data = await Promise.all([this.api.balance(), this.api.lines(), this.api.devices()]);
@@ -161,7 +167,12 @@ export class Use {
     const v = this.#ready();
     if (!v) return;
     const [balance, lines, devices] = data;
-    this.#set({ ...v, balance, lines, devices });
+    this.#set({
+      ...v,
+      lines,
+      balance: balanceVersion === this.#balanceVersion ? balance : v.balance,
+      devices: devicesVersion === this.#devicesVersion ? devices : v.devices,
+    });
   }
 
   async #load(): Promise<void> {
@@ -215,6 +226,7 @@ export class Use {
     }
     const now = this.#ready();
     if (!now) return;
+    this.#balanceVersion++;
     this.#set({ ...now, balance, checkout: { phase: "waiting" } });
     this.#waitForCredits();
   }
@@ -264,6 +276,7 @@ export class Use {
   #arrived(check: CheckoutCheck): boolean {
     const v = this.#ready();
     if (!v) return true;
+    this.#balanceVersion++;
     this.#set({
       ...v,
       balance: check.balance,
@@ -328,9 +341,10 @@ export class Use {
     const now = this.#ready();
     if (!now) {
       // Use closed meanwhile; nobody will see the config.
-      void this.api.forgetConfig(dev.device.peerId);
+      this.#forget(dev.device.peerId);
       return;
     }
+    this.#devicesVersion++;
     this.#set({
       ...now,
       devices: [dev.device, ...now.devices.filter((d) => d.peerId !== dev.device.peerId)],
@@ -385,7 +399,17 @@ export class Use {
     if (!v || v.step.kind !== "config") return;
     const peerId = v.step.device.device.peerId;
     this.#set({ ...v, step: { kind: "list" } });
-    await this.api.forgetConfig(peerId);
+    await this.#forget(peerId);
+  }
+
+  // #forget tells Go to drop a config. If that call fails, Go drops it
+  // anyway at sign-out or quit; nothing here can show it again.
+  async #forget(peerId: string): Promise<void> {
+    try {
+      await this.api.forgetConfig(peerId);
+    } catch {
+      // See above.
+    }
   }
 
   askRemove(peerId: string): void {
@@ -415,13 +439,15 @@ export class Use {
       return;
     }
     const now = this.#ready();
-    if (now) this.#set({ ...now, devices: now.devices.filter((d) => d.peerId !== peerId), removing: undefined });
+    if (!now) return;
+    this.#devicesVersion++;
+    this.#set({ ...now, devices: now.devices.filter((d) => d.peerId !== peerId), removing: undefined });
   }
 
   /** dispose stops polling, and forgets a config still on screen. */
   dispose(): void {
     const v = this.#view;
-    if (v.kind === "ready" && v.step.kind === "config") void this.api.forgetConfig(v.step.device.device.peerId);
+    if (v.kind === "ready" && v.step.kind === "config") void this.#forget(v.step.device.device.peerId);
     this.#disposed = true;
     this.#stop();
   }

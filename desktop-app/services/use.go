@@ -14,7 +14,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-	"uuid"
 
 	"github.com/skip2/go-qrcode"
 
@@ -46,21 +45,22 @@ type UseService struct {
 	profile *profile.Profile
 	opts    UseOptions
 
-	mu          sync.Mutex
-	attempt     *useAttempt      // a BuyCredits whose outcome is unknown, reused on retry
-	checkout    *pendingCheckout // the checkout the member is paying, until the credits arrive
-	peerAttempt *peerAttempt     // an AddDevice whose outcome is unknown, reused on retry
-	held        *heldConfig      // the config the member is looking at, the only copy of its key
+	// BuyCredits and AddDevice requests whose outcome is unknown, reused on
+	// retry.
+	buy     retained[struct{}]
+	addPeer retained[newPeer]
+
+	mu       sync.Mutex
+	checkout *pendingCheckout // the checkout the member is paying, until the credits arrive
+	held     *heldConfig      // the config the member is looking at, the only copy of its key
 }
 
-// peerAttempt is one AddDevice: the device's key pair and the request that
-// registers its public key, reused while the outcome is unknown.
-type peerAttempt struct {
-	memberID  string
-	lineID    string
-	name      string
-	requestID string
-	key       *ecdh.PrivateKey
+// newPeer is what an AddDevice retry repeats: the line, the name, and the
+// device's key pair, whose public key the API may have registered.
+type newPeer struct {
+	lineID string
+	name   string
+	key    *ecdh.PrivateKey
 }
 
 // heldConfig is a new device's complete config, private key included. It
@@ -70,11 +70,6 @@ type heldConfig struct {
 	peerID   string
 	fileName string
 	text     []byte
-}
-
-type useAttempt struct {
-	memberID  string
-	requestID string
 }
 
 // pendingCheckout is a checkout opened in the browser. Its credits have
@@ -132,24 +127,16 @@ func (s *UseService) BuyCredits(ctx context.Context) (Balance, error) {
 		return Balance{}, serviceError(err)
 	}
 
-	// A retry after an unknown outcome reuses the attempt, so the API
-	// replays the first checkout instead of starting a second one.
-	s.mu.Lock()
-	a := s.attempt
-	if a == nil || a.memberID != sess.MemberID {
-		a = &useAttempt{memberID: sess.MemberID, requestID: uuid.NewV7().String()}
-		s.attempt = a
-	}
-	s.mu.Unlock()
-
-	url, err := s.api.CreateCheckoutSession(ctx, sess.Token, a.requestID)
+	// A retry after an unknown outcome gets the first checkout again
+	// instead of starting a second one.
+	var url string
+	err = s.buy.send(sess.MemberID, nil, nil, func(requestID string, _ struct{}) (err error) {
+		url, err = s.api.CreateCheckoutSession(ctx, sess.Token, requestID)
+		return err
+	})
 	if err != nil {
-		if !retryable(err) {
-			s.dropAttempt(a)
-		}
 		return Balance{}, serviceError(err)
 	}
-	s.dropAttempt(a)
 	if err := s.opts.OpenURL(url); err != nil {
 		return Balance{}, &Error{Code: ErrUnexpected, err: err}
 	}
@@ -278,35 +265,30 @@ func (s *UseService) AddDevice(ctx context.Context, lineID, name string) (NewDev
 		return NewDevice{}, err
 	}
 
-	// A retry after an unknown outcome reuses the key and request, so the
+	// A retry after an unknown outcome repeats the key and request, so the
 	// API replays the peer it may have created instead of making another.
-	s.mu.Lock()
-	a := s.peerAttempt
-	if a == nil || a.memberID != sess.MemberID || a.lineID != lineID || a.name != name {
-		key, err := newWireGuardKey()
-		if err != nil {
-			s.mu.Unlock()
-			return NewDevice{}, &Error{Code: ErrUnexpected, err: err}
-		}
-		a = &peerAttempt{memberID: sess.MemberID, lineID: lineID, name: name, requestID: uuid.NewV7().String(), key: key}
-		s.peerAttempt = a
-	}
-	s.mu.Unlock()
-
-	public := base64.StdEncoding.EncodeToString(a.key.PublicKey().Bytes())
-	created, err := s.api.CreatePeer(ctx, sess.Token, a.requestID, lineID, name, public)
+	var created apiclient.PeerCreated
+	var key *ecdh.PrivateKey
+	err = s.addPeer.send(sess.MemberID,
+		func(p newPeer) bool { return p.lineID == lineID && p.name == name },
+		func() (newPeer, error) {
+			k, err := newWireGuardKey()
+			return newPeer{lineID: lineID, name: name, key: k}, err
+		},
+		func(requestID string, p newPeer) (err error) {
+			key = p.key
+			public := base64.StdEncoding.EncodeToString(p.key.PublicKey().Bytes())
+			created, err = s.api.CreatePeer(ctx, sess.Token, requestID, lineID, name, public)
+			return err
+		})
 	if err != nil {
-		if !retryable(err) {
-			s.dropPeerAttempt(a)
-		}
 		return NewDevice{}, peerError(err)
 	}
-	s.dropPeerAttempt(a)
 
 	if !strings.Contains(created.ConfigText, privateKeyPlaceholder) {
 		return NewDevice{}, &Error{Code: ErrUnexpected, err: errors.New("the config has no private key placeholder")}
 	}
-	private := base64.StdEncoding.EncodeToString(a.key.Bytes())
+	private := base64.StdEncoding.EncodeToString(key.Bytes())
 	text := []byte(strings.Replace(created.ConfigText, privateKeyPlaceholder, private, 1))
 	qr, err := qrcode.New(string(text), qrcode.Medium)
 	if err != nil {
@@ -411,13 +393,19 @@ func (s *UseService) SaveConfig(_ context.Context, peerID string) (bool, error) 
 	if path == "" {
 		return false, nil
 	}
+	// The member may have signed out while the dialog was open, and the
+	// config went with the session.
 	s.mu.Lock()
-	text := slices.Clone(h.text) // ForgetConfig may clear h meanwhile
+	if s.held != h {
+		s.mu.Unlock()
+		return false, &Error{Code: ErrConfigGone}
+	}
+	text := slices.Clone(h.text)
 	s.mu.Unlock()
+	defer clear(text)
 	if err := writePrivateFile(path, text); err != nil {
 		return false, &Error{Code: ErrUnexpected, err: err}
 	}
-	clear(text)
 	return true, nil
 }
 
@@ -493,24 +481,10 @@ func (s *UseService) RemoveDevice(ctx context.Context, peerID string) error {
 //
 //wails:ignore
 func (s *UseService) SignOut(context.Context) {
+	s.buy.reset()
+	s.addPeer.reset()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.attempt, s.checkout, s.peerAttempt = nil, nil, nil
+	s.checkout = nil
 	s.forgetLocked()
-}
-
-func (s *UseService) dropPeerAttempt(a *peerAttempt) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.peerAttempt == a {
-		s.peerAttempt = nil
-	}
-}
-
-func (s *UseService) dropAttempt(a *useAttempt) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.attempt == a {
-		s.attempt = nil
-	}
 }

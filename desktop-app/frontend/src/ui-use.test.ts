@@ -178,6 +178,33 @@ describe("the Use tab", () => {
   });
 });
 
+describe("buying credits", () => {
+  it("keeps Buy credits available while waiting, for a member who left Checkout", async () => {
+    await openHome();
+    await openUse();
+
+    q('[data-action="use-buy"]')!.click();
+
+    await vi.waitFor(() => expect(q(".panel-actions .status")?.textContent).toContain("Finish paying"));
+    expect(q('[data-action="use-buy"]')?.hasAttribute("aria-disabled")).toBe(false);
+  });
+});
+
+describe("adding a device when no line is shared", () => {
+  it("says so, and offers no config to create", async () => {
+    await openHome();
+    use.linesAnswer = [];
+    await openUse();
+
+    q('[data-action="use-add"]')!.click();
+
+    await vi.waitFor(() => expect(q("#add-title")).not.toBeNull());
+    expect(q(".use-step .empty")?.textContent).toContain("Nobody shares a line");
+    expect(q('[data-focus="use-create"]')).toBeNull();
+    expect(q("#device-name")).toBeNull();
+  });
+});
+
 describe("the Account rows", () => {
   it("follow the balance after credits arrive", async () => {
     await openHome();
