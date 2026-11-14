@@ -50,6 +50,21 @@ devRoutes.put("/gateways/:id", async (c) => {
 });
 
 /**
+ * Marks a member's identity verified, as Stripe Identity's `verified`
+ * webhook does in test mode (no identity hash), so local runs and
+ * end-to-end tests can share and use lines without an Identity check.
+ */
+devRoutes.post("/members/:id/identity/verify", async (c) => {
+  const verified = await c.env.DB.prepare(
+    `UPDATE members SET identity_status = 'verified', identity_failure = NULL WHERE id = ? RETURNING id`,
+  )
+    .bind(c.req.param("id"))
+    .first();
+  if (!verified) return apiError(c, 404, "not_found");
+  return c.json({ identity_status: "verified" });
+});
+
+/**
  * Grants a member purchased credits from the dev_grants account, so local
  * runs and end-to-end tests can use lines before credit packs can be bought.
  */
