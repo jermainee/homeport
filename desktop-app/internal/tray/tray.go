@@ -40,11 +40,9 @@ func New(app *application.App, window application.Window, share *services.ShareS
 	tray.SetTooltip("Homeport")
 
 	toggle.OnClick(func(ctx *application.Context) {
-		st := share.SetSharing(context.Background(), ctx.IsChecked())
-		if st.State == services.ShareError {
-			// The window explains what to do, such as verifying first.
-			Show(app, window)
-		}
+		toggled(func(on bool) services.ShareStatus {
+			return share.SetSharing(context.Background(), on)
+		}, ctx.IsChecked(), toggle, func() { Show(app, window) })
 	})
 	// Statuses arrive every second while sharing, as the count grows; the
 	// menu changes only with the state, so only then does it touch the
@@ -68,11 +66,36 @@ func New(app *application.App, window application.Window, share *services.ShareS
 	})
 }
 
-// Show brings the window to the front.
+// Show brings the window to the front. Menu clicks and app events arrive on
+// their own goroutines, and app.Show calls AppKit directly, which aborts the
+// app off the main thread; so it all runs there.
 func Show(app *application.App, window application.Window) {
-	app.Show()
-	window.Show()
-	window.Focus()
+	show(onMainThread, app, window)
+}
+
+var onMainThread = application.InvokeSync
+
+// toggled turns Share on or off for a click on the switch. The click has
+// already flipped the box, and when Share fails to start the status that
+// follows still says off, so OnStatus would leave it ticked: set it here.
+func toggled(setSharing func(on bool) services.ShareStatus, on bool, toggle interface {
+	SetChecked(bool) *application.MenuItem
+}, showWindow func()) {
+	st := setSharing(on)
+	toggle.SetChecked(st.Sharing)
+	if st.State == services.ShareError {
+		// The window explains what to do, such as verifying first.
+		showWindow()
+	}
+}
+
+// show is Show with the main-thread dispatch passed in, for the tests.
+func show(onMainThread func(func()), app interface{ Show() }, window application.Window) {
+	onMainThread(func() {
+		app.Show()
+		window.Show()
+		window.Focus()
+	})
 }
 
 func switchLabel() string {
