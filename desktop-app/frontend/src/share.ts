@@ -69,11 +69,16 @@ export class Share {
   }
 
   // #load shows Go's status. After a check found the member verified, an
-  // identity_required error Go still holds is from before the check.
+  // identity_required error Go still holds is from before the check. It
+  // only runs once the window found the member signed in, so a signed_out
+  // Go still holds is from before that: going back to sign-in for it would
+  // start Share again and read it again, round and round.
   async #load(afterCheck = false): Promise<void> {
     try {
       let status = await this.api.status();
-      if (afterCheck && status.error === "identity_required" && !status.sharing) {
+      const stale =
+        status.error === "signed_out" || (afterCheck && status.error === "identity_required");
+      if (stale && !status.sharing) {
         status = { ...status, state: "off", error: undefined };
       }
       this.#follow(status);

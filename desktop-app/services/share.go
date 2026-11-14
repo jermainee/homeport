@@ -250,9 +250,8 @@ func (s *ShareService) SignOut(ctx context.Context) {
 //
 //wails:ignore
 func (s *ShareService) SignIn() {
-	if _, _, ok := s.signedInShare(); !ok {
-		return
-	}
+	// The day count may fail to load; the stale error goes anyway.
+	s.signedInShare()
 	s.mu.Lock()
 	if !s.on && s.err == ErrSignedOut {
 		s.err = ""

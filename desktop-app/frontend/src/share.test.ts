@@ -160,6 +160,17 @@ describe("the Share switch", () => {
 
     expect(share.view).toEqual({ kind: "signedOut" });
   });
+
+  // Share starts right after the window found the member signed in, so a
+  // signed_out Go still holds is from before. Going back to sign-in for it
+  // would find the member signed in, start Share, and read it again.
+  it("shows the switch off when Go still holds a signed_out from before the sign-in", async () => {
+    api.current = { ...off, state: "error", error: "signed_out" };
+
+    await open();
+
+    expect(share.view).toEqual({ kind: "ready", status: off, turning: false });
+  });
 });
 
 describe("after dispose", () => {
