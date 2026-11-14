@@ -12,11 +12,15 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 )
 
 require (
 	github.com/jermainee/homeport/agent v0.0.0
 	github.com/jermainee/homeport/relay-protocol v0.0.0
+	github.com/makiuchi-d/gozxing v0.1.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/wailsapp/wails/v3 v3.1.0
 )
 

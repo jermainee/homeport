@@ -1,0 +1,634 @@
+package services_test
+
+import (
+	"bytes"
+	"crypto/ecdh"
+	"encoding/base64"
+	"errors"
+	"image/png"
+	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/makiuchi-d/gozxing"
+	"github.com/makiuchi-d/gozxing/qrcode"
+
+	"github.com/jermainee/homeport/desktop-app/internal/apiclient"
+	"github.com/jermainee/homeport/desktop-app/internal/fakeapi"
+	"github.com/jermainee/homeport/desktop-app/internal/profile"
+	"github.com/jermainee/homeport/desktop-app/services"
+)
+
+// useFixture is a verified member with a UseService on their profile.
+type useFixture struct {
+	api     *fakeapi.Server
+	dir     string
+	browser *browser
+	saver   *saver
+	use     *services.UseService
+}
+
+func newUse(t *testing.T) *useFixture {
+	t.Helper()
+	api := fakeapi.New(t)
+	dir := t.TempDir()
+	signIn(t, api, newAuth(t, api, dir), email)
+	api.Verify(t, email)
+	p, err := profile.Open(dir)
+	if err != nil {
+		t.Fatalf("open profile: %v", err)
+	}
+	f := &useFixture{api: api, dir: dir, browser: &browser{}, saver: &saver{}}
+	f.use = services.NewUseService(apiclient.New(api.URL, api.Client()), p, services.UseOptions{
+		OpenURL:  f.browser.Open,
+		SaveFile: f.saver.Choose,
+	})
+	return f
+}
+
+func TestBalanceShowsBoughtAndEarnedCredits(t *testing.T) {
+	f := newUse(t)
+	f.api.SetCredits(t, email, fakeapi.Credits{Purchased: 25_000, EarnedPending: 4_000, EarnedCashable: 1_000})
+
+	got, err := f.use.Balance(t.Context())
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+
+	want := services.Balance{Purchased: 25_000, Earned: 5_000, Total: 30_000, Bytes: 3_000_000_000}
+	if got != want {
+		t.Errorf("balance = %+v, want %+v", got, want)
+	}
+}
+
+// 10 credits buy 1 MB (10^6 bytes), so 10,000 credits are 1 GB.
+func TestBalanceInBytes(t *testing.T) {
+	f := newUse(t)
+
+	for credits, bytes := range map[int64]int64{0: 0, 10: 1_000_000, 10_000: 1_000_000_000, 1_000_000: 100_000_000_000} {
+		f.api.SetCredits(t, email, fakeapi.Credits{Purchased: credits})
+		got, err := f.use.Balance(t.Context())
+		if err != nil {
+			t.Fatalf("Balance: %v", err)
+		}
+		if got.Bytes != bytes {
+			t.Errorf("%d credits = %d bytes, want %d", credits, got.Bytes, bytes)
+		}
+	}
+}
+
+func TestBuyCreditsOpensCheckoutInTheBrowser(t *testing.T) {
+	f := newUse(t)
+
+	if _, err := f.use.BuyCredits(t.Context()); err != nil {
+		t.Fatalf("BuyCredits: %v", err)
+	}
+
+	sessions := f.api.CheckoutSessions(t, email)
+	if len(sessions) != 1 {
+		t.Fatalf("checkouts started = %d, want 1", len(sessions))
+	}
+	if urls := f.browser.URLs(); !slices.Equal(urls, sessions) {
+		t.Errorf("browser opened %q, want the checkout %q", urls, sessions)
+	}
+}
+
+func TestBuyCreditsWaitsUntilTheCreditsArrive(t *testing.T) {
+	f := newUse(t)
+	f.api.SetCredits(t, email, fakeapi.Credits{Purchased: 500, EarnedCashable: 200})
+	if _, err := f.use.BuyCredits(t.Context()); err != nil {
+		t.Fatalf("BuyCredits: %v", err)
+	}
+
+	// The member is still paying.
+	got, err := f.use.PollCheckout(t.Context())
+	if err != nil {
+		t.Fatalf("PollCheckout: %v", err)
+	}
+	if got.Arrived {
+		t.Fatalf("credits arrived before the payment: %+v", got)
+	}
+
+	// Stripe's webhook grants the pack.
+	f.api.GrantPurchased(t, email, 1_000_000)
+	got, err = f.use.PollCheckout(t.Context())
+	if err != nil {
+		t.Fatalf("PollCheckout: %v", err)
+	}
+	want := services.Balance{Purchased: 1_000_500, Earned: 200, Total: 1_000_700, Bytes: 100_070_000_000}
+	if !got.Arrived || got.Balance != want {
+		t.Errorf("after payment: %+v, want arrived with %+v", got, want)
+	}
+
+	// The checkout is done, so a later poll has nothing to wait for.
+	got, err = f.use.PollCheckout(t.Context())
+	if err != nil {
+		t.Fatalf("PollCheckout: %v", err)
+	}
+	if got.Arrived {
+		t.Errorf("a second poll says credits arrived again: %+v", got)
+	}
+}
+
+// Use that goes on while the member pays spends purchased credits, so the
+// balance can fall below what it was before the purchase.
+func TestBuyCreditsIsNotFooledBySpending(t *testing.T) {
+	f := newUse(t)
+	f.api.SetCredits(t, email, fakeapi.Credits{Purchased: 5_000})
+	if _, err := f.use.BuyCredits(t.Context()); err != nil {
+		t.Fatalf("BuyCredits: %v", err)
+	}
+	f.api.SetCredits(t, email, fakeapi.Credits{Purchased: 4_000})
+
+	got, err := f.use.PollCheckout(t.Context())
+	if err != nil {
+		t.Fatalf("PollCheckout: %v", err)
+	}
+	if got.Arrived {
+		t.Errorf("credits arrived although only spending happened: %+v", got)
+	}
+	if got.Balance.Total != 4_000 {
+		t.Errorf("balance = %+v, want the spent-down 4,000", got.Balance)
+	}
+}
+
+func TestBuyCreditsNeedsAVerifiedIdentity(t *testing.T) {
+	f := newUse(t)
+	f.api.SetIdentityStatus(t, email, "requires_input")
+
+	_, err := f.use.BuyCredits(t.Context())
+
+	if code := errCode(err); code != services.ErrIdentityRequired {
+		t.Errorf("error = %v, want code %q", err, services.ErrIdentityRequired)
+	}
+	if urls := f.browser.URLs(); len(urls) != 0 {
+		t.Errorf("browser opened %q, want nothing", urls)
+	}
+}
+
+func TestBuyCreditsRetriesWithTheSameRequest(t *testing.T) {
+	f := newUse(t)
+	f.api.LoseNextResponse("POST /v1/checkout/sessions")
+
+	if _, err := f.use.BuyCredits(t.Context()); err == nil {
+		t.Fatal("BuyCredits succeeded although the answer was lost")
+	}
+	if _, err := f.use.BuyCredits(t.Context()); err != nil {
+		t.Fatalf("BuyCredits again: %v", err)
+	}
+
+	if sessions := f.api.CheckoutSessions(t, email); len(sessions) != 1 {
+		t.Errorf("checkouts started = %d, want 1", len(sessions))
+	}
+}
+
+func TestBuyCreditsWhileTooManyCheckoutsSaysWait(t *testing.T) {
+	f := newUse(t)
+	f.api.FailNext("POST /v1/checkout/sessions", http.StatusTooManyRequests, "rate_limited")
+
+	_, err := f.use.BuyCredits(t.Context())
+
+	if code := errCode(err); code != services.ErrRateLimited {
+		t.Errorf("error = %v, want code %q", err, services.ErrRateLimited)
+	}
+}
+
+// saver stands in for the save dialog: it answers with path, or with ""
+// when the member cancels, and records the names it suggested.
+type saver struct {
+	mu        sync.Mutex
+	path      string
+	suggested []string
+}
+
+func (s *saver) Choose(suggested string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.suggested = append(s.suggested, suggested)
+	return s.path, nil
+}
+
+func TestLinesListsTheLinesTheMemberCanUse(t *testing.T) {
+	f := newUse(t)
+	berlin, isp := "Berlin", "Deutsche Telekom"
+	de := f.api.OfferLine(fakeapi.AvailableLine{Country: "DE", City: &berlin, ISP: &isp, IPv6: true, Online: true})
+	fr := f.api.OfferLine(fakeapi.AvailableLine{Country: "FR"})
+
+	got, err := f.use.Lines(t.Context())
+	if err != nil {
+		t.Fatalf("Lines: %v", err)
+	}
+
+	want := []services.Line{
+		{LineID: de, Country: "DE", City: "Berlin", ISP: "Deutsche Telekom", IPv6: true, Online: true},
+		{LineID: fr, Country: "FR"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("lines = %+v, want %+v", got, want)
+	}
+}
+
+// The webview gets [], not null, when nobody shares a line.
+func TestLinesWhenNoneAreSharedIsEmpty(t *testing.T) {
+	f := newUse(t)
+
+	got, err := f.use.Lines(t.Context())
+	if err != nil {
+		t.Fatalf("Lines: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("lines = %#v, want an empty list", got)
+	}
+}
+
+func TestLinesNeedAVerifiedIdentity(t *testing.T) {
+	f := newUse(t)
+	f.api.SetIdentityStatus(t, email, "processing")
+
+	_, err := f.use.Lines(t.Context())
+
+	if code := errCode(err); code != services.ErrIdentityRequired {
+		t.Errorf("error = %v, want code %q", err, services.ErrIdentityRequired)
+	}
+}
+
+// offerBerlin offers a line in Berlin and returns its id.
+func (f *useFixture) offerBerlin() string {
+	city := "Berlin"
+	return f.api.OfferLine(fakeapi.AvailableLine{Country: "DE", City: &city, Online: true})
+}
+
+// addDevice adds a device on line and returns it with the config its QR
+// code holds.
+func (f *useFixture) addDevice(t *testing.T, line, name string) (services.NewDevice, string) {
+	t.Helper()
+	got, err := f.use.AddDevice(t.Context(), line, name)
+	if err != nil {
+		t.Fatalf("AddDevice: %v", err)
+	}
+	return got, decodeQR(t, got.QRCode)
+}
+
+// decodeQR reads the text of a QR code given as a PNG data URL.
+func decodeQR(t *testing.T, dataURL string) string {
+	t.Helper()
+	b64, ok := strings.CutPrefix(dataURL, "data:image/png;base64,")
+	if !ok {
+		t.Fatalf("QR code is not a PNG data URL: %.40q", dataURL)
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("QR code base64: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("QR code PNG: %v", err)
+	}
+	bmp, err := gozxing.NewBinaryBitmapFromImage(img)
+	if err != nil {
+		t.Fatalf("QR code bitmap: %v", err)
+	}
+	res, err := qrcode.NewQRCodeReader().Decode(bmp, nil)
+	if err != nil {
+		t.Fatalf("QR code doesn't scan: %v", err)
+	}
+	return res.GetText()
+}
+
+// privateKey returns the PrivateKey line's key from a WireGuard config.
+func privateKey(t *testing.T, config string) string {
+	t.Helper()
+	for line := range strings.Lines(config) {
+		if k, ok := strings.CutPrefix(strings.TrimSpace(line), "PrivateKey = "); ok {
+			return k
+		}
+	}
+	t.Fatalf("config has no PrivateKey:\n%s", config)
+	return ""
+}
+
+// publicKeyOf derives the WireGuard public key of a private key.
+func publicKeyOf(t *testing.T, private string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(private)
+	if err != nil {
+		t.Fatalf("private key %q is not base64: %v", private, err)
+	}
+	k, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		t.Fatalf("private key: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(k.PublicKey().Bytes())
+}
+
+func TestAddDeviceCreatesAPeerOnTheLine(t *testing.T) {
+	f := newUse(t)
+	line := f.offerBerlin()
+
+	got, config := f.addDevice(t, line, "iPhone")
+
+	peers := f.api.Peers(t, email)
+	if len(peers) != 1 {
+		t.Fatalf("peers = %d, want 1", len(peers))
+	}
+	p := peers[0]
+	if p.Name != "iPhone" || p.LineID != line {
+		t.Errorf("peer = %q on %s, want iPhone on %s", p.Name, p.LineID, line)
+	}
+	want := services.Device{PeerID: p.PeerID, Name: "iPhone", LineID: line, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt}
+	if got.Device != want {
+		t.Errorf("device = %+v, want %+v", got.Device, want)
+	}
+	for _, line := range []string{
+		"Address = " + p.IPv4 + "/32, " + p.IPv6 + "/128",
+		"PublicKey = " + fakeapi.GatewayWGPublicKey,
+		"Endpoint = " + fakeapi.GatewayWGEndpoint,
+	} {
+		if !strings.Contains(config, line+"\n") {
+			t.Errorf("config lacks %q:\n%s", line, config)
+		}
+	}
+}
+
+// The app makes the device's key pair and sends the API only the public
+// key; the private key goes into the config, and nowhere else.
+func TestAddDeviceKeepsThePrivateKeyOutOfTheAPIAndTheProfile(t *testing.T) {
+	f := newUse(t)
+
+	_, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+
+	if strings.Contains(config, "{{PRIVATE_KEY}}") {
+		t.Fatalf("config still has the placeholder:\n%s", config)
+	}
+	private := privateKey(t, config)
+	if got, want := publicKeyOf(t, private), f.api.Peers(t, email)[0].PublicKey; got != want {
+		t.Errorf("config's key belongs to public key %s, but the API has %s", got, want)
+	}
+	err := filepath.WalkDir(f.dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err == nil && bytes.Contains(b, []byte(private)) {
+			t.Errorf("the profile stores the private key in %s", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAddDeviceRetriesWithTheSameKeyAndRequest(t *testing.T) {
+	f := newUse(t)
+	line := f.offerBerlin()
+	f.api.LoseNextResponse("POST /v1/wireguard/peers")
+
+	if _, err := f.use.AddDevice(t.Context(), line, "iPhone"); err == nil {
+		t.Fatal("AddDevice succeeded although the answer was lost")
+	}
+	_, config := f.addDevice(t, line, "iPhone")
+
+	peers := f.api.Peers(t, email)
+	if len(peers) != 1 {
+		t.Fatalf("peers = %d, want the one the lost answer created", len(peers))
+	}
+	if got := publicKeyOf(t, privateKey(t, config)); got != peers[0].PublicKey {
+		t.Errorf("config's key belongs to %s, but the peer has %s", got, peers[0].PublicKey)
+	}
+}
+
+func TestAddDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		want   services.ErrorCode
+	}{
+		{"full", http.StatusConflict, "line_full", services.ErrLineFull},
+		{"own or linked", http.StatusForbidden, "line_not_allowed", services.ErrLineNotAllowed},
+		{"unverified", http.StatusForbidden, "identity_required", services.ErrIdentityRequired},
+		{"too many devices", http.StatusTooManyRequests, "rate_limited", services.ErrRateLimited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUse(t)
+			f.api.FailNext("POST /v1/wireguard/peers", tc.status, tc.code)
+
+			_, err := f.use.AddDevice(t.Context(), f.offerBerlin(), "iPhone")
+
+			if code := errCode(err); code != tc.want {
+				t.Errorf("error = %v, want code %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddDeviceOnALineThatStoppedSharing(t *testing.T) {
+	f := newUse(t)
+	line := f.offerBerlin()
+	f.api.WithdrawLine(line)
+
+	_, err := f.use.AddDevice(t.Context(), line, "iPhone")
+
+	if code := errCode(err); code != services.ErrLineUnavailable {
+		t.Errorf("error = %v, want code %q", err, services.ErrLineUnavailable)
+	}
+}
+
+func TestAddDeviceNeedsAName(t *testing.T) {
+	f := newUse(t)
+
+	for _, name := range []string{"", "   ", strings.Repeat("x", 65)} {
+		_, err := f.use.AddDevice(t.Context(), f.offerBerlin(), name)
+		if code := errCode(err); code != services.ErrInvalidName {
+			t.Errorf("name %q: error = %v, want code %q", name, err, services.ErrInvalidName)
+		}
+	}
+	if peers := f.api.Peers(t, email); len(peers) != 0 {
+		t.Errorf("peers = %d, want none", len(peers))
+	}
+}
+
+func TestSaveConfigWritesTheConfFileOnlyTheUserCanRead(t *testing.T) {
+	f := newUse(t)
+	dev, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.saver.path = filepath.Join(t.TempDir(), "chosen.conf")
+
+	saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
+	if err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	if !saved {
+		t.Fatal("SaveConfig reports nothing saved")
+	}
+	b, err := os.ReadFile(f.saver.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != config {
+		t.Errorf("saved file:\n%s\nwant the QR code's config:\n%s", b, config)
+	}
+	if fi, err := os.Stat(f.saver.path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("saved file mode = %v (%v), want 0600: it holds a private key", fi.Mode().Perm(), err)
+	}
+	if got := f.saver.suggested; !slices.Equal(got, []string{dev.FileName}) || dev.FileName != "Homeport-iPhone.conf" {
+		t.Errorf("suggested %q (file name %q), want Homeport-iPhone.conf", got, dev.FileName)
+	}
+}
+
+// Over an existing file, the save dialog asked first; the old file's
+// looser permissions don't survive.
+func TestSaveConfigOverAnExistingFile(t *testing.T) {
+	f := newUse(t)
+	dev, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.saver.path = filepath.Join(t.TempDir(), "old.conf")
+	if err := os.WriteFile(f.saver.path, []byte(strings.Repeat("old config\n", 100)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	b, _ := os.ReadFile(f.saver.path)
+	if string(b) != config {
+		t.Errorf("saved file:\n%s\nwant:\n%s", b, config)
+	}
+	if fi, _ := os.Stat(f.saver.path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("saved file mode = %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+func TestSaveConfigSuggestsAFileNameWireGuardAccepts(t *testing.T) {
+	f := newUse(t)
+	tunnel := regexp.MustCompile(`^[A-Za-z0-9_=+.-]{1,15}\.conf$`)
+
+	for _, name := range []string{"Anna's travel router", "Büro-Mac", "📱"} {
+		dev, _ := f.addDevice(t, f.offerBerlin(), name)
+		if !tunnel.MatchString(dev.FileName) || !strings.HasPrefix(dev.FileName, "Homeport") {
+			t.Errorf("%q: file name %q, want Homeport… with at most 15 characters WireGuard allows", name, dev.FileName)
+		}
+	}
+}
+
+func TestSaveConfigCancelledWritesNothing(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.saver.path = "" // the member pressed Cancel
+
+	saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
+	if err != nil || saved {
+		t.Fatalf("SaveConfig = %v, %v; want nothing saved and no error", saved, err)
+	}
+
+	// The config is still there to save after all.
+	f.saver.path = filepath.Join(t.TempDir(), "later.conf")
+	if saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID); err != nil || !saved {
+		t.Errorf("saving after a cancel = %v, %v; want saved", saved, err)
+	}
+}
+
+// The private key exists only until the member is done with the config:
+// afterwards, nothing can show or save it again.
+func TestTheConfigIsShownOnce(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.saver.path = filepath.Join(t.TempDir(), "late.conf")
+
+	f.use.ForgetConfig(dev.Device.PeerID)
+	_, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
+
+	if code := errCode(err); code != services.ErrConfigGone {
+		t.Errorf("error = %v, want code %q", err, services.ErrConfigGone)
+	}
+	if _, err := os.Stat(f.saver.path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a config was saved after it was forgotten (%v)", err)
+	}
+}
+
+func TestTheConfigIsGoneAfterARestart(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	p, err := profile.Open(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := services.NewUseService(apiclient.New(f.api.URL, f.api.Client()), p, services.UseOptions{
+		OpenURL: f.browser.Open, SaveFile: f.saver.Choose,
+	})
+	f.saver.path = filepath.Join(t.TempDir(), "late.conf")
+
+	_, err = restarted.SaveConfig(t.Context(), dev.Device.PeerID)
+
+	if code := errCode(err); code != services.ErrConfigGone {
+		t.Errorf("error = %v, want code %q", err, services.ErrConfigGone)
+	}
+}
+
+func TestSignOutForgetsTheConfig(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+
+	f.use.SignOut(t.Context())
+	_, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
+
+	if code := errCode(err); code != services.ErrConfigGone {
+		t.Errorf("error = %v, want code %q", err, services.ErrConfigGone)
+	}
+}
+
+func TestDevicesListsTheMembersDevicesNewestFirst(t *testing.T) {
+	f := newUse(t)
+	line := f.offerBerlin()
+	phone, _ := f.addDevice(t, line, "iPhone")
+	router, _ := f.addDevice(t, line, "Travel router")
+
+	got, err := f.use.Devices(t.Context())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+
+	if want := []services.Device{router.Device, phone.Device}; !slices.Equal(got, want) {
+		t.Errorf("devices = %+v, want %+v", got, want)
+	}
+}
+
+func TestDevicesWhenThereAreNoneIsEmpty(t *testing.T) {
+	f := newUse(t)
+
+	got, err := f.use.Devices(t.Context())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("devices = %#v, want an empty list", got)
+	}
+}
+
+func TestRemoveDeviceDeletesItsPeer(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+
+	if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
+		t.Fatalf("RemoveDevice: %v", err)
+	}
+
+	if peers := f.api.Peers(t, email); len(peers) != 0 {
+		t.Errorf("peers = %+v, want none", peers)
+	}
+	// Removing it again, say from a second window, is not an error.
+	if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
+		t.Errorf("removing again: %v", err)
+	}
+	// Its config can't be saved any more.
+	if _, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID); errCode(err) != services.ErrConfigGone {
+		t.Errorf("SaveConfig after removal = %v, want %q", err, services.ErrConfigGone)
+	}
+}

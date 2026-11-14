@@ -43,17 +43,37 @@ func main() {
 	api := apiclient.New(apiclient.BaseURL(os.Getenv), nil)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
+	// The services open Stripe's pages and the save dialog through app,
+	// which exists only after the services do.
+	var app *application.App
+	openURL := func(url string) error { return app.Browser.OpenURL(url) }
+	saveFile := func(name string) (string, error) {
+		return app.Dialog.SaveFileWithOptions(&application.SaveFileDialogOptions{
+			Title:                "Save WireGuard config",
+			Message:              "The config holds this device's private key. Keep it to yourself.",
+			Filename:             name,
+			CanCreateDirectories: true,
+			Filters:              []application.FileFilter{{DisplayName: "WireGuard config", Pattern: "*.conf"}},
+		}).PromptForSingleSelection()
+	}
+
 	auth := services.NewAuthService(api, prof)
 	share := services.NewShareService(api, prof, services.ShareOptions{Logger: logger})
+	identity := services.NewIdentityService(api, prof, openURL)
+	use := services.NewUseService(api, prof, services.UseOptions{OpenURL: openURL, SaveFile: saveFile})
 	auth.BeforeSignOut(share.SignOut)
+	auth.BeforeSignOut(identity.SignOut)
+	auth.BeforeSignOut(use.SignOut)
 	auth.AfterSignIn(share.SignIn)
 
-	app := application.New(application.Options{
+	app = application.New(application.Options{
 		Name:        "Homeport",
 		Description: "Share your home internet line, or use another member's.",
 		Services: []application.Service{
 			application.NewService(auth),
 			application.NewService(share),
+			application.NewService(identity),
+			application.NewService(use),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
