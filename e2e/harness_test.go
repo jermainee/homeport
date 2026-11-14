@@ -94,6 +94,7 @@ type stack struct {
 type stackOptions struct {
 	leases     fakeapi.LeasePolicy
 	shareLater bool
+	peerLater  bool
 }
 
 func withLeases(p fakeapi.LeasePolicy) func(*stackOptions) {
@@ -107,10 +108,17 @@ func withShareLater() func(*stackOptions) {
 	return func(o *stackOptions) { o.shareLater = true }
 }
 
+// withPeerLater starts the gateway while the API lists the line but not
+// member B's peer, and returns once the agent serves the line. The test
+// then creates the peer with addPeer.
+func withPeerLater() func(*stackOptions) {
+	return func(o *stackOptions) { o.peerLater = true }
+}
+
 // newStack starts everything and returns once the agent serves the line
-// and the client is up (unless withShareLater says otherwise). Everything
-// stops when the test ends; then the stack checks the API saw no contract
-// violation and the logs name no destination.
+// and the client is up (unless withShareLater or withPeerLater says
+// otherwise). Everything stops when the test ends; then the stack checks
+// the API saw no contract violation and the logs name no destination.
 func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	t.Helper()
 	var o stackOptions
@@ -147,8 +155,11 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 		}},
 	}
 	served := s.config
-	if o.shareLater {
+	switch {
+	case o.shareLater:
 		served = fakeapi.Config{ETag: `"cfg-0"`, TopUpHostnames: s.config.TopUpHostnames, Peers: []fakeapi.Peer{}, Lines: []fakeapi.Line{}}
+	case o.peerLater:
+		served = fakeapi.Config{ETag: `"cfg-0"`, TopUpHostnames: s.config.TopUpHostnames, Peers: []fakeapi.Peer{}, Lines: s.config.Lines}
 	}
 	s.api = fakeapi.New(gatewayToken, served)
 	if o.leases != nil {
@@ -190,7 +201,9 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 		cfg.ReconnectMax = 500 * time.Millisecond
 	})
 	s.waitLineOnline()
-	s.newClient()
+	if !o.peerLater {
+		s.newClient()
+	}
 	return s
 }
 
@@ -207,6 +220,15 @@ func (s *stack) share() time.Duration {
 	took := time.Since(start)
 	s.newClient()
 	return took
+}
+
+// addPeer creates member B's WireGuard peer while the gateway runs, for a
+// stack made with withPeerLater: the API lists the peer from now on, and
+// the client starts with the config the API handed out.
+func (s *stack) addPeer() {
+	s.t.Helper()
+	s.api.SetConfig(s.config)
+	s.newClient()
 }
 
 // startAgent runs member A's agent until the test ends. configure may
