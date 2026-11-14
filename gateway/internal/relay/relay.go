@@ -46,6 +46,7 @@ type Relay struct {
 	pin     relayprotocol.Pin
 	dns     netip.AddrPort
 	onEvent func(Event)
+	unknown func()
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -65,8 +66,10 @@ type agent struct {
 // Listen starts accepting agents on addr. Flows to dns become DNS flows.
 // onEvent, if not nil, is called while the relay holds its lock whenever a
 // line goes online or offline, so events arrive in order; it must return
-// quickly and must not call the relay.
-func Listen(addr string, cert tls.Certificate, dns netip.AddrPort, onEvent func(Event)) (*Relay, error) {
+// quickly and must not call the relay. onUnknown, if not nil, is called
+// during the handshake of an agent whose pin belongs to no line, before the
+// relay refuses it; it must return quickly.
+func Listen(addr string, cert tls.Certificate, dns netip.AddrPort, onEvent func(Event), onUnknown func()) (*Relay, error) {
 	signer, ok := cert.PrivateKey.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("relay: certificate has no usable private key")
@@ -79,10 +82,14 @@ func Listen(addr string, cert tls.Certificate, dns netip.AddrPort, onEvent func(
 	if onEvent == nil {
 		onEvent = func(Event) {}
 	}
+	if onUnknown == nil {
+		onUnknown = func() {}
+	}
 	r := &Relay{
 		pin:     pin,
 		dns:     dns,
 		onEvent: onEvent,
+		unknown: onUnknown,
 		ctx:     ctx,
 		cancel:  cancel,
 		lines:   make(map[string]Line),
@@ -215,10 +222,15 @@ func (r *Relay) openFlow(ctx context.Context, lineID string, kind relayprotocol.
 	return s, conn, nil
 }
 
+// knownPin is the handshake's check of an agent's pin. An unknown pin is
+// reported, so the gateway can learn a line created since its last config.
 func (r *Relay) knownPin(p relayprotocol.Pin) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, ok := r.byPin[p]
+	r.mu.Unlock()
+	if !ok {
+		r.unknown()
+	}
 	return ok
 }
 

@@ -150,6 +150,31 @@ func TestConfigIsTheContractExample(t *testing.T) {
 	assertNoViolations(t, api)
 }
 
+func TestAChangedConfigIsServedToAGatewayWithTheOldETag(t *testing.T) {
+	api, srv := newAPI(t)
+	_, _, body := call(t, srv, http.MethodGet, "/v1/gateway/config", nil)
+	old := decode(t, body).(map[string]any)["etag"].(string)
+
+	// A member turns Share on: the config lists no line before, one after.
+	api.SetConfig(fakeapi.Config{ETag: `"cfg-2"`, TopUpHostnames: []string{"homeport.example"}, Peers: []fakeapi.Peer{}, Lines: []fakeapi.Line{{
+		LineID:           "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+		OwnerMemberID:    "01a1c4af-897b-7f0a-a915-c1ba8ba7b153",
+		DeviceSPKISHA256: strings.Repeat("ab", 32),
+	}}})
+	status, h, body := call(t, srv, http.MethodGet, "/v1/gateway/config", nil, "If-None-Match", old)
+	if status != http.StatusOK || h.Get("ETag") != `"cfg-2"` {
+		t.Fatalf("config with the old etag answered %d, ETag %q; want 200 with the new config", status, h.Get("ETag"))
+	}
+	var got fakeapi.Config
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Lines) != 1 || got.Lines[0].DeviceSPKISHA256 != strings.Repeat("ab", 32) {
+		t.Errorf("lines %+v; want the new line", got.Lines)
+	}
+	assertNoViolations(t, api)
+}
+
 func TestExampleRequestsAreAnsweredLikeTheExamples(t *testing.T) {
 	api, srv := newAPI(t)
 

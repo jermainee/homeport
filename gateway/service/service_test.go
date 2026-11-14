@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+
 	"github.com/jermainee/homeport/gateway"
 	"github.com/jermainee/homeport/gateway/service"
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
@@ -23,9 +25,10 @@ import (
 type selfAPI struct {
 	status int
 
-	mu   sync.Mutex
-	self map[string]string
-	auth string
+	mu      sync.Mutex
+	self    map[string]string
+	auth    string
+	fetches int // config requests
 }
 
 func (a *selfAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +41,7 @@ func (a *selfAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(body, &a.self)
 		w.WriteHeader(a.status)
 	case "/v1/gateway/config":
+		a.fetches++
 		_, _ = w.Write([]byte(`{"etag":"\"cfg-1\"","topup_hostnames":["homeport.example"],"peers":[],"lines":[]}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -48,6 +52,12 @@ func (a *selfAPI) announced() map[string]string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.self
+}
+
+func (a *selfAPI) configFetches() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fetches
 }
 
 func newConfig(t *testing.T, apiURL string) service.Config {
@@ -173,5 +183,60 @@ func TestStoppingBeforeTheAPIAnswersIsNotAFailure(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run kept retrying after its context ended")
+	}
+}
+
+func TestAnUnknownAgentMakesTheGatewayFetchItsConfigAgain(t *testing.T) {
+	api := &selfAPI{status: http.StatusNoContent}
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+	svc, err := service.New(newConfig(t, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	})
+	waitFor(t, "the first config fetch", func() bool { return api.configFetches() > 0 })
+	fetched := api.configFetches()
+
+	// An agent whose line the gateway does not know yet, as right after a
+	// member turned Share on.
+	cert, err := relayprotocol.GenerateSelfSigned("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := svc.Server()
+	dialCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	conn, err := quic.DialAddr(dialCtx, gw.QUICAddr().String(),
+		relayprotocol.AgentTLSConfig(cert, relayprotocol.AllowPins(gw.RelayPin())), relayprotocol.AgentQUICConfig())
+	if err == nil {
+		// With TLS 1.3 the dial can finish before the gateway checks the
+		// certificate; the refusal follows.
+		select {
+		case <-conn.Context().Done():
+		case <-dialCtx.Done():
+		}
+		_ = conn.CloseWithError(0, "")
+	}
+
+	waitFor(t, "a config fetch after the unknown agent", func() bool { return api.configFetches() > fetched })
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waited 1 s for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

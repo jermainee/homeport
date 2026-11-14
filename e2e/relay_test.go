@@ -426,6 +426,22 @@ func TestTheAgentReconnectsAfterTheGatewayDropsIt(t *testing.T) {
 	}
 }
 
+func TestShareTurnedOnWhileTheGatewayRunsWorksWithinSeconds(t *testing.T) {
+	s := newStack(t, withShareLater())
+	took := s.share()
+	// The gateway polls its config every 30 s. The agent's first attempt is
+	// refused, which makes the gateway fetch its config at once, and the
+	// agent retries within a second.
+	t.Logf("the line went online %v after Share was turned on", took.Round(time.Millisecond))
+	if took > 3*time.Second {
+		t.Errorf("the line went online %v after the member turned Share on; want within a few seconds", took)
+	}
+	// The same fetch brought member B's peer.
+	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
+		t.Fatal("download through the new line differs")
+	}
+}
+
 func TestLogsNeverNameADestination(t *testing.T) {
 	s := newStack(t)
 	// Every kind of flow: TCP, UDP, DNS, and refused ones.

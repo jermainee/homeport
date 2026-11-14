@@ -82,6 +82,8 @@ type stack struct {
 	stopGW     func()
 	gwLogs     *syncBuffer
 
+	config    fakeapi.Config // what the API serves once Share is on
+	agentCert tls.Certificate
 	agent     *agent.Agent
 	agentLogs *syncBuffer
 
@@ -90,17 +92,25 @@ type stack struct {
 }
 
 type stackOptions struct {
-	leases fakeapi.LeasePolicy
+	leases     fakeapi.LeasePolicy
+	shareLater bool
 }
 
 func withLeases(p fakeapi.LeasePolicy) func(*stackOptions) {
 	return func(o *stackOptions) { o.leases = p }
 }
 
+// withShareLater starts the gateway while the API lists neither the line
+// nor the peer, and returns once the gateway has fetched that config. The
+// test then turns Share on with share.
+func withShareLater() func(*stackOptions) {
+	return func(o *stackOptions) { o.shareLater = true }
+}
+
 // newStack starts everything and returns once the agent serves the line
-// and the client is up. Everything stops when the test ends; then the
-// stack checks the API saw no contract violation and the logs name no
-// destination.
+// and the client is up (unless withShareLater says otherwise). Everything
+// stops when the test ends; then the stack checks the API saw no contract
+// violation and the logs name no destination.
 func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	t.Helper()
 	var o stackOptions
@@ -114,11 +124,12 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.agentCert = agentCert
 	agentPin := relayprotocol.PinOf(agentCert.Leaf)
 	if s.clientKey, err = gateway.GenerateKey(); err != nil {
 		t.Fatal(err)
 	}
-	s.api = fakeapi.New(gatewayToken, fakeapi.Config{
+	s.config = fakeapi.Config{
 		ETag:           `"cfg-1"`,
 		TopUpHostnames: []string{topUpHost},
 		Peers: []fakeapi.Peer{{
@@ -134,7 +145,12 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 			OwnerMemberID:    ownerMember,
 			DeviceSPKISHA256: hex.EncodeToString(agentPin[:]),
 		}},
-	})
+	}
+	served := s.config
+	if o.shareLater {
+		served = fakeapi.Config{ETag: `"cfg-0"`, TopUpHostnames: s.config.TopUpHostnames, Peers: []fakeapi.Peer{}, Lines: []fakeapi.Line{}}
+	}
+	s.api = fakeapi.New(gatewayToken, served)
 	if o.leases != nil {
 		s.api.SetLeases(o.leases)
 	}
@@ -157,7 +173,47 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	s.wgPort = freeUDPPort(t)
 	s.quicListen = "127.0.0.1:0"
 	s.startGateway()
+	if o.shareLater {
+		waitUntil(t, "the gateway fetched its config", func() bool {
+			for _, c := range s.api.Calls() {
+				if c.Path == fakeapi.PathConfig && c.Status == http.StatusOK {
+					return true
+				}
+			}
+			return false
+		})
+		return s
+	}
 
+	s.startAgent(func(cfg *agent.Config) {
+		cfg.ReconnectMin = 50 * time.Millisecond
+		cfg.ReconnectMax = 500 * time.Millisecond
+	})
+	s.waitLineOnline()
+	s.newClient()
+	return s
+}
+
+// share turns Share on while the gateway runs, for a stack made with
+// withShareLater: the API lists the line and the peer from now on, and the
+// agent starts with the app's reconnect timings. It returns once the line
+// is online and the client is up, with how long the line took.
+func (s *stack) share() time.Duration {
+	s.t.Helper()
+	s.api.SetConfig(s.config)
+	start := time.Now()
+	s.startAgent(nil)
+	s.waitLineOnline()
+	took := time.Since(start)
+	s.newClient()
+	return took
+}
+
+// startAgent runs member A's agent until the test ends. configure may
+// change its config.
+func (s *stack) startAgent(configure func(*agent.Config)) {
+	t := s.t
+	t.Helper()
 	// The agent learns the gateway's QUIC endpoint and pin the way the
 	// app does: from what the gateway announced to the API.
 	self, _ := s.api.Self()
@@ -168,13 +224,14 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	cfg := agent.Config{
 		GatewayAddr:   self.QUICEndpoint,
 		GatewayPin:    relayprotocol.Pin(pinBytes),
-		Certificate:   agentCert,
+		Certificate:   s.agentCert,
 		Resolver:      s.resolver,
 		Logger:        slog.New(slog.NewJSONHandler(s.agentLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		StatsInterval: 200 * time.Millisecond,
-		ReconnectMin:  50 * time.Millisecond,
-		ReconnectMax:  500 * time.Millisecond,
 		TunnelCheck:   func() (bool, error) { return false, nil },
+	}
+	if configure != nil {
+		configure(&cfg)
 	}
 	agent.RouteTestOrigin(&cfg, tcpDst, s.origin.tcp)
 	agent.RouteTestOrigin(&cfg, udpDst, s.origin.udp)
@@ -195,9 +252,6 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 			t.Error("the agent did not stop")
 		}
 	})
-	s.waitLineOnline()
-	s.newClient()
-	return s
 }
 
 // startGateway runs the gateway from the API, as cmd/homeport-gateway

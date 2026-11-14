@@ -149,6 +149,51 @@ func TestGatewayRejectsUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestAnAgentTheGatewayDoesNotKnowSeesItsCertificateRefused(t *testing.T) {
+	p := newPair(t)
+	ln, err := quic.ListenAddr("127.0.0.1:0", p.gatewayTLS(), rp.GatewayQUICConfig())
+	if err != nil {
+		t.Fatalf("ListenAddr: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			if _, err := ln.Accept(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// An agent whose pin the gateway does not list: with TLS 1.3 its dial
+	// may finish before the gateway checks its certificate, so it learns of
+	// the refusal on its first read at the latest.
+	stranger := p
+	stranger.agent = mustGenerate(t, "agent")
+	conn, err := quic.DialAddr(ctx, ln.Addr().String(), stranger.agentTLS(), rp.AgentQUICConfig())
+	if err == nil {
+		var s *quic.Stream
+		if s, err = conn.OpenStreamSync(ctx); err == nil {
+			_, _ = s.Write([]byte{0})
+			_, err = s.Read(make([]byte, 1))
+		}
+		_ = conn.CloseWithError(0, "")
+	}
+	if !rp.CertificateRefused(err) {
+		t.Fatalf("an unknown agent's error %v is not a certificate refusal", err)
+	}
+
+	// The agent refusing an impostor gateway is its own decision, not the
+	// gateway's refusal.
+	impostor := p
+	impostor.gateway = mustGenerate(t, "gateway")
+	_, err = quic.DialAddr(ctx, ln.Addr().String(), impostor.agentTLS(), rp.AgentQUICConfig())
+	if err == nil || rp.CertificateRefused(err) {
+		t.Fatalf("refusing an impostor gateway: %v; want an error that is not the gateway's refusal", err)
+	}
+}
+
 func TestGatewayRejectsAgentWithoutCertificate(t *testing.T) {
 	p := newPair(t)
 	anonymous := p.agentTLS()

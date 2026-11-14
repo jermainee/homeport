@@ -33,6 +33,12 @@ type sessionResult struct {
 
 func (r sessionResult) stable() bool { return r.established && r.lasted >= stableSession }
 
+// certificateRefused reports that the gateway refused the agent's
+// certificate during the handshake. A gateway does that until its config
+// lists the agent's line, as right after the member turned Share on; the
+// refusal makes it fetch the config again.
+func (r sessionResult) certificateRefused() bool { return relayprotocol.CertificateRefused(r.err) }
+
 // unauthorized reports that the gateway rejected the agent, for example
 // because its device was removed. Retrying soon will not help.
 func (r sessionResult) unauthorized() bool {

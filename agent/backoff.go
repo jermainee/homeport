@@ -27,6 +27,10 @@ func (b *backoff) next() time.Duration {
 	return jitter(min(d, b.max))
 }
 
+// shortest returns a jittered delay at the minimum, without moving the
+// backoff on.
+func (b *backoff) shortest() time.Duration { return jitter(b.min) }
+
 // longest returns a jittered delay at the maximum.
 func (b *backoff) longest() time.Duration { return jitter(b.max) }
 

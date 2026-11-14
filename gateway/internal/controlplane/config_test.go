@@ -1,8 +1,10 @@
 package controlplane_test
 
 import (
+	"context"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/jermainee/homeport/gateway"
 )
@@ -130,5 +132,47 @@ func TestLinesCanSwapAgentPins(t *testing.T) {
 	}
 	if l, _ := f.gw.line(secondLine); l.AgentPin != mustPin(t, linePin) {
 		t.Errorf("second line has pin %s, want the first line's old pin", l.AgentPin)
+	}
+}
+
+func TestARefreshAfterAFailedApplyFetchesOnlyAChangedConfig(t *testing.T) {
+	f := newBareFixture(t)
+	// A config the gateway cannot apply in full: one line's pin is not hex.
+	// Each poll fetches and applies the whole config again until it can.
+	f.api.setConfig(func(cfg map[string]any) {
+		cfg["lines"] = append(cfg["lines"].([]any), map[string]any{
+			"line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", "owner_member_id": ownerID, "device_spki_sha256": "not-hex",
+		})
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.ctl.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waitFor(t, func() bool { return len(f.api.ifNoneMatch()) == 1 })
+
+	// Unknown agents connect. Refreshes are for new lines; an unchanged
+	// config must cost them a 304, not the whole body.
+	f.ctl.RefreshConfig()
+	waitFor(t, func() bool { return len(f.api.ifNoneMatch()) == 2 })
+	if tag := f.api.ifNoneMatch()[1]; tag != `"cfg-7f3a9c2e"` {
+		t.Errorf("a refresh after a failed apply sent If-None-Match %q; want the fetched config's etag", tag)
+	}
+}
+
+// waitFor polls until cond holds, for at most 5 s.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5 s")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

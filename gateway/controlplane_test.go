@@ -25,9 +25,25 @@ import (
 type miniAPI struct {
 	mu         sync.Mutex
 	config     map[string]any
+	fetches    []time.Time // when each config request arrived
 	usage      []map[string]any
 	lineEvents []map[string]any
 	returned   []string
+}
+
+// configFetches returns when each config request arrived, oldest first.
+func (a *miniAPI) configFetches() []time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]time.Time(nil), a.fetches...)
+}
+
+// setLines replaces the config's lines and gives it a new etag.
+func (a *miniAPI) setLines(etag string, lines ...map[string]string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.config["etag"] = etag
+	a.config["lines"] = append([]map[string]string{}, lines...)
 }
 
 func (a *miniAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +65,7 @@ func (a *miniAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/v1/gateway/config":
+		a.fetches = append(a.fetches, time.Now())
 		if r.Header.Get("If-None-Match") == a.config["etag"] {
 			w.WriteHeader(http.StatusNotModified)
 			return

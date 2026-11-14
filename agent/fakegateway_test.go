@@ -37,6 +37,10 @@ type fakeGateway struct {
 	pin       relayprotocol.Pin
 	agentCert tls.Certificate
 	conns     chan *agentConn
+
+	mu       sync.Mutex
+	refuse   int         // handshakes left whose agent certificate is refused
+	attempts []time.Time // when each handshake checked the agent's certificate
 }
 
 // agentConn is one agent connection that completed the hello.
@@ -56,20 +60,45 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsConf := relayprotocol.GatewayTLSConfig(gwCert, relayprotocol.AllowPins(relayprotocol.PinOf(agentCert.Leaf)))
-	ln, err := quic.ListenAddr("127.0.0.1:0", tlsConf, relayprotocol.GatewayQUICConfig())
-	if err != nil {
-		t.Fatal(err)
-	}
 	g := &fakeGateway{
-		ln:        ln,
 		pin:       relayprotocol.PinOf(gwCert.Leaf),
 		agentCert: agentCert,
 		conns:     make(chan *agentConn, 16),
 	}
+	agentPin := relayprotocol.PinOf(agentCert.Leaf)
+	tlsConf := relayprotocol.GatewayTLSConfig(gwCert, func(p relayprotocol.Pin) bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.attempts = append(g.attempts, time.Now())
+		if g.refuse > 0 {
+			g.refuse--
+			return false
+		}
+		return p == agentPin
+	})
+	if g.ln, err = quic.ListenAddr("127.0.0.1:0", tlsConf, relayprotocol.GatewayQUICConfig()); err != nil {
+		t.Fatal(err)
+	}
 	go g.acceptLoop()
-	t.Cleanup(func() { _ = ln.Close() })
+	t.Cleanup(func() { _ = g.ln.Close() })
 	return g
+}
+
+// refuseCertificates makes the gateway refuse the agent's certificate in
+// its next n handshakes, as a gateway does whose config does not list the
+// agent's line yet.
+func (g *fakeGateway) refuseCertificates(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.refuse = n
+}
+
+// handshakes returns when each handshake so far checked the agent's
+// certificate, oldest first.
+func (g *fakeGateway) handshakes() []time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]time.Time(nil), g.attempts...)
 }
 
 func (g *fakeGateway) acceptLoop() {
