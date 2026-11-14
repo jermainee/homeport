@@ -88,7 +88,8 @@ func addPeer(t *testing.T, gw *gateway.Server, p gateway.Peer) *testClient {
 }
 
 // dialRefusedQuickly checks that a TCP connection to dst is refused with a
-// reset instead of opening or timing out.
+// reset instead of opening or timing out. assertResetQuickly does this for
+// a public destination.
 func dialRefusedQuickly(t *testing.T, c *testClient, dst netip.AddrPort) {
 	t.Helper()
 	start := time.Now()
@@ -195,8 +196,10 @@ func TestMembersCannotReachEachOther(t *testing.T) {
 		t.Fatalf("B received a connection or datagram from %s", from)
 	case <-time.After(200 * time.Millisecond):
 	}
-	if got := gw.PeerUsage(peerB.IPv4); got != usageB {
-		t.Errorf("B's usage moved from %+v to %+v while A tried to reach it", usageB, got)
+	// Anything delivered to B would count as B's download. B's own stack
+	// may send on its own, so only that direction is compared.
+	if got := gw.PeerUsage(peerB.IPv4).Down; got != usageB.Down {
+		t.Errorf("B received %d bytes while A tried to reach it", got-usageB.Down)
 	}
 }
 
@@ -226,7 +229,12 @@ func TestTwoMembersOnTheSameLineSeeNothingOfEachOther(t *testing.T) {
 	// A's own traffic goes through the shared line, carrying nothing that
 	// names A or B, and counts for A alone.
 	a.dialHeld(t)
-	open := <-agent.opens
+	var open relayprotocol.FlowOpen
+	select {
+	case open = <-agent.opens:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A's flow never reached the agent")
+	}
 	if open != (relayprotocol.FlowOpen{Kind: relayprotocol.KindTCP, Dst: netip.MustParseAddrPort("11.22.33.44:80")}) {
 		t.Errorf("the agent got %+v", open)
 	}
@@ -248,25 +256,33 @@ func TestPacketsWithAForgedSourceAreDropped(t *testing.T) {
 	if err := gw.AddPeer(a); err != nil {
 		t.Fatalf("add A: %v", err)
 	}
+	// One device with A's key holds A's own address and two it may not
+	// send from: B's, and one no peer has.
+	forged := []netip.Addr{peerB.IPv4, netip.MustParseAddr("10.77.0.99")}
+	forger := newClient(t, gw, keyA, peerA.IPv4, forged...)
+	echo := netip.MustParseAddrPort("11.22.33.44:7")
 
-	// A's key, sending as B, and as an address no peer has.
-	for _, src := range []netip.Addr{peerB.IPv4, netip.MustParseAddr("10.77.0.99")} {
-		forger := newClient(t, gw, keyA, src)
-		if err := forger.tryGet("http://11.22.33.44/", time.Second); err == nil {
-			t.Errorf("a request sent from %s with A's key was answered", src)
-		}
-		if err := forger.tryUDP(netip.MustParseAddrPort("10.77.0.1:53"), 300*time.Millisecond); err == nil {
-			t.Errorf("DNS sent from %s with A's key was answered", src)
+	// From its own address, the tunnel works: the handshake is done.
+	if got := forger.udpRoundTripFrom(t, peerA.IPv4, echo, []byte("own")); string(got) != "own" {
+		t.Fatalf("A's own datagram came back as %q", got)
+	}
+	usageA := gw.PeerUsage(peerA.IPv4)
+	for _, src := range forged {
+		for _, dst := range []netip.AddrPort{echo, netip.MustParseAddrPort("10.77.0.1:53")} {
+			if err := forger.tryUDPFrom(src, dst, 300*time.Millisecond); err == nil {
+				t.Errorf("a datagram to %s sent as %s with A's key was answered", dst, src)
+			}
 		}
 	}
 
-	if flows := origins.all(); len(flows) != 0 {
-		t.Errorf("forged packets opened flows: %+v", flows)
+	if flows := origins.all(); len(flows) != 1 || flows[0].Peer != peerA.IPv4 {
+		t.Errorf("flows = %+v, want only A's own", flows)
 	}
-	for _, p := range []gateway.Peer{peerA, peerB} {
-		if got := gw.PeerUsage(p.IPv4); got != (gateway.Usage{}) {
-			t.Errorf("%s was charged %+v for forged packets", p.ID, got)
-		}
+	if got := gw.PeerUsage(peerA.IPv4); got != usageA {
+		t.Errorf("A's usage moved from %+v to %+v for forged packets", usageA, got)
+	}
+	if got := gw.PeerUsage(peerB.IPv4); got != (gateway.Usage{}) {
+		t.Errorf("B was charged %+v for packets forged as B", got)
 	}
 }
 

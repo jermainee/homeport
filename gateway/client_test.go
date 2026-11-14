@@ -156,7 +156,18 @@ func (c *testClient) tryGet(url string, timeout time.Duration) error {
 // udpRoundTrip sends one datagram through the tunnel and returns the reply.
 func (c *testClient) udpRoundTrip(t *testing.T, dst netip.AddrPort, payload []byte) []byte {
 	t.Helper()
-	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, dst)
+	return c.udpRoundTripFrom(t, netip.Addr{}, dst, payload)
+}
+
+// udpRoundTripFrom is udpRoundTrip from the client's address src, or from
+// any of its addresses if src is the zero Addr.
+func (c *testClient) udpRoundTripFrom(t *testing.T, src netip.Addr, dst netip.AddrPort, payload []byte) []byte {
+	t.Helper()
+	var laddr netip.AddrPort
+	if src.IsValid() {
+		laddr = netip.AddrPortFrom(src, 0)
+	}
+	uc, err := c.net.DialUDPAddrPort(laddr, dst)
 	if err != nil {
 		t.Fatalf("dial UDP: %v", err)
 	}

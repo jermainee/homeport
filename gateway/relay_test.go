@@ -246,17 +246,7 @@ func newRelayFixture(t *testing.T, handle flowHandler, clientMember string) *rel
 // refused at once instead of opening or timing out.
 func assertResetQuickly(t *testing.T, c *testClient) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	start := time.Now()
-	conn, err := c.net.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("11.22.33.44:80"))
-	if err == nil {
-		_ = conn.Close()
-		t.Fatal("the connection opened; it should have been refused")
-	}
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("refusal took %v; the client should get a reset, not a timeout", took)
-	}
+	dialRefusedQuickly(t, c, netip.MustParseAddrPort("11.22.33.44:80"))
 }
 
 func waitClosed(t *testing.T, conn *quic.Conn) {

@@ -245,7 +245,17 @@ func (c *testClient) dialHeld(t *testing.T) net.Conn {
 
 // tryUDP sends one datagram and reports whether an answer came back in time.
 func (c *testClient) tryUDP(dst netip.AddrPort, timeout time.Duration) error {
-	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, dst)
+	return c.tryUDPFrom(netip.Addr{}, dst, timeout)
+}
+
+// tryUDPFrom is tryUDP from the client's address src, or from any of its
+// addresses if src is the zero Addr.
+func (c *testClient) tryUDPFrom(src netip.Addr, dst netip.AddrPort, timeout time.Duration) error {
+	var laddr netip.AddrPort
+	if src.IsValid() {
+		laddr = netip.AddrPortFrom(src, 0)
+	}
+	uc, err := c.net.DialUDPAddrPort(laddr, dst)
 	if err != nil {
 		return err
 	}
