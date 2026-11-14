@@ -22,7 +22,7 @@ import (
 type Config struct {
 	PrivateKey [32]byte
 	Address    netip.Addr // the tunnel address
-	DNS        netip.Addr // the gateway's virtual resolver
+	DNS        netip.Addr // the gateway's virtual resolver; none if not valid
 	MTU        int        // 0 means 1280
 
 	Endpoint      string // the gateway's host:port
@@ -46,7 +46,11 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || len(peer) != 32 {
 		return nil, errors.New("wgclient: the peer public key is not 32 bytes of base64")
 	}
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, []netip.Addr{cfg.DNS}, cfg.MTU)
+	var dns []netip.Addr
+	if cfg.DNS.IsValid() {
+		dns = append(dns, cfg.DNS)
+	}
+	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, dns, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("wgclient: create tun: %w", err)
 	}
