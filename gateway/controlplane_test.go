@@ -46,6 +46,14 @@ func (a *miniAPI) setLines(etag string, lines ...map[string]string) {
 	a.config["lines"] = append([]map[string]string{}, lines...)
 }
 
+// setPeers replaces the config's peers and gives it a new etag.
+func (a *miniAPI) setPeers(etag string, peers ...map[string]string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.config["etag"] = etag
+	a.config["peers"] = append([]map[string]string{}, peers...)
+}
+
 func (a *miniAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var req map[string]any

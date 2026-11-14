@@ -442,6 +442,30 @@ func TestShareTurnedOnWhileTheGatewayRunsWorksWithinSeconds(t *testing.T) {
 	}
 }
 
+func TestANewWireGuardPeerWorksWithinSeconds(t *testing.T) {
+	s := newStack(t, withPeerLater())
+	start := time.Now()
+	s.addPeer()
+	// The gateway polls its config every 30 s. It drops the client's first
+	// handshake, from a key it does not know, and fetches its config at
+	// once; the client sends its handshake again 5 s later, and that one
+	// gets in.
+	got := s.get("/blob/100000")
+	took := time.Since(start)
+	if sum(got) != sum(blob(100_000)) {
+		t.Fatal("download through the new peer differs")
+	}
+	handshake, err := s.client.LastHandshake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("the new peer's handshake completed %v and its first download %v after its client started",
+		handshake.Sub(start).Round(time.Millisecond), took.Round(time.Millisecond))
+	if handshake.Sub(start) > 8*time.Second {
+		t.Errorf("the new peer's handshake completed %v after its client started; want it at the client's first retry, within a few seconds", handshake.Sub(start))
+	}
+}
+
 func TestLogsNeverNameADestination(t *testing.T) {
 	s := newStack(t)
 	// Every kind of flow: TCP, UDP, DNS, and refused ones.

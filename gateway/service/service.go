@@ -1,9 +1,10 @@
 // Package service runs a gateway from the control API, the way production
 // runs it: it announces the gateway, keeps its peers and lines in sync with
-// the API's config (fetched again at once when an unknown agent connects),
-// holds a quota lease for each peer's session, reports usage and line
-// events, and shuts down in order. cmd/homeport-gateway is a thin wrapper
-// around it, and the end-to-end tests in e2e/ run it the same way.
+// the API's config (fetched again at once when an unknown agent or
+// WireGuard key connects), holds a quota lease for each peer's session,
+// reports usage and line events, and shuts down in order.
+// cmd/homeport-gateway is a thin wrapper around it, and the end-to-end
+// tests in e2e/ run it the same way.
 package service
 
 import (
@@ -84,8 +85,10 @@ func New(cfg Config) (*Service, error) {
 		Certificate: cfg.Certificate,
 		Access:      ctl,
 		OnLineEvent: ctl.OnLineEvent,
-		// A new line's agent may dial before the next config poll.
+		// A new line's agent, or a new peer's WireGuard client, may connect
+		// before the next config poll.
 		OnUnknownAgent: ctl.RefreshConfig,
+		OnUnknownPeer:  ctl.RefreshConfig,
 	})
 	if err != nil {
 		return nil, err

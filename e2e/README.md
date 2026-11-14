@@ -38,6 +38,7 @@ The client sends its flows to public-looking addresses, as a member would: TCP t
 | `TestARetriedUsageReportIsCountedOnce` | The API answers one usage report with 500, or applies it and drops the answer. The retry carries the same event IDs, and the totals stay exact. |
 | `TestTheAgentReconnectsAfterTheGatewayDropsIt` | The gateway restarts on the same ports and keys; the agent reconnects; traffic flows again; line events go online, offline, online, offline; usage across both runs stays exact. |
 | `TestShareTurnedOnWhileTheGatewayRunsWorksWithinSeconds` | The gateway fetches a config without the line or the peer; then the API lists both and the agent starts with the app's reconnect timings. The gateway refuses the agent's first attempt and fetches its config at once; the line is online within 3 s (about 0.6 s locally), not at the 30 s poll, and a download through it works. |
+| `TestANewWireGuardPeerWorksWithinSeconds` | The gateway fetches a config with the line but without member B's peer, and the agent serves the line. Then the API lists the peer and B's client starts. The gateway drops the client's first handshake, from a key it does not know, and fetches its config at once; the client's retry 5 s later gets in. The handshake completes within 8 s (about 5 s locally), not at the 30 s poll, and a download through the new peer works. |
 | `TestLogsNeverNameADestination` | Drives TCP, UDP, DNS and refused flows, then checks the gateway's and agent's logs hold the session metadata but no destination address, origin port, DNS name or request path. |
 
 Every test also ends with the API's contract check and the destination check on both logs.
@@ -154,7 +155,7 @@ HOMEPORT_GATEWAY_TOKEN=hpgw_… go run ./cmd/homeport-gateway \
 
 `--wg-endpoint` goes into every new peer's `.conf`. For the iPhone, it must be the Mac's address on the Wi-Fi the phone uses; for `wgcurl` alone, `127.0.0.1:51820` works. Agents dial the same host on port 4433. Ctrl-C stops the gateway in order: final usage events, lease returns, lines offline.
 
-The gateway polls its config every 30 s. A new line's agent makes it fetch the config at once (at most every 2 s), so Share comes online within a few seconds. A new peer works from the next poll or from such a fetch; restarting the gateway polls at once.
+The gateway polls its config every 30 s. A new line's agent, or a new peer's WireGuard handshake, makes it fetch the config at once (at most every 2 s). So Share comes online within a few seconds, and a new device works at its client's first handshake retry, about 5 s after it connects. Restarting the gateway polls at once.
 
 ### 3. Member A shares (profile A)
 
@@ -248,4 +249,3 @@ B's `purchased` dropped by ⌊bytes × 10 / 10^6⌋ over all of B's sessions on 
 ## Not done yet
 
 - The smoke test's agent runs in-process with the `e2e` tag; the agent CLI is covered only by the manual run.
-- A new WireGuard peer waits for the gateway's next config poll (up to 30 s), unless an agent's refresh comes first: wireguard-go drops a handshake from an unknown key without telling the gateway.

@@ -20,7 +20,8 @@ import (
 const ConfigInterval = 30 * time.Second
 
 // ConfigRefreshInterval is the least time between two config fetches that
-// RefreshConfig asks for, however many unknown agents connect.
+// RefreshConfig asks for, however many unknown agents or WireGuard keys
+// connect.
 const ConfigRefreshInterval = 2 * time.Second
 
 // Gateway is the part of *gateway.Server the controller drives.
@@ -137,8 +138,9 @@ func (c *Controller) SyncConfig(ctx context.Context) error {
 
 // syncRefresh is the fetch RefreshConfig asks for. It asks only for a
 // config changed since the last fetch, even if applying that one failed: a
-// refresh is for new lines, and an unchanged config must cost a 304 however
-// often unknown agents connect. The next poll retries the failed apply.
+// refresh is for new lines and peers, and an unchanged config must cost a
+// 304 however often unknown keys connect. The next poll retries the failed
+// apply.
 func (c *Controller) syncRefresh(ctx context.Context) error {
 	c.mu.Lock()
 	etag := c.fetched
@@ -164,10 +166,11 @@ func (c *Controller) syncConfig(ctx context.Context, etag string) error {
 	return nil
 }
 
-// RefreshConfig asks Run to fetch the config again now, for example because
-// an agent with an unknown key connected: its line may be newer than the
-// gateway's config. Requests made before a fetch starts share that fetch.
-// It never blocks, so the gateway may call it from a TLS handshake.
+// RefreshConfig asks Run to fetch the config again now, because an agent
+// or a WireGuard client with an unknown key connected: its line or peer may
+// be newer than the gateway's config. Requests made before a fetch starts
+// share that fetch. It never blocks, so the gateway may call it from a TLS
+// handshake or the WireGuard receive path.
 func (c *Controller) RefreshConfig() {
 	select {
 	case c.refresh <- struct{}{}:

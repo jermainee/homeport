@@ -132,10 +132,14 @@ paths:
         is dropped at once, open sessions included.
 
         When an agent with an unlisted `device_spki_sha256` connects, the
-        gateway refuses it and fetches the config at once, as the line may
-        be newer than its last poll. These extra fetches come at most every
-        2 seconds per gateway, however many unknown agents connect, and
-        send the last fetched `etag`, so an unchanged config costs a 304.
+        gateway refuses it; a WireGuard handshake from an unlisted
+        `public_key` gets no answer. Either way the gateway fetches the
+        config at once, as the line or peer may be newer than its last poll.
+        The agent retries within a second, and a WireGuard client sends its
+        handshake again after 5 seconds, so a new line or peer works within
+        seconds. These extra fetches come at most every 2 seconds per
+        gateway, however many unknown keys connect, and send the last
+        fetched `etag`, so an unchanged config costs a 304.
 
         Use the body's `etag`, not the `ETag` header: Cloudflare turns the
         header into a weak tag (`W/"..."`) when it compresses the response.

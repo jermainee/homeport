@@ -67,6 +67,15 @@ type Config struct {
 	// can have the config fetched again; the agent's next attempt then finds
 	// its line. It must return quickly and must not call the Server.
 	OnUnknownAgent func()
+
+	// OnUnknownPeer, if set, is called when a WireGuard handshake
+	// initiation comes from a key that is no peer's. WireGuard drops it, but
+	// the peer may be newer than the gateway's config, so the callback can
+	// have the config fetched again; the client sends its initiation again
+	// after 5 s, and that one gets in. The gateway decrypts the sender's key
+	// off the packet path, at most one initiation a millisecond. The
+	// callback must return quickly and must not call the Server.
+	OnUnknownPeer func()
 }
 
 // Peer is a member device allowed to connect.
@@ -141,6 +150,8 @@ type Server struct {
 	byAddr map[netip.Addr]Key
 	lines  map[string]Line
 	closed bool
+
+	unknown *unknownPeers // watches handshakes for Config.OnUnknownPeer; nil without one
 }
 
 // New starts a gateway listening for WireGuard on cfg.ListenPort.
@@ -185,7 +196,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
 	s.stack = st
-	dev := device.NewDevice(st, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	bind := conn.NewDefaultBind()
+	if cfg.OnUnknownPeer != nil {
+		s.unknown = newUnknownPeers(cfg.PrivateKey, s.knownPeer, cfg.OnUnknownPeer)
+		bind = &watchedBind{Bind: bind, unknown: s.unknown}
+	}
+	dev := device.NewDevice(st, bind, device.NewLogger(device.LogLevelSilent, ""))
 	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)
 	fail := func(err error) (*Server, error) {
 		dev.Close()
@@ -203,6 +219,9 @@ func New(cfg Config) (*Server, error) {
 		return fail(fmt.Errorf("gateway: %w", err))
 	}
 	s.dev, s.port = dev, port
+	if s.unknown != nil {
+		go s.unknown.run()
+	}
 	return s, nil
 }
 
@@ -372,6 +391,14 @@ func (s *Server) AddPeer(p Peer) error {
 	return nil
 }
 
+// knownPeer reports whether key is a peer's public key.
+func (s *Server) knownPeer(key Key) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.peers[key]
+	return ok
+}
+
 func sharesAddress(a, b Peer) bool {
 	return (a.IPv4.IsValid() && a.IPv4 == b.IPv4) || (a.IPv6.IsValid() && a.IPv6 == b.IPv6)
 }
@@ -430,13 +457,18 @@ func (s *Server) PeerUsage(addr netip.Addr) Usage {
 // Close stops the gateway.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	s.dev.Close()
 	s.closeRelay()
+	s.mu.Unlock()
+	if s.unknown != nil {
+		// Outside mu: an inspection may be waiting for it in knownPeer.
+		s.unknown.close()
+	}
 	return nil
 }
 
