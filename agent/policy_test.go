@@ -140,6 +140,51 @@ func TestPolicyRefusesTheNetworksOfTheMachinesInterfaces(t *testing.T) {
 	}
 }
 
+func TestPolicyRefusesTheHomesOtherIPv6Subnets(t *testing.T) {
+	// A home gets a delegated prefix, usually a /56, and numbers its
+	// networks (main, guest, IoT) as /64s inside it. The machine sits in one
+	// of them, sometimes with a /128 from DHCPv6. Every /64 in the /56 around
+	// each of its global addresses is the home network.
+	restore := interfaceAddrs
+	t.Cleanup(func() { interfaceAddrs = restore })
+	interfaceAddrs = func() ([]net.Addr, error) {
+		var addrs []net.Addr
+		for _, cidr := range []string{
+			"2a02:8070:abcd:1200::5/64", // SLAAC in the main /64
+			"2a03:2880:1:1234::5/128",   // DHCPv6, reported as a /128
+			"fd00:1:2:3::5/64",          // unique local: already refused
+			"fe80::1/64",                // link-local: never widened
+			"192.168.178.20/24",         // IPv4 LAN
+		} {
+			ip, n, err := net.ParseCIDR(cidr)
+			if err != nil {
+				return nil, err
+			}
+			addrs = append(addrs, &net.IPNet{IP: ip, Mask: n.Mask})
+		}
+		return addrs, nil
+	}
+	p := newPolicy(testObservedIP, nil, nil)
+	for dst, wantRefused := range map[string]bool{
+		"[2a02:8070:abcd:1200::42]:443":                 true,  // the machine's own /64
+		"[2a02:8070:abcd:1201::1]:443":                  true,  // the guest /64
+		"[2a02:8070:abcd:12ff:ffff:ffff:ffff:ffff]:443": true,  // the /56's last address
+		"[2a02:8070:abcd:1100::1]:443":                  false, // the /56 below
+		"[2a02:8070:abcd:1300::1]:443":                  false, // the /56 above
+		"[2a03:2880:1:1234::9]:443":                     true,  // the /128's own /64
+		"[2a03:2880:1:12ab::1]:443":                     true,  // its /56
+		"[2a03:2880:1:1300::1]:443":                     false,
+		"[fd00:1:2:4::1]:443":                           true, // refused as unique local
+		"93.184.215.14:443":                             false,
+	} {
+		err := p.check(netip.MustParseAddrPort(dst))
+		var polErr *policyError
+		if refused := errors.As(err, &polErr); refused != wantRefused {
+			t.Errorf("check(%s) = %v, want refused %v", dst, err, wantRefused)
+		}
+	}
+}
+
 func TestAnIPv4MappedTestOriginIsAllowedToo(t *testing.T) {
 	origin := startTCPOrigin(t, func(*net.TCPConn) {})
 	mapped := netip.AddrPortFrom(netip.AddrFrom16(origin.Addr().As16()), origin.Port())
