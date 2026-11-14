@@ -83,7 +83,7 @@ Every member has one account, one identity check and one credit balance. In this
 3. Buy credits (100 GB for €40 net) or use earned credits, then get a WireGuard config per device (file or QR code) plus SOCKS5 credentials.
 4. Connect with the official WireGuard app, or load the config into a travel router (GL.iNet, OpenWrt) so every device behind it goes through home. Usage is metered on the gateway, so the router needs no Homeport software.
 5. Run the built-in Home Check: it shows exactly what websites see (IP, ISP, DNS resolver, IPv6, WebRTC, timezone mismatch).
-6. Track usage per device and the credit balance; get alerts at low balance, when the line drops or when its IP changes; switch to a backup line in the same city with one click.
+6. Track usage per device and the credit balance; get alerts at low balance, when the line drops or when its IP changes. While the line is down, devices move on their own to a backup line in the same city, else the same country, and come back once the line has been up for 5 minutes. The WireGuard config never changes, and a device can be moved to another line with one click.
 
 **Share flow**
 
@@ -96,7 +96,7 @@ Every member has one account, one identity check and one credit balance. In this
 
 **Core features**
 
-- Sticky lines with alerts on IP change, plus same-city failover
+- Sticky lines with alerts on IP change, plus automatic failover: same city first, then same country
 - Plain WireGuard, so it works on travel routers, phones, laptops and TVs
 - Desktop app for the latest Linux, macOS and Windows releases; older OS versions are out of scope
 - Split tunneling guide in v1 (route only banking and admin apps); own client app with per-app routing later
@@ -193,6 +193,16 @@ The gateway ends the buyer's tunnel, and the seller agent opens real sockets fro
 4. Each flow becomes a stream on the seller's QUIC connection, for example "open TCP to 203.0.113.7:443".
 5. The agent opens a normal socket on the home machine and pipes bytes both ways.
 6. DNS goes the same way: the gateway answers on a virtual DNS address and the agent resolves through the home router, so the ISP's resolver appears. SOCKS5 clients use remote hostname resolution (socks5h).
+
+**Failover**
+
+A buyer keeps one line, but home lines go offline: a laptop sleeps, a router reboots. The line a device exits through is chosen on the gateway, not in its WireGuard config, so the gateway can move a device without the buyer touching it.
+
+- Each device exits through its chosen line whenever that line is online.
+- Once the line has been offline for 10 seconds, the gateway starts the device's next session on a backup line on the same gateway: a line in the same city first, then one in the same country. An agent that reconnects within those seconds keeps its devices, and their IP. The buyer can narrow this to the same city, or turn it off. Backup lines are spread over the buyers of one line, and all of one buyer's devices use the same backup, so they keep sharing one exit.
+- Once the chosen line has been online for 5 minutes without a break, the device moves back. Moving ends open connections, so a flapping line does not move a device back and forth.
+- A backup line passes the same checks as a chosen one: never the buyer's own line or a linked member's, and it must have room for one more user. Its owner earns from the sessions it carries.
+- The app shows when a device runs on a backup line, and where.
 
 Gateways sit in the seller's region (Frankfurt for German lines). The buyer's long leg is unavoidable, and the seller leg stays short and stable. The seller's upload is the speed limit: a 100/40 Mbit/s line shared at 50% gives the buyer about 20 Mbit/s down.
 
@@ -377,7 +387,7 @@ The two risks that can end the business are sellers getting into legal trouble a
 | A seller faces a police inquiry or legal claim over buyer traffic | One public case can scare off all sellers | Exit rules, verified buyers, session records, platform-led abuse handling, legal-cost support fund or insurance; start with Family Ports and low-risk use |
 | Cold start: too few sellers in demand cities | Buyers want specific cities and stable lines | Launch in Germany only, 5 cities; Family Port referrals; every user invited to share a home line for credits |
 | Lines end up in proxy-detection databases | The core promise breaks | Dedicated lines, one line per buyer, no pool to enumerate, daily reputation checks, retire flagged lines |
-| Home line downtime or IP change | Banking sessions fail or trigger checks | Always-on hardware, uptime-linked reservation pay, uptime score shown to users, same-city backup line, IP-change alerts |
+| Home line downtime or IP change | Banking sessions fail or trigger checks | Always-on hardware, uptime-linked reservation pay, uptime score shown to users, automatic backup line (same city, then same country), IP-change alerts |
 | ISP terminates a seller's contract | Seller loses internet and trust in Homeport | ISP review, clear disclosure, prefer ISPs that allow sharing |
 | Light users bring little revenue | At 5 GB a month, a user brings about €0.50 after fees on a shared line, and its owner earns about €1 | Daily reservation for exclusive lines; invite every user to share a home line; target full-tunnel users |
 | Payment provider review or chargebacks | Frozen funds stop payouts | Open onboarding with Stripe, 3D Secure, Stripe Identity, 30-day holdback |
@@ -404,9 +414,9 @@ Validate demand and the legal position in six weeks before writing production co
 flowchart LR
   validate["Validate<br/>Weeks 1–6<br/>20 buyer interviews<br/>Pre-order page<br/>Legal opinion<br/>10 Family Ports set up by hand"]
   gate1{{"Gate 1<br/>30+ pre-orders<br/>no legal blocker"}}
-  mvp["MVP<br/>Months 2–5<br/>Germany, 5 cities<br/>Agent: Docker, Linux, macOS, Windows<br/>1 gateway, Frankfurt<br/>WireGuard, SOCKS5<br/>Stripe Identity, Checkout, Connect"]
+  mvp["MVP<br/>Months 2–5<br/>Germany, 5 cities<br/>Agent: Docker, Linux, macOS, Windows<br/>1 gateway, Frankfurt<br/>WireGuard, SOCKS5<br/>Same-city, then same-country failover<br/>Stripe Identity, Checkout, Connect"]
   gate2{{"Gate 2<br/>50 paying buyers<br/>95% line uptime"}}
-  v1["v1: expand<br/>Months 6–9<br/>AT, CH, NL, UK<br/>Home Check page<br/>Same-city failover<br/>Auto top-up, packs in GBP and CHF<br/>Abuse tooling"]
+  v1["v1: expand<br/>Months 6–9<br/>AT, CH, NL, UK<br/>Home Check page<br/>Auto top-up, packs in GBP and CHF<br/>Abuse tooling"]
   gate3{{"Gate 3<br/>500 paying buyers<br/>25%+ margin"}}
   v2["v2: scale<br/>Months 10–15<br/>US and Canada<br/>Client app with per-app routing<br/>Router agent, packet mode<br/>Owner-set prices"]
   validate --> gate1 --> mvp --> gate2 --> v1 --> gate3 --> v2

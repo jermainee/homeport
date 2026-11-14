@@ -1281,12 +1281,13 @@ components:
 
             A session exits through one line from start to end. The gateway
             starts each session on the first online line of `line_id`, then
-            `fallback_line_ids`. When the session's line goes offline, the
-            gateway ends the session, and the peer's next flow starts one on
-            the next online line. A session on a fallback line ends once a
-            line earlier in that order has been online for `failback_seconds`
-            without a break, so the peer moves back to its chosen line.
-            Ending a session resets the peer's open flows.
+            `fallback_line_ids`. When the session's line has been offline
+            for 10 seconds, the gateway ends the session, and the peer's next
+            flow starts one on the next online line; an agent that reconnects
+            sooner keeps its sessions. A session on a fallback line ends once
+            a line earlier in that order has been online for
+            `failback_seconds` without a break, so the peer moves back to its
+            chosen line. Ending a session resets the peer's open flows.
           type: array
           uniqueItems: true
           items:
