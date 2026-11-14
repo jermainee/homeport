@@ -59,14 +59,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	out := stdout
+	var outFile *os.File
 	if *outPath != "" {
-		f, err := os.Create(*outPath)
-		if err != nil {
+		if outFile, err = os.Create(*outPath); err != nil {
 			_, _ = fmt.Fprintf(stderr, "wgcurl: %v\n", err)
 			return 1
 		}
-		defer func() { _ = f.Close() }()
-		out = f
+		defer func() { _ = outFile.Close() }() // a second Close only returns an error
+		out = outFile
 	}
 
 	client, err := wgclient.New(cfg)
@@ -78,6 +78,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	code := fetch(ctx, client, flags.Arg(0), out, stderr)
+	if outFile != nil {
+		// A write the OS deferred can still fail here, as on a full disk.
+		if err := outFile.Close(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "wgcurl: %v\n", err)
+			code = 1
+		}
+	}
 	sent, received := settle(client)
 	_, _ = fmt.Fprintf(stderr, "wgcurl: tunnel carried %d bytes: %d sent, %d received\n", sent+received, sent, received)
 	return code

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -96,24 +97,31 @@ func (c *Client) DevConfirm(ctx context.Context, loginRequestID string) error {
 		map[string]any{"session_token": c.Token}, http.StatusOK, nil)
 }
 
+// Approved is a sign-in the member approved: whose session it is, and
+// when the session ends.
+type Approved struct {
+	MemberID  string    `json:"member_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // WaitLogin polls a login request every interval until the member
-// approved it, and returns the member's id.
-func (c *Client) WaitLogin(ctx context.Context, loginRequestID string, interval time.Duration) (string, error) {
+// approved it.
+func (c *Client) WaitLogin(ctx context.Context, loginRequestID string, interval time.Duration) (Approved, error) {
 	for {
 		var answer struct {
-			Status   string `json:"status"`
-			MemberID string `json:"member_id"`
+			Approved
+			Status string `json:"status"`
 		}
 		status, err := c.call(ctx, http.MethodGet, "/v1/auth/login-requests/"+url.PathEscape(loginRequestID), true, nil, &answer)
 		if err != nil {
-			return "", err
+			return Approved{}, err
 		}
 		if status == http.StatusOK && answer.Status == "approved" {
-			return answer.MemberID, nil
+			return answer.Approved, nil
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return Approved{}, ctx.Err()
 		case <-time.After(interval):
 		}
 	}
@@ -130,7 +138,8 @@ func (c *Client) SignInDev(ctx context.Context, email string) (string, error) {
 	if err := c.DevConfirm(ctx, lr.ID); err != nil {
 		return "", err
 	}
-	return c.WaitLogin(ctx, lr.ID, 100*time.Millisecond)
+	approved, err := c.WaitLogin(ctx, lr.ID, 100*time.Millisecond)
+	return approved.MemberID, err
 }
 
 // Credits are a member's ledger balances.
@@ -192,6 +201,15 @@ func (c *Client) RegisterDevice(ctx context.Context, name, platform string, agen
 		"agent_public_key": base64.StdEncoding.EncodeToString(agentKey),
 	}, &d)
 	return d, err
+}
+
+// Platform is this machine's platform as the API names it: linux, macos or
+// windows.
+func Platform() string {
+	if runtime.GOOS == "darwin" {
+		return "macos"
+	}
+	return runtime.GOOS
 }
 
 // Line is a device's line and the gateway its agent dials.

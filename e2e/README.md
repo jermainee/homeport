@@ -71,14 +71,14 @@ member B's WireGuard ──▶ gateway binary ──QUIC──▶ member A's age
 3. **Members,** through the member endpoints and the dev routes, as `memberapi` calls them: A and B sign in (`/dev/login-requests/{id}/confirm`), both are marked verified (`/dev/members/{id}/identity/verify`), B gets 1,000,000 credits (`/dev/members/{id}/credits`). A registers an agent key, creates a line and turns sharing on; B creates a WireGuard peer on it and gets its `.conf`.
 4. **Restart.** The gateway learns new lines and peers at its next config poll, every 30 s. The test restarts it (same state dir and ports), so its first poll serves both.
 5. **Agent and client.** A's agent dials the gateway the API named for the line, with the pin it named. B's client runs the API's `.conf` with B's own key, parsed by `wgclient.ParseConfig`.
-6. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease.
+6. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the `wgcurl` binary fetches 1 MB more with the same `.conf` and reports the bytes its tunnel carried. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease.
 
 The agent and the client run in the test's process. The agent needs the `e2e` tag's `RouteTestOrigin` to reach the loopback origin through a real gateway (see [Destinations](#destinations)), and `cmd/homeport-agent` refuses that tag on purpose. The client's tun counts every inner byte, which the checks compare with what the API recorded. The [manual run](#manual-run) below uses the agent CLI and a public website instead.
 
 | Check | How |
 | --- | --- |
-| B's transfers arrive intact | SHA-256 of the download and of the upload at the origin |
-| The gateway reported every byte | The API's `usage_sessions` for B's peer hold exactly the bytes B's tun counted |
+| B's transfers arrive intact | SHA-256 of the download, of the upload at the origin, and of `wgcurl`'s body |
+| The gateway reported every byte | The API's `usage_sessions` for B's peer hold exactly the bytes B's tun counted plus those `wgcurl` reported |
 | B paid 10 credits per MB | `GET /v1/me`: B's `purchased` is 1,000,000 − ⌊bytes × 10 / 10^6⌋ |
 | A earned 5 credits per MB | `GET /v1/me`: A's `earned_pending` is ⌊bytes × 5 / 10^6⌋ |
 | The platform kept the difference | `platform:platform_revenue` |
@@ -87,7 +87,7 @@ The agent and the client run in the test's process. The agent needs the `e2e` ta
 | No self-dealing | B shares a line of its own; a peer on it gets `403 line_not_allowed` |
 | No log names a destination | The gateway's, the agent's and `wrangler dev`'s logs hold no origin address, port or request path |
 
-The SQL checks run `wrangler d1 execute --local --json` on the test's database.
+The SQL checks run in one `wrangler d1 execute --local --json` on the test's database.
 
 ### Run
 
@@ -105,9 +105,9 @@ CI runs it in the `smoke` job of `e2e-ci.yml` on Ubuntu, with `go vet` for the `
 Both are for local runs against `wrangler dev`, and both build without the `e2e` tag.
 
 - **`cmd/wgcurl`** fetches a URL through a WireGuard tunnel in userspace (wireguard-go's netstack), so it needs no root and changes no routes; it can run on the sharing Mac itself. It reads a wg-quick `.conf` with the private key filled in, resolves names through the tunnel's DNS (the agent's resolver), writes the body to stdout or `-o`, and reports the status, the body's SHA-256 and the inner bytes the tunnel carried. The gateway's meter for the peer must match those bytes.
-- **`cmd/member`** does what the app's Use mode will do (P17): `signin EMAIL [-dev]`, `me`, `identity` (Stripe Identity page), `checkout` (Stripe Checkout page), `lines`, `peer LINE_ID` (creates the key pair locally and prints the `.conf` with the private key), and `share KEY_FILE` (registers the agent CLI's key, creates the line, turns sharing on and prints the agent's `HOMEPORT_GATEWAY` and `HOMEPORT_GATEWAY_PIN`). `verify` and `credits N` use the dev routes. Its session file has the app's `session.json` format, so `-session <profile>/session.json` acts as a desktop-app profile's member.
+- **`cmd/member`** does what the app's Use mode will do (P17): `signin EMAIL [-dev]`, `me`, `identity` (Stripe Identity page), `checkout` (Stripe Checkout page), `lines`, `peer LINE_ID` (creates the key pair locally and prints the `.conf` with the private key), and `share KEY_FILE` (registers the agent CLI's key, creates the line, turns sharing on and prints the agent's `HOMEPORT_GATEWAY` and `HOMEPORT_GATEWAY_PIN`). `verify` and `credits N` use the dev routes. Its session file has the app's `session.json` format, so `-session <profile>/session.json` acts as a desktop-app profile's member. `signin` never replaces an existing session file, so it cannot sign a profile out; the file it writes is readable by the user only.
 
-`internal/memberapi` is the client both the tools and the smoke test use.
+`internal/memberapi` is the client both the tools and the smoke test use. The smoke test runs `wgcurl`; `cmd/member` has its own tests against a stub API.
 
 ## Manual run
 

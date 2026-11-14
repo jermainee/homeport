@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +37,7 @@ import (
 const (
 	smokeDownload = 3_000_000
 	smokeUpload   = 1_000_000
+	smokeWgcurl   = 1_000_000
 	smokeCredits  = 1_000_000
 
 	// Prices from api/src/pricing.ts, per 10^6 bytes, upload plus download.
@@ -64,7 +64,8 @@ func TestFullStackSmoke(t *testing.T) {
 	origin := startOrigin(t)
 
 	worker := startWorker(t, dir)
-	gwBin := buildGateway(t, dir)
+	gwBin := goBuild(t, dir, "github.com/jermainee/homeport/gateway/cmd/homeport-gateway")
+	wgcurlBin := goBuild(t, dir, "github.com/jermainee/homeport/e2e/cmd/wgcurl")
 	gw := newGatewayRunner(t, gwBin, worker, dir)
 	gw.start()
 
@@ -79,7 +80,7 @@ func TestFullStackSmoke(t *testing.T) {
 
 	// A's line, as the app's Share switch creates it.
 	agentKey, agentCert := newAgentIdentity(t)
-	device, err := a.RegisterDevice(ctx, "Smoke A", platform(), agentKey.Public().(ed25519.PublicKey))
+	device, err := a.RegisterDevice(ctx, "Smoke A", memberapi.Platform(), agentKey.Public().(ed25519.PublicKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestFullStackSmoke(t *testing.T) {
 
 	t.Run("no self-dealing: B gets no peer on B's own line", func(t *testing.T) {
 		bAgent, _ := newAgentIdentity(t)
-		bDevice, err := b.RegisterDevice(ctx, "Smoke B", platform(), bAgent.Public().(ed25519.PublicKey))
+		bDevice, err := b.RegisterDevice(ctx, "Smoke B", memberapi.Platform(), bAgent.Public().(ed25519.PublicKey))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +174,8 @@ func TestFullStackSmoke(t *testing.T) {
 	})
 
 	// B's client runs the .conf the API handed out, with B's own key.
-	clientCfg, err := wgclient.ParseConfig(wgclient.WithPrivateKey(peer.ConfigText, clientKey))
+	conf := wgclient.WithPrivateKey(peer.ConfigText, clientKey)
+	clientCfg, err := wgclient.ParseConfig(conf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +192,7 @@ func TestFullStackSmoke(t *testing.T) {
 		Transport: &http.Transport{DialContext: client.Net.DialContext, DisableKeepAlives: true},
 	}
 
-	t.Run("B fetches through A's line, intact", func(t *testing.T) {
+	if !t.Run("B fetches through A's line, intact", func(t *testing.T) {
 		resp, err := httpClient.Get(fmt.Sprintf("http://%s%s/blob/%d", tcpDst, contentPath, smokeDownload))
 		if err != nil {
 			t.Fatal(err)
@@ -214,7 +216,9 @@ func TestFullStackSmoke(t *testing.T) {
 		if err != nil || resp.StatusCode != http.StatusOK || string(got) != sum(up) {
 			t.Errorf("the origin got an upload with SHA-256 %q (%d, %v), want %s", got, resp.StatusCode, err, sum(up))
 		}
-	})
+	}) {
+		t.FailNow() // the money checks below would only repeat this failure
+	}
 
 	// Every inner byte, as B's tun counted it once the last ACKs landed.
 	tun := waitStable(t, time.Second, func() [2]uint64 { return [2]uint64{client.Sent(), client.Received()} })
@@ -222,15 +226,35 @@ func TestFullStackSmoke(t *testing.T) {
 	t.Logf("B's tun: %d bytes sent, %d received", tun[0], tun[1])
 	client.Close()
 
+	// The runbook's tool, with the same .conf: one more fetch, whose tunnel
+	// bytes it reports.
+	if !t.Run("wgcurl fetches with the API's .conf", func(t *testing.T) {
+		n := runWgcurl(t, wgcurlBin, dir, conf, fmt.Sprintf("http://%s%s/blob/%d", tcpDst, contentPath, smokeWgcurl))
+		t.Logf("wgcurl's tunnel: %d bytes", n)
+		tunnelBytes += n
+	}) {
+		t.FailNow()
+	}
+
 	// SIGTERM: the gateway ends the session with a final usage event, then
 	// returns the lease.
 	gw.stop()
 
-	t.Run("the gateway reported every byte B's tun counted", func(t *testing.T) {
-		rows := worker.query(t, fmt.Sprintf(
-			`SELECT COALESCE(SUM(bytes_up + bytes_down), 0) AS bytes FROM usage_sessions WHERE peer_id = '%s'`, sqlID(t, peer.Peer.ID)))
-		if got := int64(rows[0]["bytes"].(float64)); got != tunnelBytes {
-			t.Errorf("the API recorded %d bytes for B's peer; B's tun counted %d", got, tunnelBytes)
+	db := worker.query(t,
+		fmt.Sprintf(`SELECT COALESCE(SUM(bytes_up + bytes_down), 0) AS bytes FROM usage_sessions WHERE peer_id = '%s'`, sqlID(t, peer.Peer.ID)),
+		`SELECT balance FROM ledger_accounts WHERE id = 'platform:platform_revenue'`,
+		sqlUnbalancedTransactions,
+		sqlDriftedBalances,
+		`SELECT
+			(SELECT COUNT(*) FROM leases) AS leases,
+			(SELECT COUNT(*) FROM leases WHERE returned_at IS NULL) AS open_leases,
+			(SELECT COUNT(*) FROM credit_reservations WHERE released_at IS NULL) AS open_reservations`,
+	)
+	usage, revenue, unbalanced, drifted, leases := db[0], db[1], db[2], db[3], db[4]
+
+	t.Run("the gateway reported every byte B's tunnels counted", func(t *testing.T) {
+		if got := int64(usage[0]["bytes"].(float64)); got != tunnelBytes {
+			t.Errorf("the API recorded %d bytes for B's peer; B's tunnels counted %d", got, tunnelBytes)
 		}
 	})
 
@@ -257,25 +281,20 @@ func TestFullStackSmoke(t *testing.T) {
 		}
 	})
 	t.Run("the platform kept the difference", func(t *testing.T) {
-		rows := worker.query(t, `SELECT balance FROM ledger_accounts WHERE id = 'platform:platform_revenue'`)
-		if got := int64(rows[0]["balance"].(float64)); got != charged-earned {
+		if got := int64(revenue[0]["balance"].(float64)); got != charged-earned {
 			t.Errorf("platform revenue is %d, want %d", got, charged-earned)
 		}
 	})
 	t.Run("every ledger transaction sums to zero", func(t *testing.T) {
-		if rows := worker.query(t, sqlUnbalancedTransactions); len(rows) > 0 {
-			t.Errorf("unbalanced transactions: %v", rows)
+		if len(unbalanced) > 0 {
+			t.Errorf("unbalanced transactions: %v", unbalanced)
 		}
-		if rows := worker.query(t, sqlDriftedBalances); len(rows) > 0 {
-			t.Errorf("accounts whose balance is not the sum of their entries: %v", rows)
+		if len(drifted) > 0 {
+			t.Errorf("accounts whose balance is not the sum of their entries: %v", drifted)
 		}
 	})
 	t.Run("the gateway returned its leases", func(t *testing.T) {
-		rows := worker.query(t, `SELECT
-			(SELECT COUNT(*) FROM leases) AS leases,
-			(SELECT COUNT(*) FROM leases WHERE returned_at IS NULL) AS open_leases,
-			(SELECT COUNT(*) FROM credit_reservations WHERE released_at IS NULL) AS open_reservations`)
-		if r := rows[0]; r["leases"].(float64) < 1 || r["open_leases"].(float64) != 0 || r["open_reservations"].(float64) != 0 {
+		if r := leases[0]; r["leases"].(float64) < 1 || r["open_leases"].(float64) != 0 || r["open_reservations"].(float64) != 0 {
 			t.Errorf("leases after the gateway stopped: %v", r)
 		}
 	})
@@ -332,14 +351,6 @@ func newAgentIdentity(t *testing.T) (ed25519.PrivateKey, tls.Certificate) {
 		t.Fatal(err)
 	}
 	return key, cert
-}
-
-// platform is this machine's platform, as the API names it.
-func platform() string {
-	if runtime.GOOS == "darwin" {
-		return "macos"
-	}
-	return runtime.GOOS
 }
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -418,9 +429,10 @@ func startWorker(t *testing.T, dir string) *worker {
 	// wrangler's exit status after SIGINT says nothing about the test.
 	t.Cleanup(func() { _ = p.stop(syscall.SIGINT) })
 
+	probe := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		resp, err := http.Get(w.url + "/v1/me")
+		resp, err := probe.Get(w.url + "/v1/me")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized {
@@ -434,12 +446,12 @@ func startWorker(t *testing.T, dir string) *worker {
 	}
 }
 
-// query runs SQL on the Worker's local D1 and returns the last statement's
-// rows. Numbers come back as float64.
-func (w *worker) query(t *testing.T, sql string) []map[string]any {
+// query runs SQL statements on the Worker's local D1 in one wrangler call
+// and returns each statement's rows. Numbers come back as float64.
+func (w *worker) query(t *testing.T, statements ...string) [][]map[string]any {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(w.apiDir, "node_modules", ".bin", "wrangler"), // #nosec G204 -- the test's own query
-		"d1", "execute", "homeport", "--local", "--persist-to", w.persist, "--json", "--command", sql)
+		"d1", "execute", "homeport", "--local", "--persist-to", w.persist, "--json", "--command", strings.Join(statements, ";\n"))
 	cmd.Dir = w.apiDir
 	cmd.Env = wranglerEnv()
 	var stderr bytes.Buffer
@@ -451,23 +463,27 @@ func (w *worker) query(t *testing.T, sql string) []map[string]any {
 	var results []struct {
 		Results []map[string]any `json:"results"`
 	}
-	if err := json.Unmarshal(out, &results); err != nil || len(results) == 0 {
+	if err := json.Unmarshal(out, &results); err != nil || len(results) != len(statements) {
 		t.Fatalf("wrangler d1 execute printed %q: %v", out, err)
 	}
-	return results[len(results)-1].Results
+	rows := make([][]map[string]any, len(results))
+	for i, r := range results {
+		rows[i] = r.Results
+	}
+	return rows
 }
 
 func wranglerEnv() []string {
 	return append(os.Environ(), "WRANGLER_SEND_METRICS=false", "NO_COLOR=1", "FORCE_COLOR=0")
 }
 
-// buildGateway builds cmd/homeport-gateway into dir.
-func buildGateway(t *testing.T, dir string) string {
+// goBuild builds a command into dir and returns its path.
+func goBuild(t *testing.T, dir, pkg string) string {
 	t.Helper()
-	bin := filepath.Join(dir, "homeport-gateway")
-	cmd := exec.Command("go", "build", "-o", bin, "github.com/jermainee/homeport/gateway/cmd/homeport-gateway") // #nosec G204 -- fixed arguments
+	bin := filepath.Join(dir, filepath.Base(pkg))
+	cmd := exec.Command("go", "build", "-o", bin, pkg) // #nosec G204 -- the test's own packages
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build the gateway: %v\n%s", err, out)
+		t.Fatalf("go build %s: %v\n%s", pkg, err, out)
 	}
 	return bin
 }
@@ -485,11 +501,12 @@ type gatewayRunner struct {
 }
 
 func newGatewayRunner(t *testing.T, bin string, w *worker, dir string) *gatewayRunner {
+	ports := freeUDPPorts(t, 2)
 	g := &gatewayRunner{
 		t: t, bin: bin, api: w.url, token: w.token,
 		stateDir: filepath.Join(dir, "gateway-state"),
-		wgPort:   freeUDPPort(t),
-		quicPort: freeUDPPort(t),
+		wgPort:   ports[0],
+		quicPort: ports[1],
 		logs:     &syncBuffer{},
 	}
 	g.wgEndpoint = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(g.wgPort)))
@@ -591,4 +608,55 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+// freeUDPPorts returns n different UDP ports nothing listens on right now.
+// It holds each until it has all, so it never returns one port twice.
+func freeUDPPorts(t *testing.T, n int) []uint16 {
+	t.Helper()
+	ports := make([]uint16, n)
+	for i := range ports {
+		pc, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = pc.Close() }()
+		ports[i] = pc.LocalAddr().(*net.UDPAddr).AddrPort().Port()
+	}
+	return ports
+}
+
+var (
+	wgcurlSum   = regexp.MustCompile(`, (\d+) bytes, sha256 ([0-9a-f]{64})\n`)
+	wgcurlBytes = regexp.MustCompile(`tunnel carried (\d+) bytes`)
+)
+
+// runWgcurl fetches url with the wgcurl binary and the .conf text, checks
+// the body against the origin's blob, and returns the tunnel bytes wgcurl
+// reported.
+func runWgcurl(t *testing.T, bin, dir, conf, url string) int64 {
+	t.Helper()
+	confPath := filepath.Join(dir, "b.conf")
+	if err := os.WriteFile(confPath, []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "-conf", confPath, "-timeout", transferTimeout.String(), url) // #nosec G204 -- the test's own binary
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("wgcurl: %v\n%s", err, stderr.String())
+	}
+	m := wgcurlSum.FindStringSubmatch(stderr.String())
+	if m == nil || m[1] != strconv.Itoa(smokeWgcurl) || m[2] != sum(blob(smokeWgcurl)) || sum(stdout.Bytes()) != m[2] {
+		t.Fatalf("wgcurl got %d bytes with SHA-256 %s; it reported:\n%s", stdout.Len(), sum(stdout.Bytes()), stderr.String())
+	}
+	b := wgcurlBytes.FindStringSubmatch(stderr.String())
+	if b == nil {
+		t.Fatalf("wgcurl reported no tunnel bytes:\n%s", stderr.String())
+	}
+	n, err := strconv.ParseInt(b[1], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

@@ -78,6 +78,23 @@ func TestParseConfigReadsTheMTU(t *testing.T) {
 	}
 }
 
+func TestParseConfigReadsAddressesOnSeveralLinesAndInlineComments(t *testing.T) {
+	text := "[Interface]\nPrivateKey = " + base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\n" +
+		"Address = 10.77.1.3/32 # IPv4\nAddress = fd77::103/128\nDNS = 10.77.0.1\nDNS = fd77::1\n\n" +
+		"[Peer]\nPublicKey = YND9Jx2S347AP/Ywks3VrMciTOYivx8pQxgWoPy1HHY= # the gateway\n" +
+		"Endpoint = 127.0.0.1:51820 # home\n"
+
+	cfg, err := ParseConfig(text)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Address != netip.MustParseAddr("10.77.1.3") || cfg.DNS != netip.MustParseAddr("10.77.0.1") ||
+		cfg.Endpoint != "127.0.0.1:51820" || cfg.PeerPublicKey != "YND9Jx2S347AP/Ywks3VrMciTOYivx8pQxgWoPy1HHY=" {
+		t.Errorf("got %+v", cfg)
+	}
+}
+
 func TestParseConfigRefusesAnIncompleteConfig(t *testing.T) {
 	full := WithPrivateKey(examplePeer(t), testKey())
 	for name, text := range map[string]string{

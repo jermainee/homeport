@@ -40,7 +40,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -167,8 +166,7 @@ func share(ctx context.Context, c *memberapi.Client, keyPath string, stdout io.W
 	if err != nil {
 		return err
 	}
-	host, _ := os.Hostname()
-	device, err := c.RegisterDevice(ctx, truncate(host, 64), platform(), key.Public().(ed25519.PublicKey))
+	device, err := c.RegisterDevice(ctx, deviceName(), memberapi.Platform(), key.Public().(ed25519.PublicKey))
 	if err != nil {
 		return err
 	}
@@ -209,12 +207,13 @@ func loadAgentKey(path string) (ed25519.PrivateKey, error) {
 	return key, nil
 }
 
-// platform is this machine's platform, as the API names it.
-func platform() string {
-	if runtime.GOOS == "darwin" {
-		return "macos"
+// deviceName names this machine's device: its host name, or a fixed name
+// when it has none, since the API wants 1 to 64 characters.
+func deviceName() string {
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return truncate(host, 64)
 	}
-	return runtime.GOOS
+	return "homeport-agent"
 }
 
 func signIn(ctx context.Context, c *memberapi.Client, path string, args []string, stderr io.Writer) error {
@@ -228,6 +227,10 @@ func signIn(ctx context.Context, c *memberapi.Client, path string, args []string
 	email := args[0]
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	// Never replace a session, such as a desktop-app profile's.
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s exists; remove it or pass another -session", path)
 	}
 	c.Token = memberapi.NewSessionToken()
 	lr, err := c.StartLogin(ctx, email)
@@ -243,14 +246,14 @@ func signIn(ctx context.Context, c *memberapi.Client, path string, args []string
 	}
 	waitCtx, cancel := context.WithDeadline(ctx, lr.ExpiresAt)
 	defer cancel()
-	memberID, err := c.WaitLogin(waitCtx, lr.ID, 2*time.Second)
+	approved, err := c.WaitLogin(waitCtx, lr.ID, 2*time.Second)
 	if err != nil {
 		return err
 	}
-	if err := saveSession(path, session{Token: c.Token, MemberID: memberID}); err != nil {
+	if err := saveSession(path, session{Token: c.Token, MemberID: approved.MemberID, ExpiresAt: approved.ExpiresAt}); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(stderr, "member: signed in as %s; session in %s\n", memberID, path)
+	_, _ = fmt.Fprintf(stderr, "member: signed in as %s; session in %s\n", approved.MemberID, path)
 	return nil
 }
 
@@ -266,20 +269,32 @@ func loadSession(path string) (session, error) {
 	return s, nil
 }
 
-// saveSession writes the session readable by the user only, since its
-// token signs in as the member.
+// saveSession writes a new session file, readable by the user only, since
+// its token signs in as the member. It writes a temporary file (mode 0600)
+// and links it into place, so the token is never in a file others can
+// read, and an existing session is never replaced.
 func saveSession(path string, s session) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, ".homeport-member-*")
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600) // WriteFile keeps an existing file's mode
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmp.Name(), path)
 }
 
 func printJSON(w io.Writer, v any) error {

@@ -35,8 +35,10 @@ func ParseConfig(text string) (Config, error) {
 	var sawKey bool
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		// wg-quick drops everything after a #; no key, address or endpoint holds one.
+		line, _, _ := strings.Cut(sc.Text(), "#")
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
@@ -60,9 +62,16 @@ func ParseConfig(text string) (Config, error) {
 			sawKey = true
 			cfg.PrivateKey, err = parseKey(value)
 		case "interface.address":
-			cfg.Address, err = firstIPv4(value, true)
+			// Addresses may come on several lines; the first IPv4 one counts.
+			var addr netip.Addr
+			if addr, err = firstIPv4(value, true); !cfg.Address.IsValid() {
+				cfg.Address = addr
+			}
 		case "interface.dns":
-			cfg.DNS, err = firstIPv4(value, false)
+			var addr netip.Addr
+			if addr, err = firstIPv4(value, false); !cfg.DNS.IsValid() {
+				cfg.DNS = addr
+			}
 		case "interface.mtu":
 			cfg.MTU, err = strconv.Atoi(value)
 			if err == nil && (cfg.MTU < 576 || cfg.MTU > 65535) {
