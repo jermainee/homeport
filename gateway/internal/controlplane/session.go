@@ -299,7 +299,8 @@ func (c *Controller) enterGraceLocked(ps *peerState, s *session, now time.Time) 
 	}
 	s.state, s.graceUntil = stateGrace, now.Add(grace)
 	c.gw.ResetPeerFlows(ps.peer.PublicKey)
-	c.log.Info("session top-up only", "peer_id", ps.cfg.PeerID, "session_id", s.id, "grace_seconds", int(grace.Seconds()))
+	c.log.Info("session top-up only", "peer_id", ps.cfg.PeerID, "session_id", s.id,
+		"grace_seconds", int(grace.Seconds()), "grace_until", s.graceUntil)
 }
 
 // closeSessionLocked ends the session at once and cuts the peer off for the

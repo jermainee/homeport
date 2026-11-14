@@ -270,21 +270,26 @@ func TestTheSessionStopsAtTheLeaseAndClosesAfterGrace(t *testing.T) {
 		}
 		return false
 	})
-	// The gateway's clock: grace starts when the lease runs out and ends
-	// at the next one-second step after grace_seconds.
-	var graceAt, closedAt time.Time
+	// The gateway's clock: grace starts when the lease runs out, lasts
+	// grace_seconds and ends at the next one-second step after grace_until.
+	// The top-up line's own time can trail that clock read by the flow
+	// reset before it, so grace_until is the reference. The close is
+	// logged just after its clock read, which is at or after grace_until.
+	var graceUntil, closedAt time.Time
+	graceSeconds := -1.0
 	for _, rec := range logRecords(t, s.gwLogs) {
-		at, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(rec["time"]))
 		switch {
 		case rec["msg"] == "session top-up only":
-			graceAt = at
+			graceUntil, _ = time.Parse(time.RFC3339Nano, fmt.Sprint(rec["grace_until"]))
+			graceSeconds, _ = rec["grace_seconds"].(float64)
 		case rec["msg"] == "session ended" && rec["reason"] == "grace over":
-			closedAt = at
+			closedAt, _ = time.Parse(time.RFC3339Nano, fmt.Sprint(rec["time"]))
 		}
 	}
-	// A little slack below: each line is logged just after the clock read.
-	if d := closedAt.Sub(graceAt); graceAt.IsZero() || d < grace*time.Second-100*time.Millisecond || d > grace*time.Second+2*time.Second {
-		t.Errorf("the session closed %v after the lease ran out (logged at %v and %v), want %d s and a step", d, graceAt, closedAt, grace)
+	if graceUntil.IsZero() || graceSeconds != grace {
+		t.Errorf("the top-up line gives grace_until %v and grace_seconds %v, want a time and %d", graceUntil, graceSeconds, grace)
+	} else if d := closedAt.Sub(graceUntil); d < 0 || d > 2*time.Second {
+		t.Errorf("the session closed %v after grace_until (%v, closed at %v), want within a step and a second", d, graceUntil, closedAt)
 	}
 
 	// The session is closed: the peer is cut off, and nothing more is metered.
