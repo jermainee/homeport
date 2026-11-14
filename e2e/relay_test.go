@@ -34,10 +34,8 @@ func TestTransfersArriveIntactAndEveryByteIsReportedOnce(t *testing.T) {
 		t.Fatalf("the origin received an upload with hash %s, want %s", got, sum(up))
 	}
 
-	c := s.quiesce()
-	if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-		t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
-	}
+	// The gateway meters exactly what the client's tun counted.
+	c := s.settled(true)
 
 	// The agent counts payload only: the transfers plus HTTP headers.
 	st := s.agent.Stats()
@@ -157,10 +155,9 @@ func TestUDPAndDNSFlowsPassThroughTheAgent(t *testing.T) {
 		t.Fatalf("fetch by name: %d bytes, %v", len(body), err)
 	}
 
-	c := s.quiesce()
-	if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-		t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
-	}
+	// The gateway meters exactly what the client's tun counted. The UDP
+	// and DNS flows stay open until they idle out.
+	c := s.settled(false)
 	s.stopGateway()
 	if up, down := s.api.UsageTotal(); up != c.gateway.Up || down != c.gateway.Down {
 		t.Errorf("usage events report %d up and %d down; the gateway metered %+v", up, down, c.gateway)
@@ -335,7 +332,7 @@ func TestARetriedUsageReportIsCountedOnce(t *testing.T) {
 				calls := usageCalls(s.api)
 				return len(calls) >= 2 && calls[len(calls)-1].Status == 200
 			})
-			c := s.quiesce()
+			c := s.settled(true) // the gateway meters exactly what the client's tun counted
 			s.stopGateway()
 
 			calls := usageCalls(s.api)
@@ -351,9 +348,6 @@ func TestARetriedUsageReportIsCountedOnce(t *testing.T) {
 			}
 			if up, down := s.api.UsageTotal(); up != c.gateway.Up || down != c.gateway.Down {
 				t.Errorf("usage events report %d up and %d down; the gateway metered %+v", up, down, c.gateway)
-			}
-			if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-				t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
 			}
 		})
 	}
@@ -374,7 +368,7 @@ func TestTheAgentReconnectsAfterTheGatewayDropsIt(t *testing.T) {
 	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
 		t.Fatal("download before the restart differs")
 	}
-	first := s.quiesce().gateway
+	first := s.settled(true).gateway
 
 	// The gateway restarts on the same ports with the same keys, as after
 	// a deploy. Its agents are dropped with it.
@@ -390,7 +384,7 @@ func TestTheAgentReconnectsAfterTheGatewayDropsIt(t *testing.T) {
 	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
 		t.Fatal("download after the restart differs")
 	}
-	second := s.quiesce().gateway
+	second := s.settled(true).gateway
 	s.stopGateway()
 
 	var types []string

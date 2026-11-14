@@ -318,6 +318,43 @@ func (s *stack) quiesce() counts {
 	})
 }
 
+// settleTimeout bounds settled. Under the race detector on a slow runner
+// the last packets of a transfer can take seconds to land.
+const settleTimeout = 30 * time.Second
+
+// settled waits until everything sent so far has landed, and returns the
+// counters then. With flowsClose, it first waits until the agent has no
+// open flow (UDP flows stay open until they idle out, so tests with UDP
+// pass false). Then it waits until the gateway's meter equals what the
+// client's tun counted and no byte moves. Quiet alone is not enough: on a
+// slow runner a packet can sit in the tunnel for longer than quiesce's
+// quiet period. A flow that never closes, or a meter that never catches
+// up, fails the test, since either is a bug.
+//
+// Every test that compares the meter with the tun uses it. The gateway and
+// the client must have started together (a restart needs a new client).
+func (s *stack) settled(flowsClose bool) counts {
+	t := s.t
+	t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	for flowsClose && s.agent.Stats().FlowsActive != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the agent still has %d open flows after %v", s.agent.Stats().FlowsActive, settleTimeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		c := s.quiesce()
+		if c.gateway.Up == c.sent && c.gateway.Down == c.received {
+			return c
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the gateway's meter did not reach the client's tun within %v: gateway metered %+v; the tun sent %d and received %d",
+				settleTimeout, c.gateway, c.sent, c.received)
+		}
+	}
+}
+
 func (s *stack) httpClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
