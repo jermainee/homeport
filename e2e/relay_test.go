@@ -48,8 +48,8 @@ func TestTransfersArriveIntactAndEveryByteIsReportedOnce(t *testing.T) {
 	if st.BytesOut < 1*mb || st.BytesOut > 1*mb+headers {
 		t.Errorf("agent sent %d bytes to the origin, want 1 MB plus headers", st.BytesOut)
 	}
-	if st.FlowsTotal != 3 || st.FlowsActive != 0 {
-		t.Errorf("agent saw %d flows, %d still open; want 3, none open", st.FlowsTotal, st.FlowsActive)
+	if st.FlowsTotal != 3 { // settled waited until none is open
+		t.Errorf("agent saw %d flows, want 3", st.FlowsTotal)
 	}
 	// The gateway counts whole IP packets: the payload plus at most 10%
 	// for IP and TCP headers, and the ACKs for the other direction.
@@ -461,18 +461,19 @@ func earliest(a, b time.Time) time.Time {
 	return b
 }
 
-// untilDNSAnswers runs f again while it fails with a DNS timeout, for up
-// to settleTimeout. The client's resolver (wireguard-go's netstack) gives
-// a lookup two tries of 5 s each, and under the race detector a lookup
-// through the tunnel can take longer than that; without it, a lookup takes
-// about a millisecond.
+// untilDNSAnswers runs f again while it fails with a DNS timeout, starting
+// no new try after slowTimeout. The client's resolver (wireguard-go's
+// netstack) gives a lookup two tries of 5 s each, and under the race
+// detector a lookup through the tunnel can take longer than that; without
+// it, a lookup takes about a millisecond.
 func untilDNSAnswers(f func() error) error {
-	deadline := time.Now().Add(settleTimeout)
+	deadline := time.Now().Add(slowTimeout)
 	for {
 		err := f()
 		var dnsErr *net.DNSError
 		if !errors.As(err, &dnsErr) || !dnsErr.IsTimeout || time.Now().After(deadline) {
 			return err
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
