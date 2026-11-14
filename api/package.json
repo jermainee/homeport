@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "migrate:local": "wrangler d1 migrations apply homeport --local",
-    "seed:dev": "node scripts/seed-dev.ts"
+    "seed:dev": "node scripts/seed-dev.ts",
+    "stripe:listen": "stripe listen --forward-to localhost:8787/v1/stripe/webhook --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,identity.verification_session.verified,identity.verification_session.processing,identity.verification_session.requires_input,identity.verification_session.canceled"
   },
   "dependencies": {
     "hono": "^4.13.18",

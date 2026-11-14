@@ -121,8 +121,7 @@ A local run of the whole product on one Mac, with real Stripe test mode: two des
 The desktop app shows the QR code itself. `qrencode` (`brew install qrencode`) is needed only on the `member` tool's path.
 
 **In the Stripe sandbox, first:**
-- switch the Dashboard to the sandbox, then create a restricted key under Developers → API keys with **Checkout Sessions: Write** and **Identity Verification Results: Write**, for `STRIPE_SECRET_KEY`. It starts with `rk_test_`; an `rk_live_` key was created in live mode, so delete it. The sandbox needs no `STRIPE_IDENTITY_RESTRICTED_KEY`, since only live-mode verifications read it, for the identity hash;
-- check under Identity that the sandbox may create verification sessions;
+- switch the Dashboard to the sandbox, then create a restricted key under Developers → API keys with **Checkout Sessions: Write** and **Identity Verification Results: Write**, for `STRIPE_SECRET_KEY`. It starts with `rk_test_`; an `rk_live_` key was created in live mode, so delete it. Leave `STRIPE_IDENTITY_RESTRICTED_KEY` empty: only live-mode verifications read it, for the identity hash. If Stripe refuses a call, the `wrangler dev` log shows its message as an `unhandled_error`, and a missing permission is named there; add it to the same key with ⋯ → Edit key;
 - for tax, the head office and the registrations are set up in Tax (see [`api/README.md`](../api/README.md)).
 
 ### 1. API and Stripe
@@ -132,11 +131,10 @@ cd api
 npm ci
 [ -f .dev.vars ] || cp .dev.vars.example .dev.vars  # then add the restricted key and any long random IDENTITY_HASH_KEY
 stripe listen --print-secret  # the whsec_… for STRIPE_WEBHOOK_SECRET
-stripe listen --forward-to localhost:8787/v1/stripe/webhook \
-  --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,identity.verification_session.verified,identity.verification_session.processing,identity.verification_session.requires_input,identity.verification_session.canceled
+npm run stripe:listen         # forwards the events the API handles to wrangler dev
 ```
 
-Put the `whsec_…` that `stripe listen --print-secret` prints into `.dev.vars` as `STRIPE_WEBHOOK_SECRET`; it stays the same from run to run. Keep the second `stripe listen` running. It forwards the events the API handles, and current Stripe CLI versions refuse to listen without `--events`. Then:
+Put the `whsec_…` that `stripe listen --print-secret` prints into `.dev.vars` as `STRIPE_WEBHOOK_SECRET`, and keep `npm run stripe:listen` running. After a new `stripe login`, print the secret again and restart `npm run dev`: the secret can change, and with a stale one every webhook fails with `400 invalid_signature`. Then:
 
 ```sh
 npm run seed:dev  # prints HOMEPORT_GATEWAY_TOKEN=hpgw_…
@@ -198,7 +196,7 @@ HOMEPORT_PROFILE=../.dev-state/profile-b ./bin/homeport  # in desktop-app/
 Then, in profile B's window:
 1. Sign in as `b@example.com`.
 2. On the Use tab, click "Verify identity" and choose Stripe's verified test option.
-3. Click "Buy credits" and pay on Stripe Checkout with `4242 4242 4242 4242`, any future date and any CVC. Checkout asks for the billing country, which sets the tax: Germany adds 19% VAT, €47.60 in all. Once `checkout.session.completed` arrives through `stripe listen`, the balance shows 1,000,000 credits.
+3. Click "Buy credits" and pay on Stripe Checkout with `4242 4242 4242 4242`, any future date and any CVC. Checkout asks for the billing country, which sets the tax: Germany adds 19% VAT. Once `checkout.session.completed` arrives through `stripe listen`, the balance shows 1,000,000 credits.
 4. Pick A's line.
 5. Add a device. The app shows its WireGuard config **once**: as a QR code for the iPhone, and through "Save .conf file" for a Mac, saved as `.dev-state/b.conf` for the next step.
 
