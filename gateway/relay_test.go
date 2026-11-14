@@ -51,27 +51,11 @@ func startAgent(t *testing.T, gw *gateway.Server, cert tls.Certificate, handle f
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	tlsConf := relayprotocol.AgentTLSConfig(cert, relayprotocol.AllowPins(gw.RelayPin()))
-	conn, err := quic.DialAddr(ctx, gw.QUICAddr().String(), tlsConf, relayprotocol.AgentQUICConfig())
+	conn, ctl, ack, err := dialAgent(ctx, gw, cert)
 	if err != nil {
 		return nil, err
 	}
 	t.Cleanup(func() { _ = conn.CloseWithError(0, "") })
-	ctl, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := relayprotocol.WriteControl(ctl, relayprotocol.Hello{AgentVersion: "test", OS: runtime.GOOS}); err != nil {
-		return nil, err
-	}
-	msg, err := relayprotocol.ReadControl(ctl)
-	if err != nil {
-		return nil, err
-	}
-	ack, ok := msg.(relayprotocol.HelloAck)
-	if !ok {
-		return nil, errors.New("first control message was not hello_ack")
-	}
 	a := &fakeAgent{conn: conn, ctl: ctl, ack: ack, opens: make(chan relayprotocol.FlowOpen, 64)}
 	go func() {
 		for {
@@ -94,6 +78,43 @@ func startAgent(t *testing.T, gw *gateway.Server, cert tls.Certificate, handle f
 		}
 	}()
 	return a, nil
+}
+
+// dialAgent dials the gateway as an agent with cert and says hello. It
+// returns the connection once the gateway acknowledged the hello, or the
+// error that ended the attempt, with the connection closed. Saying hello
+// also draws the gateway's refusal again if the packet that carried it was
+// lost.
+func dialAgent(ctx context.Context, gw *gateway.Server, cert tls.Certificate) (*quic.Conn, *quic.Stream, relayprotocol.HelloAck, error) {
+	tlsConf := relayprotocol.AgentTLSConfig(cert, relayprotocol.AllowPins(gw.RelayPin()))
+	conn, err := quic.DialAddr(ctx, gw.QUICAddr().String(), tlsConf, relayprotocol.AgentQUICConfig())
+	if err != nil {
+		return nil, nil, relayprotocol.HelloAck{}, err
+	}
+	fail := func(err error) (*quic.Conn, *quic.Stream, relayprotocol.HelloAck, error) {
+		_ = conn.CloseWithError(0, "")
+		return nil, nil, relayprotocol.HelloAck{}, err
+	}
+	ctl, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	if err := relayprotocol.WriteControl(ctl, relayprotocol.Hello{AgentVersion: "test", OS: runtime.GOOS}); err != nil {
+		return fail(err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = ctl.SetReadDeadline(deadline)
+	}
+	msg, err := relayprotocol.ReadControl(ctl)
+	_ = ctl.SetReadDeadline(time.Time{})
+	if err != nil {
+		return fail(err)
+	}
+	ack, ok := msg.(relayprotocol.HelloAck)
+	if !ok {
+		return fail(errors.New("first control message was not hello_ack"))
+	}
+	return conn, ctl, ack, nil
 }
 
 // relayTo makes the agent connect every TCP flow to origin.

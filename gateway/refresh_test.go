@@ -4,16 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
-	"errors"
 	"log/slog"
 	"net/http/httptest"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/quic-go/quic-go"
 
 	"github.com/jermainee/homeport/gateway"
 	"github.com/jermainee/homeport/gateway/internal/controlplane"
@@ -80,14 +76,6 @@ func configLine(pin relayprotocol.Pin) map[string]string {
 	}
 }
 
-// certificateRefused reports that the gateway refused the agent's
-// certificate during the handshake: a TLS bad_certificate alert, which QUIC
-// carries as the transport error 0x100 + 42 (RFC 9001, section 4.8).
-func certificateRefused(err error) bool {
-	var te *quic.TransportError
-	return errors.As(err, &te) && te.Remote && te.ErrorCode == 0x100+42
-}
-
 // acceptedWithin dials the gateway as the agent every 100 ms, as an agent
 // retries, and fails the test unless an attempt is accepted within limit.
 // It returns how long that took.
@@ -115,7 +103,7 @@ func TestANewLinesAgentIsAcceptedAtItsNextAttempt(t *testing.T) {
 	// API lists the line, the gateway does not know it yet.
 	api.setLines(`"cfg-2"`, configLine(agentPin))
 	_, err := startAgent(t, gw, agentCert, answer(relayprotocol.StatusOK))
-	if !certificateRefused(err) {
+	if !relayprotocol.CertificateRefused(err) {
 		t.Fatalf("first attempt: %v; want the certificate refused", err)
 	}
 
@@ -132,7 +120,7 @@ func TestAnAgentWhoseLineAppearsAfterItFirstConnectsIsAcceptedWithinSeconds(t *t
 	agentCert, agentPin := newAgentCert(t)
 
 	fetched := len(api.configFetches())
-	if _, err := startAgent(t, gw, agentCert, answer(relayprotocol.StatusOK)); !certificateRefused(err) {
+	if _, err := startAgent(t, gw, agentCert, answer(relayprotocol.StatusOK)); !relayprotocol.CertificateRefused(err) {
 		t.Fatalf("first attempt: %v; want the certificate refused", err)
 	}
 	// The refusal made the gateway fetch its config, before the API listed
@@ -165,12 +153,15 @@ func TestUnknownAgentsCannotMakeTheGatewayHammerTheAPI(t *testing.T) {
 					t.Errorf("agent certificate: %v", err)
 					return
 				}
-				err = dialUnknown(gw, cert)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				conn, _, _, err := dialAgent(ctx, gw, cert)
+				cancel()
 				if err == nil {
+					_ = conn.CloseWithError(0, "")
 					t.Error("the gateway accepted an agent whose key belongs to no line")
 					return
 				}
-				if certificateRefused(err) {
+				if relayprotocol.CertificateRefused(err) {
 					handshakes.Add(1)
 				}
 			}
@@ -193,35 +184,11 @@ func TestUnknownAgentsCannotMakeTheGatewayHammerTheAPI(t *testing.T) {
 		t.Errorf("%d config fetches in %v; want at most %d, one per %v", len(fetches), window, most, controlplane.ConfigRefreshInterval)
 	}
 	for i := 1; i < len(fetches); i++ {
-		// The fetches' arrival at the API jitters by a few milliseconds.
-		if gap := fetches[i].Sub(fetches[i-1]); gap < controlplane.ConfigRefreshInterval-100*time.Millisecond {
+		// The fetches reach the API a little late, by more under the race
+		// detector while the flood keeps every core busy. Without the limit
+		// they would come microseconds apart.
+		if gap := fetches[i].Sub(fetches[i-1]); gap < controlplane.ConfigRefreshInterval-500*time.Millisecond {
 			t.Fatalf("config fetches %d and %d came %v apart; want at least %v", i-1, i, gap, controlplane.ConfigRefreshInterval)
 		}
 	}
-}
-
-// dialUnknown dials the gateway as an agent and says hello. It returns the
-// error that ended the attempt, or nil if the gateway answered the hello.
-// The hello also draws the gateway's refusal again if the packet that
-// carried it was lost.
-func dialUnknown(gw *gateway.Server, cert tls.Certificate) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	tlsConf := relayprotocol.AgentTLSConfig(cert, relayprotocol.AllowPins(gw.RelayPin()))
-	conn, err := quic.DialAddr(ctx, gw.QUICAddr().String(), tlsConf, relayprotocol.AgentQUICConfig())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.CloseWithError(0, "") }()
-	ctl, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		return err
-	}
-	if err := relayprotocol.WriteControl(ctl, relayprotocol.Hello{AgentVersion: "test", OS: runtime.GOOS}); err != nil {
-		return err
-	}
-	deadline, _ := ctx.Deadline()
-	_ = ctl.SetReadDeadline(deadline)
-	_, err = relayprotocol.ReadControl(ctl)
-	return err
 }

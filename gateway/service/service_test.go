@@ -218,7 +218,13 @@ func TestAnUnknownAgentMakesTheGatewayFetchItsConfigAgain(t *testing.T) {
 	conn, err := quic.DialAddr(dialCtx, gw.QUICAddr().String(),
 		relayprotocol.AgentTLSConfig(cert, relayprotocol.AllowPins(gw.RelayPin())), relayprotocol.AgentQUICConfig())
 	if err == nil {
-		<-conn.Context().Done() // the gateway refuses it
+		// With TLS 1.3 the dial can finish before the gateway checks the
+		// certificate; the refusal follows.
+		select {
+		case <-conn.Context().Done():
+		case <-dialCtx.Done():
+		}
+		_ = conn.CloseWithError(0, "")
 	}
 
 	waitFor(t, "a config fetch after the unknown agent", func() bool { return api.configFetches() > fetched })

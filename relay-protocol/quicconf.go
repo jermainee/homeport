@@ -2,6 +2,7 @@ package relayprotocol
 
 import (
 	"crypto/tls"
+	"errors"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -79,4 +80,18 @@ func GatewayTLSConfig(cert tls.Certificate, allowAgent func(Pin) bool) *tls.Conf
 		VerifyConnection:       verifyRelayConnection(allowAgent),
 		SessionTicketsDisabled: true,
 	}
+}
+
+// codeBadCertificate is the QUIC transport error that carries a TLS
+// bad_certificate alert: 0x100 plus the alert's number, 42 (RFC 9001,
+// section 4.8).
+const codeBadCertificate quic.TransportErrorCode = 0x100 + 42
+
+// CertificateRefused reports whether err ended an agent's connection
+// because the gateway refused its certificate during the handshake. A
+// gateway refuses every pin its config does not list, and its config may
+// simply be older than the agent's line.
+func CertificateRefused(err error) bool {
+	var te *quic.TransportError
+	return errors.As(err, &te) && te.Remote && te.ErrorCode == codeBadCertificate
 }

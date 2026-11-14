@@ -29,7 +29,7 @@ replace github.com/jermainee/homeport/relay-protocol => ../relay-protocol
 | Transport | QUIC version 1 over UDP. The agent dials out to the gateway, so the home network opens no inbound port. |
 | ALPN | `homeport-relay/1`. A peer that does not negotiate it fails the handshake, over QUIC and over TLS on TCP alike. |
 | TLS | TLS 1.3, mutual. Each side presents a self-signed Ed25519 certificate. |
-| Trust | Each side pins the other's SPKI. The gateway accepts only agent pins in its config, and the agent accepts only its gateway's pin. |
+| Trust | Each side pins the other's SPKI. The gateway accepts only agent pins in its config, and the agent accepts only its gateway's pin. The gateway refuses any other agent pin in the handshake with a TLS `bad_certificate` alert (QUIC error `0x12a`), which `CertificateRefused` recognizes; its config may only be older than the agent's line, so the agent retries soon. |
 | Session resumption | Off on both sides, since nothing needs it. The pin and ALPN checks run in `VerifyConnection`, which Go also runs on resumed sessions, so turning resumption on later would not let a removed pin back in with an old ticket. `VerifyPinned`, the `VerifyPeerCertificate` variant, is skipped on resumption. |
 | Keep-alive | Every 15 s from both sides, so the NAT in front of the agent keeps its UDP mapping. |
 | Idle timeout | 60 s, which is four missed keep-alives. |

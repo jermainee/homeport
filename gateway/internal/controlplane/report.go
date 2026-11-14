@@ -164,28 +164,29 @@ func (c *Controller) Run(ctx context.Context) {
 	<-done
 }
 
-// syncLoop fetches the config now, ConfigInterval after each fetch, and
+// syncLoop polls the config now and every ConfigInterval, and fetches it
 // when RefreshConfig asks, but at most once per ConfigRefreshInterval for
 // RefreshConfig: an unknown key costs a handshake, so a flood of them must
 // not turn into a flood of requests to the API.
 func (c *Controller) syncLoop(ctx context.Context) {
 	poll := time.NewTicker(ConfigInterval)
 	defer poll.Stop()
-	var refreshed time.Time // when the last fetch that RefreshConfig asked for started
+	fetch := c.SyncConfig   // what the next fetch is: a poll or a refresh
+	var refreshed time.Time // when the last refresh started
 	for {
-		// A request made before this fetch starts is answered by it.
+		// A refresh asked for before this fetch starts is answered by it.
 		select {
 		case <-c.refresh:
 		default:
 		}
-		if err := c.SyncConfig(ctx); err != nil && ctx.Err() == nil {
+		if err := fetch(ctx); err != nil && ctx.Err() == nil {
 			c.log.Warn("config sync failed", "err", err)
 		}
-		poll.Reset(ConfigInterval)
 		select {
 		case <-ctx.Done():
 			return
 		case <-poll.C:
+			fetch = c.SyncConfig
 		case <-c.refresh:
 			wait := time.NewTimer(time.Until(refreshed.Add(ConfigRefreshInterval)))
 			select {
@@ -195,6 +196,7 @@ func (c *Controller) syncLoop(ctx context.Context) {
 			case <-wait.C:
 			}
 			refreshed = time.Now()
+			fetch = c.syncRefresh
 		}
 	}
 }

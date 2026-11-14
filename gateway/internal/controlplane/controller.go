@@ -59,7 +59,8 @@ type Controller struct {
 
 	mu         sync.Mutex
 	gw         Gateway
-	etag       string
+	etag       string // of the config applied in full; empty after a failed apply
+	fetched    string // etag of the last config fetched, applied in full or not
 	topUp      map[string]bool
 	lines      map[string]ConfigLine
 	peers      map[string]*peerState // by peer ID
@@ -131,14 +132,32 @@ func (c *Controller) SyncConfig(ctx context.Context) error {
 	c.mu.Lock()
 	etag := c.etag
 	c.mu.Unlock()
+	return c.syncConfig(ctx, etag)
+}
+
+// syncRefresh is the fetch RefreshConfig asks for. It asks only for a
+// config changed since the last fetch, even if applying that one failed: a
+// refresh is for new lines, and an unchanged config must cost a 304 however
+// often unknown agents connect. The next poll retries the failed apply.
+func (c *Controller) syncRefresh(ctx context.Context) error {
+	c.mu.Lock()
+	etag := c.fetched
+	c.mu.Unlock()
+	return c.syncConfig(ctx, etag)
+}
+
+// syncConfig fetches the config unless its etag is still etag, and applies
+// what changed.
+func (c *Controller) syncConfig(ctx context.Context, etag string) error {
 	cfg, changed, err := c.api.Config(ctx, etag)
 	if err != nil || !changed {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.fetched = cfg.ETag
 	if err := c.applyLocked(cfg); err != nil {
-		c.etag = "" // fetch and apply the whole config again next time
+		c.etag = "" // the next poll fetches and applies the whole config again
 		return err
 	}
 	c.etag = cfg.ETag

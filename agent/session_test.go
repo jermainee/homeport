@@ -161,8 +161,8 @@ func TestAgentRetriesSoonWhileTheGatewayRefusesItsCertificate(t *testing.T) {
 	const refusals = 8
 	g.refuseCertificates(refusals)
 	startAgent(t, g, func(c *Config) {
-		c.ReconnectMin = 100 * time.Millisecond
-		c.ReconnectMax = time.Second
+		c.ReconnectMin = 200 * time.Millisecond
+		c.ReconnectMax = 2 * time.Second
 	})
 	g.nextConn(t)
 
@@ -170,14 +170,14 @@ func TestAgentRetriesSoonWhileTheGatewayRefusesItsCertificate(t *testing.T) {
 	if len(at) != refusals+1 {
 		t.Fatalf("%d handshakes; want %d refused, then one accepted", len(at), refusals)
 	}
-	// The first five retries come about ReconnectMin apart. Doubling from
-	// 100 ms would take at least 1.25 s for them.
-	if took := at[5].Sub(at[0]); took > time.Second {
+	// The first five retries wait 100 to 200 ms each, at most 1 s in all.
+	// Doubling from 200 ms would take at least 2.5 s for them.
+	if took := at[5].Sub(at[0]); took > 1800*time.Millisecond {
 		t.Errorf("five retries after a refused certificate took %v; want them about ReconnectMin apart", took)
 	}
 	// Then the usual backoff resumes, so an agent the gateway never learns
-	// does not keep hammering it: the eighth retry waits 200 to 400 ms.
-	if gap := at[8].Sub(at[7]); gap < 150*time.Millisecond {
+	// does not keep hammering it: the eighth retry waits 400 to 800 ms.
+	if gap := at[8].Sub(at[7]); gap < 300*time.Millisecond {
 		t.Errorf("the eighth retry came %v after the refusal; want the usual backoff", gap)
 	}
 }

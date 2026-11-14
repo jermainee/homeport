@@ -108,9 +108,9 @@ func withShareLater() func(*stackOptions) {
 }
 
 // newStack starts everything and returns once the agent serves the line
-// and the client is up (unless withShareLater says otherwise). Everything stops when the test ends; then the
-// stack checks the API saw no contract violation and the logs name no
-// destination.
+// and the client is up (unless withShareLater says otherwise). Everything
+// stops when the test ends; then the stack checks the API saw no contract
+// violation and the logs name no destination.
 func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	t.Helper()
 	var o stackOptions

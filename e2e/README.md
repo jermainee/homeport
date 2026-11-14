@@ -71,7 +71,7 @@ member B's WireGuard ──▶ gateway binary ──QUIC──▶ member A's age
 2. **Gateway.** `go build` of `cmd/homeport-gateway`, started with the seeded token. It announces itself with `PUT /v1/gateway/self`.
 3. **Members,** through the member endpoints and the dev routes, as `memberapi` calls them: A and B sign in (`/dev/login-requests/{id}/confirm`), both are marked verified (`/dev/members/{id}/identity/verify`), B gets 1,000,000 credits (`/dev/members/{id}/credits`). A registers an agent key, creates a line and turns sharing on; B creates a WireGuard peer on it and gets its `.conf`.
 4. **Agent and client.** A's agent dials the gateway the API named for the line, with the pin it named. The gateway fetched its config before the line existed, so it refuses the first attempt and fetches its config at once; the agent's next attempt gets in, and the test checks that this takes less than 5 s. The same fetch brings B's peer. B's client runs the API's `.conf` with B's own key, parsed by `wgclient.ParseConfig`.
-5. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the `wgcurl` binary fetches 1 MB more with the same `.conf` and reports the bytes its tunnel carried. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease.
+5. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the `wgcurl` binary fetches 1 MB more with the same `.conf` and reports the bytes its tunnel carried. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease. It starts again with the same state dir, and A's agent, still pinned to the key the API recorded at the first start, serves the line again before a second SIGTERM.
 
 The agent and the client run in the test's process. The agent needs the `e2e` tag's `RouteTestOrigin` to reach the loopback origin through a real gateway (see [Destinations](#destinations)), and `cmd/homeport-agent` refuses that tag on purpose. The client's tun counts every inner byte, which the checks compare with what the API recorded. The [manual run](#manual-run) below uses the agent CLI and a public website instead.
 
@@ -84,6 +84,7 @@ The agent and the client run in the test's process. The agent needs the `e2e` ta
 | The platform kept the difference | `platform:platform_revenue` |
 | Every ledger transaction sums to zero | No transaction with a nonzero sum or fewer than two entries; every cached balance is the sum of its entries |
 | The gateway returned its leases | No open lease or credit reservation after SIGTERM |
+| A restarted gateway keeps its keys | A's agent, pinned to the key from the first start, serves the line on the restarted gateway |
 | No self-dealing | B shares a line of its own; a peer on it gets `403 line_not_allowed` |
 | No log names a destination | The gateway's, the agent's and `wrangler dev`'s logs hold no origin address, port or request path |
 

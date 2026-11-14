@@ -244,6 +244,18 @@ func TestFullStackSmoke(t *testing.T) {
 	// returns the lease.
 	gw.stop()
 
+	// A restart keeps the gateway's keys in its state dir: A's agent, still
+	// pinned to the key the API recorded at the first start, gets back in.
+	waitUntil(t, "A's agent noticed the gateway stopped", func() bool {
+		return ag.Stats().State != agent.StateConnected
+	})
+	gw.start()
+	waitUntil(t, "A's agent serves the line on the restarted gateway", func() bool {
+		st := ag.Stats()
+		return st.State == agent.StateConnected && st.LineID == line.ID
+	})
+	gw.stop()
+
 	db := worker.query(t,
 		fmt.Sprintf(`SELECT COALESCE(SUM(bytes_up + bytes_down), 0) AS bytes FROM usage_sessions WHERE peer_id = '%s'`, sqlID(t, peer.Peer.ID)),
 		`SELECT balance FROM ledger_accounts WHERE id = 'platform:platform_revenue'`,

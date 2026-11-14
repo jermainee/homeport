@@ -33,19 +33,11 @@ type sessionResult struct {
 
 func (r sessionResult) stable() bool { return r.established && r.lasted >= stableSession }
 
-// codeBadCertificate is the QUIC transport error that carries a TLS
-// bad_certificate alert: 0x100 plus the alert's number, 42 (RFC 9001,
-// section 4.8).
-const codeBadCertificate quic.TransportErrorCode = 0x100 + 42
-
 // certificateRefused reports that the gateway refused the agent's
 // certificate during the handshake. A gateway does that until its config
 // lists the agent's line, as right after the member turned Share on; the
 // refusal makes it fetch the config again.
-func (r sessionResult) certificateRefused() bool {
-	var te *quic.TransportError
-	return errors.As(r.err, &te) && te.Remote && te.ErrorCode == codeBadCertificate
-}
+func (r sessionResult) certificateRefused() bool { return relayprotocol.CertificateRefused(r.err) }
 
 // unauthorized reports that the gateway rejected the agent, for example
 // because its device was removed. Retrying soon will not help.
