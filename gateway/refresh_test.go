@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http/httptest"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,7 @@ func runFromAPI(t *testing.T, api *miniAPI) *gateway.Server {
 		Access:         ctl,
 		OnLineEvent:    ctl.OnLineEvent,
 		OnUnknownAgent: ctl.RefreshConfig,
+		OnUnknownPeer:  ctl.RefreshConfig,
 	})
 	ctl.Attach(gw)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -73,6 +75,19 @@ func configLine(pin relayprotocol.Pin) map[string]string {
 		"line_id":            newLineID,
 		"owner_member_id":    lineOwnerID,
 		"device_spki_sha256": hex.EncodeToString(pin[:]),
+	}
+}
+
+// configPeer is a member's device on the new line, with the WireGuard
+// public key of private key key.
+func configPeer(key gateway.Key) map[string]string {
+	return map[string]string{
+		"peer_id":    "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
+		"member_id":  "01a1c4af-8795-7a28-9249-adbd2ba1c04a",
+		"public_key": key.PublicKey().String(),
+		"ipv4":       "10.77.0.2",
+		"ipv6":       "fd77:6870::2",
+		"line_id":    newLineID,
 	}
 }
 
@@ -177,8 +192,16 @@ func TestUnknownAgentsCannotMakeTheGatewayHammerTheAPI(t *testing.T) {
 	if handshakes.Load() < 50 {
 		t.Fatalf("only %d handshakes; not a flood", handshakes.Load())
 	}
+	assertRateLimited(t, fetches, window)
+}
+
+// assertRateLimited fails the test unless the config fetches during a
+// flood of unknown keys, which lasted window, include at least one and
+// come at most once per ConfigRefreshInterval.
+func assertRateLimited(t *testing.T, fetches []time.Time, window time.Duration) {
+	t.Helper()
 	if len(fetches) == 0 {
-		t.Fatal("unknown agents never made the gateway fetch its config")
+		t.Fatal("unknown keys never made the gateway fetch its config")
 	}
 	if most := int(window/controlplane.ConfigRefreshInterval) + 1; len(fetches) > most {
 		t.Errorf("%d config fetches in %v; want at most %d, one per %v", len(fetches), window, most, controlplane.ConfigRefreshInterval)
@@ -191,4 +214,61 @@ func TestUnknownAgentsCannotMakeTheGatewayHammerTheAPI(t *testing.T) {
 			t.Fatalf("config fetches %d and %d came %v apart; want at least %v", i-1, i, gap, controlplane.ConfigRefreshInterval)
 		}
 	}
+}
+
+func TestANewPeersHandshakeIsAcceptedAtTheClientsFirstRetry(t *testing.T) {
+	api := apiWithoutLines()
+	gw := runFromAPI(t, api)
+	key := newKey(t)
+
+	// The member creates a WireGuard config after the gateway's last config
+	// poll: the API lists the peer, the gateway does not know it yet. The
+	// gateway drops the client's first handshake and fetches its config;
+	// the client sends its handshake again 5 s later, and that one gets in.
+	api.setPeers(`"cfg-2"`, configPeer(key))
+	client := newClient(t, gw, key, netip.MustParseAddr("10.77.0.2"))
+	took := client.handshakeWithin(t, 8*time.Second)
+	t.Logf("handshake completed %v after the client started", took.Round(time.Millisecond))
+}
+
+func TestUnknownWireGuardKeysCannotMakeTheGatewayHammerTheAPI(t *testing.T) {
+	api := apiWithoutLines()
+	gw := runFromAPI(t, api)
+	initial := len(api.configFetches())
+
+	// Clients with fresh keys send handshake initiations as fast as they
+	// can make them.
+	const flood = 2500 * time.Millisecond
+	start := time.Now()
+	var sent atomic.Int64
+	var wg sync.WaitGroup
+	for range 4 {
+		in := newInitiator(t, gw.PublicKey())
+		udp := dialWireGuard(t, gw)
+		wg.Go(func() {
+			for time.Since(start) < flood {
+				pkt, err := in.fromNewKey()
+				if err != nil {
+					t.Errorf("initiation: %v", err)
+					return
+				}
+				// A full socket buffer may refuse a write, as a congested
+				// network drops a datagram.
+				if _, err := udp.Write(pkt); err == nil {
+					sent.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	// A refresh asked for near the end of the flood is still due.
+	time.Sleep(controlplane.ConfigRefreshInterval + 500*time.Millisecond)
+	window := time.Since(start)
+
+	fetches := api.configFetches()[initial:]
+	t.Logf("%d initiations from unknown keys, %d config fetches in %v", sent.Load(), len(fetches), window.Round(time.Millisecond))
+	if sent.Load() < 500 {
+		t.Fatalf("only %d initiations; not a flood", sent.Load())
+	}
+	assertRateLimited(t, fetches, window)
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,7 @@ func (c *countingTun) Write(bufs [][]byte, offset int) (int, error) {
 type testClient struct {
 	net *netstack.Net
 	tun *countingTun
+	dev *device.Device
 }
 
 func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr) *testClient {
@@ -73,7 +75,46 @@ func newClient(t *testing.T, gw *gateway.Server, key gateway.Key, ip netip.Addr)
 		t.Fatalf("client up: %v", err)
 	}
 	t.Cleanup(dev.Close)
-	return &testClient{net: tnet, tun: ct}
+	return &testClient{net: tnet, tun: ct, dev: dev}
+}
+
+// handshakeWithin sends a datagram through the tunnel, which starts the
+// client's handshake, and fails the test unless a handshake completes
+// within limit. It returns how long that took. Like every stock client, it
+// sends its handshake again every 5 s until one is answered.
+func (c *testClient) handshakeWithin(t *testing.T, limit time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	uc, err := c.net.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("203.0.113.10:9"))
+	if err != nil {
+		t.Fatalf("dial UDP: %v", err)
+	}
+	defer func() { _ = uc.Close() }()
+	if _, err := uc.Write([]byte("hello")); err != nil {
+		t.Fatalf("write UDP: %v", err)
+	}
+	for !c.handshaked(t) {
+		if time.Since(start) > limit {
+			t.Fatalf("no handshake within %v", limit)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return time.Since(start)
+}
+
+// handshaked reports whether the client has completed a handshake.
+func (c *testClient) handshaked(t *testing.T) bool {
+	t.Helper()
+	state, err := c.dev.IpcGet()
+	if err != nil {
+		t.Fatalf("read client state: %v", err)
+	}
+	for line := range strings.Lines(state) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "last_handshake_time_sec="); ok {
+			return v != "0"
+		}
+	}
+	return false
 }
 
 func (c *testClient) get(t *testing.T, url string) []byte {
