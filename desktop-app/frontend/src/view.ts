@@ -1,26 +1,16 @@
-// Renders the sign-in and Share state machines into the window. Each
-// sign-in state is one screen, and home holds the Share panel; actions are
-// buttons with data-action, handled in ui.ts. Every value from Go or the API
-// goes through esc().
+// Renders the sign-in, Share and Use state machines into the window. Each
+// sign-in state is one screen; home holds a tab for Share and one for Use.
+// Actions are buttons with data-action, handled in ui.ts. Every value from
+// Go or the API goes through esc().
 
+import type { IdentityView } from "./identity";
 import type { ShareStatus, ShareView } from "./share";
+import type { UseView } from "./use";
+import { identityParts, usePanel } from "./view-use";
 import type { ErrorCode, Member, State } from "./signin";
+import { errorText, esc, formatBytes, whole } from "./text";
 
-const errorText: Record<ErrorCode, string> = {
-  invalid_email: "Enter a full email address, like name@example.com.",
-  clock_skew: "Your computer's clock is more than an hour off. Set the date and time automatically, then try again.",
-  offline: "Homeport can't be reached. Check your internet connection and try again.",
-  rate_limited: "Too many sign-in attempts. Wait a minute, then try again.",
-  email_unavailable: "Sign-in emails can't be sent right now. Try again in a few minutes.",
-  no_sign_in: "That sign-in was cancelled. Enter your email to start again.",
-  identity_required: "Verify your identity first.",
-  gateway_unavailable: "No Homeport gateway can take your line yet. Try again in a few minutes.",
-  signed_out: "You were signed out. Sign in again.",
-  unexpected: "Sign-in didn't work. Try again.",
-};
-
-const esc = (s: string) =>
-  s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+export { formatBytes } from "./text";
 
 /** Groups a match code as "482 913", the way a house number is read. */
 export function groupDigits(code: string): string {
@@ -129,24 +119,6 @@ function identityText(status: string): string {
   }
 }
 
-const decimal1 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-const decimal2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-
-/**
- * Formats a byte count the way Homeport bills it: 1 MB is 10^6 bytes, with
- * about three significant digits.
- */
-export function formatBytes(bytes: number): string {
-  const mb = bytes / 1e6;
-  if (bytes === 0) return "0 MB";
-  if (mb < 0.1) return `< ${decimal1.format(0.1)} MB`;
-  if (mb < 100) return `${decimal1.format(mb)} MB`;
-  if (mb < 1000) return `${whole.format(mb)} MB`;
-  const gb = mb / 1000;
-  return gb < 10 ? `${decimal2.format(gb)} GB` : `${decimal1.format(gb)} GB`;
-}
-
 // The window glyph at the head of the Share panel: a house window whose
 // light is on while the line is shared.
 type Light = "off" | "on" | "warming" | "dim" | "fault";
@@ -217,8 +189,11 @@ function verifyText(identity: string): { line: string; note: string } {
   }
 }
 
-/** sharePanel renders the Share state machine on the home screen. */
-export function sharePanel(v: ShareView): string {
+/**
+ * sharePanel renders the Share state machine on the home screen. While Share
+ * asks the member to verify, identity says where the check stands.
+ */
+export function sharePanel(v: ShareView, identity?: IdentityView): string {
   switch (v.kind) {
     case "loading":
     case "signedOut":
@@ -227,6 +202,22 @@ export function sharePanel(v: ShareView): string {
         <div class="share-head">${windowGlyph("off")}<div class="share-text"><h2 id="share-title">Share</h2></div></div>
       </section>`;
     case "verify": {
+      if (identity?.kind === "status" && identity.state !== "verified") {
+        const p = identityParts(identity);
+        return `
+      <section class="share-panel is-verify" aria-labelledby="share-title">
+        <div class="share-head">
+          ${windowGlyph("off")}
+          <div class="share-text">
+            <h2 id="share-title">Share</h2>
+            <p class="share-line" id="share-line">${p.line}</p>
+          </div>
+        </div>
+        ${p.note ? `<p class="share-note">${p.note}</p>` : ""}
+        <div class="share-identity">${p.actions}</div>
+      </section>`;
+      }
+      // The check says verified, but Share's last answer from Go didn't.
       const t = verifyText(v.identity);
       return `
       <section class="share-panel is-verify" aria-labelledby="share-title">
@@ -275,29 +266,49 @@ export function sharePanel(v: ShareView): string {
   }
 }
 
-function home(member: Member, signingOut: boolean, share: ShareView): string {
+export type Tab = "share" | "use";
+
+/** What home shows: the open tab, and the Share, identity and Use views. */
+export interface HomeView {
+  tab: Tab;
+  share: ShareView;
+  identity?: IdentityView;
+  use: UseView;
+}
+
+const loadingHome: HomeView = { tab: "share", share: { kind: "loading" }, use: { kind: "loading" } };
+
+function tab(t: Tab, label: string, open: Tab): string {
+  const selected = t === open;
+  return `<button class="tab" type="button" role="tab" id="tab-${t}" aria-controls="home-panel"
+    aria-selected="${selected}" tabindex="${selected ? 0 : -1}" data-action="tab" data-tab="${t}">${label}</button>`;
+}
+
+function home(member: Member, signingOut: boolean, h: HomeView): string {
   const c = member.credits;
-  const total = c.purchased + c.earnedPending + c.earnedCashable;
+  // Use's balance is the newest; the member's is from when home opened.
+  const total = h.use.kind === "ready" ? h.use.balance.total : c.purchased + c.earnedPending + c.earnedCashable;
+  const panel =
+    h.tab === "use"
+      ? `<div class="use" data-use>${usePanel(h.use, h.identity)}</div>`
+      : `<div class="share" data-share>${sharePanel(h.share, h.identity)}</div>`;
   return `
     <section class="screen home" aria-labelledby="title">
       <h1 id="title" class="visually-hidden">Home</h1>
 
-      <div class="share" data-share>${sharePanel(share)}</div>
+      <div class="tabs" role="tablist" aria-label="Mode">
+        ${tab("share", "Share", h.tab)}
+        ${tab("use", "Use", h.tab)}
+      </div>
 
-      <ul class="group modes" aria-label="Other modes">
-        <li class="row">
-          <div class="row-text">
-            <h2>Use</h2>
-            <p>Connect through a member's home line with the WireGuard app, and pay in credits for what you use.</p>
-          </div>
-          <span class="soon">Coming soon</span>
-        </li>
-      </ul>
+      <div class="tab-panel" id="home-panel" role="tabpanel" aria-labelledby="tab-${h.tab}" data-panel="${h.tab}">
+        ${panel}
+      </div>
 
       <h2 class="group-title">Account</h2>
       <dl class="group facts">
         <div class="row"><dt>Email</dt><dd>${esc(member.email)}</dd></div>
-        <div class="row"><dt>Identity</dt><dd>${identityText(member.identityStatus)}</dd></div>
+        <div class="row"><dt>Identity</dt><dd>${identityText(identityOf(member, h.identity))}</dd></div>
         <div class="row"><dt>Credits</dt><dd class="numeric">${credits.format(total)}</dd></div>
       </dl>
 
@@ -309,8 +320,14 @@ function home(member: Member, signingOut: boolean, share: ShareView): string {
     </section>`;
 }
 
+// identityOf is the member's identity status: the check's, once it ran.
+function identityOf(member: Member, identity: IdentityView | undefined): string {
+  if (identity?.kind !== "status") return member.identityStatus;
+  return identity.state === "waiting" ? member.identityStatus : identity.state;
+}
+
 /** render returns the screen for a state; home shows share as well. */
-export function render(s: State, share: ShareView = { kind: "loading" }): string {
+export function render(s: State, h: HomeView = loadingHome): string {
   switch (s.kind) {
     case "checking":
       return `<section class="screen checking" aria-busy="true"></section>`;
@@ -325,8 +342,8 @@ export function render(s: State, share: ShareView = { kind: "loading" }): string
     case "expired":
       return expired(s);
     case "signedIn":
-      return home(s.member, false, share);
+      return home(s.member, false, h);
     case "signingOut":
-      return home(s.member, true, share);
+      return home(s.member, true, h);
   }
 }

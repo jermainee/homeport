@@ -2,7 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SignIn } from "./signin";
 import { FakeAuth, serviceError } from "./test/fake-auth";
+import { FakeIdentity } from "./test/fake-identity";
 import { FakeShare } from "./test/fake-share";
+import { FakeUse } from "./test/fake-use";
 import { mount } from "./ui";
 
 let auth: FakeAuth;
@@ -17,7 +19,7 @@ beforeEach(async () => {
   announcer = document.getElementById("announcer")!;
   auth = new FakeAuth();
   signIn = new SignIn(auth);
-  mount(signIn, app, announcer, new FakeShare());
+  mount(signIn, app, announcer, { share: new FakeShare(), identity: new FakeIdentity(), use: new FakeUse() });
   await signIn.boot();
 });
 

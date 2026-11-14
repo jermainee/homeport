@@ -1,5 +1,5 @@
 // Package fakeapi is an in-memory stand-in for the Homeport control API's
-// member and share endpoints, for tests. It follows
+// member, share and use endpoints, for tests. It follows
 // contracts/control-api.openapi.yaml: the app creates the session token, the
 // API sees only its SHA-256, and the token works once the member approves the
 // sign-in. Lines need a verified identity, as in the API.
@@ -39,6 +39,12 @@ type Server struct {
 	devices     map[string]*Device // by device_id
 	lines       map[string]*Line   // by line_id
 	shareReplay map[string]replay  // POST answers by member and request_id
+
+	offered      []AvailableLine     // lines other members share
+	peers        []*Peer             // WireGuard peers, oldest first
+	sessionCount int                 // Stripe sessions created, for their URLs
+	identityURLs map[string][]string // by member_id
+	checkoutURLs map[string][]string // by member_id
 }
 
 // Gateway is where a line's agent dials out to, as POST /v1/lines returns
@@ -125,14 +131,16 @@ var (
 func New(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		nextCode:    482913,
-		logins:      map[string]*login{},
-		byRequestID: map[string]*login{},
-		members:     map[string]*Member{},
-		sessions:    map[string]*Member{},
-		devices:     map[string]*Device{},
-		lines:       map[string]*Line{},
-		shareReplay: map[string]replay{},
+		nextCode:     482913,
+		logins:       map[string]*login{},
+		byRequestID:  map[string]*login{},
+		members:      map[string]*Member{},
+		sessions:     map[string]*Member{},
+		devices:      map[string]*Device{},
+		lines:        map[string]*Line{},
+		shareReplay:  map[string]replay{},
+		identityURLs: map[string][]string{},
+		checkoutURLs: map[string][]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login-requests", s.createLoginRequest)
@@ -142,6 +150,12 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("POST /v1/devices", s.registerDevice)
 	mux.HandleFunc("POST /v1/lines", s.createLine)
 	mux.HandleFunc("PATCH /v1/lines/{id}", s.updateLine)
+	mux.HandleFunc("POST /v1/identity/sessions", s.createIdentitySession)
+	mux.HandleFunc("POST /v1/checkout/sessions", s.createCheckoutSession)
+	mux.HandleFunc("GET /v1/lines/available", s.listAvailableLines)
+	mux.HandleFunc("POST /v1/wireguard/peers", s.createPeer)
+	mux.HandleFunc("GET /v1/wireguard/peers", s.listPeers)
+	mux.HandleFunc("DELETE /v1/wireguard/peers/{id}", s.deletePeer)
 	s.Server = httptest.NewServer(s.injectFailures(mux))
 	t.Cleanup(s.Close)
 	return s

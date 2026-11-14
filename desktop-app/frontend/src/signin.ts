@@ -43,6 +43,11 @@ export const ERROR_CODES = [
   "identity_required",
   "gateway_unavailable",
   "signed_out",
+  "line_unavailable",
+  "line_full",
+  "line_not_allowed",
+  "config_gone",
+  "invalid_name",
   "unexpected",
 ] as const;
 

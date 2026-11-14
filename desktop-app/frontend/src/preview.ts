@@ -1,11 +1,14 @@
-// Fake AuthService and ShareService for designing the screens in a browser
-// (dev only). ?preview=signedOut|approve|offline|expired|home|unreachable
-// picks the starting screen; the flow then runs with fake answers. On home,
+// Fake Go services for designing the screens in a browser (dev only).
+// ?preview=signedOut|approve|offline|expired|home|unreachable picks the
+// starting screen; the flow then runs with fake answers. On home,
 // &share=off|connecting|online|paused|offline|gateway|error picks Share's
-// state, and &share=unverified|processing|requires_input the identity.
+// state, &share=unverified|processing|requires_input the identity, and
+// &use=ready|empty|broke|unreachable how Use starts; &tab=use opens Use.
 
+import type { IdentityApi } from "./identity";
 import type { ShareApi, ShareStatus } from "./share";
 import type { AuthApi, LoginStatus, Member } from "./signin";
+import type { Balance, Device, Line, UseApi } from "./use";
 
 const identities = ["unverified", "processing", "requires_input"];
 
@@ -66,7 +69,6 @@ const startStatus: Record<string, ShareStatus> = {
 
 export function previewShare(start: string): ShareApi {
   let status = startStatus[start] ?? startStatus.off!;
-  let checks = 0;
   const listeners = new Set<(s: ShareStatus) => void>();
   const publish = (s: Partial<ShareStatus>) => {
     status = { ...status, ...s };
@@ -96,9 +98,93 @@ export function previewShare(start: string): ShareApi {
       listeners.add(fn);
       return () => void listeners.delete(fn);
     },
+    // The identity check is previewIdentity's; once it says verified, so
+    // does the API.
     async identity() {
       await sleep(600);
-      return ++checks > 1 ? "verified" : "processing";
+      return "verified";
+    },
+  };
+}
+
+// The identity check: Stripe takes a moment, then reports processing and
+// verified, as a member who finishes the check sees it.
+export function previewIdentity(): IdentityApi {
+  let polls = 0;
+  return {
+    async start() {
+      await sleep(700);
+      polls = 0;
+      return "waiting";
+    },
+    async poll() {
+      polls++;
+      return polls < 2 ? "waiting" : polls < 4 ? "processing" : "verified";
+    },
+  };
+}
+
+const previewLines: Line[] = [
+  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", ipv6: true, online: true },
+  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", ipv6: false, online: true },
+  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e8", country: "FR", city: "Lyon", isp: "Orange", ipv6: true, online: false },
+];
+
+// A real config's QR code, made by go-qrcode as UseService makes it, for a
+// throwaway key: it scans in the WireGuard app, and connects nowhere.
+const previewQR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAATQAAAE0AQMAAACYT13cAAAABlBMVEX///8AAABVwtN+AAADZElEQVR42uzay3HzPBYG4c7gzT/LzqCnCMq/P29mCy98RBEgzsMqwuJFgMxf/MXdqJzbSrdo2PYU5pO+6gRXiANaDUC2QLjsUtfG834KmRu4xPwVrpliA4jJBH+HE9d4XiXJ2NnzvgODOUiQMjTKn+fLDVf5f+LH9XbDAdgcDOlZLAbIz7jhLGHAnD6breWI+V83brkIJzF8FofxornmVTeTT0at6cyGRMZVR2wbJ40ytwLUlt51qTNwjCSYlLQEvOoWG5s0HE89hyxryFWnc7g2nvbUsAmnpbuuBsxFsYGTUBvu+356xw16j3us9+Nnm346B1ddQiYxWQpz2wxk86oz6s3GyCJIPP0Q7jrbu3ah+9yHtq1lt124tCLRwL1vJLzrto2FarL2dkOGxPKqS5wtlfwes6icPbjqcGt+3SLHKQxWw7zrkkYpWrIkvgZXrrtO2+fbDbENILflCLnriGLMpRsm2lp41lfdSSbsvYTAkk1kbt51GxkzV59xwFIXfcNb7j3WaOjAIKWvp4x3XeAoYE9UMgVZJlx1ThoHHAJzAmd7ddfxgGUbNJ7c2mwnJ5cdIigKJpGyKUi3nRrWrFJtp9KG5mU3UdFAkWieCFGvulm+/djs2QrWPgNmuetaA80jp6MQkK/iogNMNoYFO6tNRNi46jY3oowtl+B21pZ3XaVjYzX1qW1TAPdjnvWCk2ZoJxe6Yi6Z6F23PJG0CTO3F+eUq67nVYBDmdpgY5HddiPIEHr/wgzDoN1261lkow0zmnOnJnnXURoCaw2kwsSG3HWnKeIz8THHgkXbL3ALkaHUiLlygxledU1QEYKxoeFnXLXLDjpBDkDQt3eAK666gg1kVrZ81kxY3XanLuZGyWhC8HOm4ZKrBqRzsFpzxJSBdx0VYxJbMEbme3awf07TG84x2wqJr7N0YK3Iqy729XuIhdA4LXP++zy/5M4H//nlgW0EDkH24/8ArjitDXpgc/hU32v+2R53HcDT7kLkqQIQTeZl9x4yjhqWcMoFZXcdQLK2BpM4yzBE7rpK8onYW/B52HxarzpBPTxmom6w9Sa869JeZ+pTjtX3HMlvcOLXF1coDt0iue8WowS1tx+Tp7rbDlyTNpw41Hc3d939N2X5vEQWxNq2N3PV/cVfXIv/DQCyuTTms+uOSgAAAABJRU5ErkJggg==";
+
+// &use=ready|empty|broke|unreachable picks how Use starts.
+export function previewUse(start: string): UseApi {
+  let balance: Balance =
+    start === "empty" || start === "broke"
+      ? { purchased: 0, earned: 0, total: 0, bytes: 0 }
+      : { purchased: 1_000_500, earned: 41_250, total: 1_041_750, bytes: 104_175_000_000 };
+  let devices: Device[] =
+    start === "empty" || start === "broke"
+      ? []
+      : [
+          { peerId: "p-router", name: "Travel router", lineId: previewLines[0]!.lineId, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
+          { peerId: "p-laptop", name: "Laptop", lineId: previewLines[1]!.lineId, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
+        ];
+  let checkoutPolls = 0;
+  let n = 4;
+  return {
+    async balance() {
+      if (start === "unreachable") throw fail("offline");
+      return balance;
+    },
+    async buyCredits() {
+      await sleep(600);
+      checkoutPolls = 0;
+      return balance;
+    },
+    async pollCheckout() {
+      if (++checkoutPolls < 3) return { arrived: false, balance };
+      balance = { ...balance, purchased: balance.purchased + 1_000_000, total: balance.total + 1_000_000, bytes: balance.bytes + 100_000_000_000 };
+      return { arrived: true, balance };
+    },
+    async lines() {
+      return previewLines;
+    },
+    async devices() {
+      return devices;
+    },
+    async addDevice(lineId, name) {
+      await sleep(700);
+      const device: Device = { peerId: `p-${n}`, name, lineId, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: new Date().toISOString() };
+      n++;
+      devices = [device, ...devices];
+      return { device, qrCode: previewQR, fileName: `Homeport-${name.replace(/[^A-Za-z0-9]+/g, "-")}.conf`.slice(0, 20) };
+    },
+    async saveConfig() {
+      await sleep(400);
+      return true;
+    },
+    async forgetConfig() {},
+    async removeDevice(peerId) {
+      await sleep(500);
+      devices = devices.filter((d) => d.peerId !== peerId);
     },
   };
 }

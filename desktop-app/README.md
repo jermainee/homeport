@@ -2,11 +2,16 @@
 
 The Homeport app for Linux, macOS and Windows, built with [Wails v3](https://v3.wails.io): a Go backend and a TypeScript + Vite frontend in the OS webview. macOS comes first.
 
-It signs the member in with an email link and shares this Mac's home line: the Share switch runs the sharing agent from [`agent/`](../agent/README.md) inside the app. Use (identity check, credits and WireGuard configs) comes in a later PR.
+It signs the member in with an email link and runs the Stripe Identity check that every member passes before Share or Use turns on. Then it has two tabs:
 
-![Sign-in screen](docs/sign-in.png) ![Share screen](docs/share.png)
+- **Share** shares this Mac's home line: the switch runs the sharing agent from [`agent/`](../agent/README.md) inside the app.
+- **Use** shows the member's credits, buys more through Stripe Checkout, and adds devices that use another member's line with the official WireGuard app: a QR code for the iPhone, or a `.conf` file for a Mac or a travel router.
 
-The Share screenshot is the dev preview (`?preview=home&share=online`), which runs the real screens against fake data.
+![Sign-in screen](docs/sign-in.png) ![Share screen](docs/share.png) ![Identity check](docs/identity.png)
+
+![Use screen](docs/use.png) ![A new device's config](docs/use-qr.png)
+
+The screenshots after sign-in are the dev preview (for example `?preview=home&share=online&tab=use`), which runs the real screens against fake data. The QR code in it is real: it holds a config with a throwaway key.
 
 ## Requirements
 
@@ -42,9 +47,17 @@ HOMEPORT_PROFILE=/tmp/homeport-b ./bin/homeport
 
 Share needs a member whose identity is verified and a gateway that has announced itself to the API (`PUT /dev/gateways/{id}` until the gateway does it, see `../api/README.md`). The agent connects once that gateway lists the device.
 
+"Verify identity" and "Buy credits" open Stripe's test-mode pages in the browser, so the API needs its Stripe test keys and `stripe listen` forwarding the webhooks (see `../api/README.md`). Pay with the test card 4242 4242 4242 4242.
+
 ### Designing the screens in a browser
 
-`npm run dev` in `frontend/` serves the UI without Go. Add `?preview=<state>` to run it against a fake AuthService: `signedOut`, `approve` (approves after a few polls), `offline`, `expired`, `home` or `unreachable`. On `home`, `&share=<state>` sets the fake ShareService: `off`, `connecting`, `online`, `paused`, `offline`, `gateway` or `error`, or `unverified`, `processing` or `requires_input` for the member's identity. Production builds leave the fakes out.
+`npm run dev` in `frontend/` serves the UI without Go. Add `?preview=<state>` to run it against a fake AuthService: `signedOut`, `approve` (approves after a few polls), `offline`, `expired`, `home` or `unreachable`. On `home`:
+
+- `&share=<state>` sets the fake ShareService: `off`, `connecting`, `online`, `paused`, `offline`, `gateway` or `error`, or `unverified`, `processing` or `requires_input` for the member's identity. "Verify identity" then runs a fake check that ends verified.
+- `&use=<state>` sets the fake UseService: `ready`, `empty` or `broke` (no devices, no credits), or `unreachable`.
+- `&tab=use` opens the Use tab.
+
+Production builds leave the fakes out.
 
 ## Test
 
@@ -55,8 +68,10 @@ cd frontend && npm test
 
 - `services/auth_test.go` tests `AuthService` against `internal/fakeapi`, an in-memory stand-in for the API's member and share endpoints.
 - `services/share_test.go` tests `ShareService` against the same fake API, with a fake agent behind the `services.Agent` interface: enrollment, the line and its gateway pin, the switch, retries while the API or a gateway is unavailable, another VPN, today's count, sign-out and restarts.
-- `frontend/src/signin.test.ts` and `share.test.ts` test the sign-in and Share state machines against fakes of the Go services (`src/test/`), with fake timers for polling.
-- `frontend/src/ui.test.ts`, `ui-share.test.ts` and `view.test.ts` test focus, announcements and rendering in happy-dom.
+- `services/identity_test.go` tests `IdentityService`: the check's page opens in the browser, a retry reuses the request, and polling reports each step, including a new check after a failed one.
+- `services/use_test.go` tests `UseService`: the balance in credits and bytes, Checkout and waiting for the credits, the lines, and new devices. It decodes each QR code with gozxing, checks that the config's private key belongs to the public key the API got and is stored nowhere, and covers the save path, the file's permissions and the config's single showing.
+- `frontend/src/signin.test.ts`, `share.test.ts`, `identity.test.ts` and `use.test.ts` test the state machines against fakes of the Go services (`src/test/`), with fake timers for polling.
+- `frontend/src/ui.test.ts`, `ui-share.test.ts`, `ui-use.test.ts` and `view.test.ts` test focus, announcements, tabs and rendering in happy-dom.
 
 ## How it fits together
 
@@ -65,13 +80,15 @@ cd frontend && npm test
 | `main.go` | Opens the profile, creates the API client, the services, the window and the tray |
 | `services/` | Wails services the frontend calls. The webview never calls the API, so the session token never reaches JavaScript |
 | `services/share.go` | `ShareService`: enrolls this computer, turns sharing on and off at the API and runs the agent |
+| `services/identity.go` | `IdentityService`: opens the Stripe Identity check in the browser and polls how it stands |
+| `services/use.go` | `UseService`: credits, Checkout, lines, and devices with their WireGuard config and QR code |
 | `internal/apiclient/` | Client for the member and share endpoints in `contracts/control-api.openapi.yaml` |
 | `internal/profile/` | Profile directory: a stable install id, the session, and per member (`members/<id>/`) the agent key and Share state |
 | `internal/tray/` | The menu bar icon and menu: Share status, the Share switch, Open and Quit. `icons/gen.go` draws its icons |
 | `e2e_guard.go` | Stops the app from building with the agent's `e2e` test tag |
-| `frontend/src/signin.ts`, `share.ts` | The sign-in and Share state machines |
-| `frontend/src/view.ts`, `ui.ts` | Render each state and wire up the window; `style.css` holds the design tokens |
-| `frontend/src/auth.ts`, `share-api.ts` | Connect the state machines to the generated bindings and Share's status events |
+| `frontend/src/signin.ts`, `share.ts`, `identity.ts`, `use.ts` | The sign-in, Share, identity and Use state machines; `poll.ts` is their polling |
+| `frontend/src/view.ts`, `view-use.ts`, `ui.ts` | Render each state and wire up the window; `text.ts` holds the shared wording, `style.css` the design tokens |
+| `frontend/src/auth.ts`, `share-api.ts`, `identity-api.ts`, `use-api.ts` | Connect the state machines to the generated bindings and Share's status events |
 | `frontend/bindings/` | TypeScript bindings generated by `wails3 build`. Commit them; CI fails if they are stale |
 
 Sign-in follows the contract: the app creates the session token (`hpm_` and 32 random bytes), sends only its SHA-256, shows the match code and polls until the member confirms the code on the page behind the email link. A retry after a lost response reuses the same `request_id`, so the member gets one email, not two.
@@ -92,6 +109,20 @@ While the API or a gateway can't be reached, Share stays on and tries again, fro
 "Shared today" is the agent's own count of payload bytes, kept per day in `members/<id>/share.json` across restarts. Credits follow the gateway's count, which includes packet headers.
 
 Closing the window keeps Share running in the menu bar. Quit stops the agent but keeps the member's choice, so Share turns on again at the next start, unless the member turns it off before then. Turning Share off, or signing out, stops the agent first and then tells the API; a turn-off the API missed is sent with the next turn-off or at the next start. A session that ends elsewhere, or runs out, turns Share off as well.
+
+### Identity
+
+"Verify identity", on the Share or the Use tab, asks the API for a Stripe Identity session (`POST /v1/identity/sessions`) and opens its page in the system browser. The app then polls `GET /v1/me` every 3 seconds, for up to 30 minutes, and shows each step: waiting for the member, being checked, verified, or not passed. A check already being processed is followed from the start. The API keeps a failed check's `requires_input` until Stripe reports on the next one, so after "Try again" the app waits until the status moves. Once verified, Share and Use turn on without a restart.
+
+### Use
+
+- **Credits:** `GET /v1/me` gives the bought and earned credits. The app shows what they buy in bytes, at 10 credits per MB (10,000 credits = 1 GB); `bytesPerCredit` in `services/use.go` is its only copy of that price until the API serves it.
+- **Buy credits:** `POST /v1/checkout/sessions` opens Stripe Checkout in the browser. The app polls `GET /v1/me` every 3 seconds, for up to 10 minutes, until the purchased credits rise above where they were; spending meanwhile lowers that mark.
+- **Lines:** `GET /v1/lines/available` lists the lines the member can use, with country, city, ISP and whether the line is online. The API leaves out the member's own lines and lines linked to them.
+- **Add a device:** the app makes the device's X25519 key pair and sends only the public key with `POST /v1/wireguard/peers`. It puts the private key into the returned `config_text` and keeps the config in memory only, as a QR code for the WireGuard app and for "Save .conf file" (written `0600`). Done, signing out or quitting drops it; nothing can show it again. A device whose config is lost is removed and added again.
+- **Devices:** `GET /v1/wireguard/peers` lists them, and Remove deletes one (`DELETE /v1/wireguard/peers/{id}`). The API doesn't report usage per device yet.
+
+POSTs reuse their `request_id` (and for a device, its key pair) after a response that never arrived, so a retry gets the first answer instead of a second Stripe session or peer.
 
 ## Build and release
 

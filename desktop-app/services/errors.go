@@ -34,6 +34,17 @@ const (
 	ErrGatewayUnavailable ErrorCode = "gateway_unavailable"
 	// ErrSignedOut: the session is gone, so the member has to sign in again.
 	ErrSignedOut ErrorCode = "signed_out"
+	// ErrLineUnavailable: the line stopped sharing, or its owner left.
+	ErrLineUnavailable ErrorCode = "line_unavailable"
+	// ErrLineFull: the line serves as many members as it can.
+	ErrLineFull ErrorCode = "line_full"
+	// ErrLineNotAllowed: the line is the member's own, or linked to them.
+	ErrLineNotAllowed ErrorCode = "line_not_allowed"
+	// ErrConfigGone: the device's config was shown once and is gone; the
+	// private key in it was never stored.
+	ErrConfigGone ErrorCode = "config_gone"
+	// ErrInvalidName: a device needs a name of 1 to 64 characters.
+	ErrInvalidName ErrorCode = "invalid_name"
 	// ErrUnexpected: anything else. The message has the details for logs.
 	ErrUnexpected ErrorCode = "unexpected"
 )
@@ -71,10 +82,14 @@ func serviceError(err error) error {
 	switch {
 	case errors.As(err, &apiErr):
 		switch {
+		case apiErr.Status == http.StatusUnauthorized:
+			code = ErrSignedOut
 		case apiErr.Status == http.StatusTooManyRequests:
 			code = ErrRateLimited
 		case apiErr.Code == "email_unavailable":
 			code = ErrEmailUnavailable
+		case apiErr.Code == "identity_required":
+			code = ErrIdentityRequired
 		}
 	case errors.As(err, &urlErr):
 		code = ErrOffline
