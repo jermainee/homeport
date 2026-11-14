@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -34,10 +36,8 @@ func TestTransfersArriveIntactAndEveryByteIsReportedOnce(t *testing.T) {
 		t.Fatalf("the origin received an upload with hash %s, want %s", got, sum(up))
 	}
 
-	c := s.quiesce()
-	if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-		t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
-	}
+	// The gateway meters exactly what the client's tun counted.
+	c := s.settled(true)
 
 	// The agent counts payload only: the transfers plus HTTP headers.
 	st := s.agent.Stats()
@@ -48,8 +48,8 @@ func TestTransfersArriveIntactAndEveryByteIsReportedOnce(t *testing.T) {
 	if st.BytesOut < 1*mb || st.BytesOut > 1*mb+headers {
 		t.Errorf("agent sent %d bytes to the origin, want 1 MB plus headers", st.BytesOut)
 	}
-	if st.FlowsTotal != 3 || st.FlowsActive != 0 {
-		t.Errorf("agent saw %d flows, %d still open; want 3, none open", st.FlowsTotal, st.FlowsActive)
+	if st.FlowsTotal != 3 { // settled waited until none is open
+		t.Errorf("agent saw %d flows, want 3", st.FlowsTotal)
 	}
 	// The gateway counts whole IP packets: the payload plus at most 10%
 	// for IP and TCP headers, and the ACKs for the other direction.
@@ -140,9 +140,14 @@ func TestUDPAndDNSFlowsPassThroughTheAgent(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
-	defer cancel()
-	addrs, err := s.client.Net.LookupContextHost(ctx, originName)
+	var addrs []string
+	err = untilDNSAnswers(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), waitFor)
+		defer cancel()
+		var err error
+		addrs, err = s.client.Net.LookupContextHost(ctx, originName)
+		return err
+	})
 	if err != nil {
 		t.Fatalf("look up %s through the tunnel: %v", originName, err)
 	}
@@ -152,15 +157,19 @@ func TestUDPAndDNSFlowsPassThroughTheAgent(t *testing.T) {
 	if !s.resolver.looked("ip4 " + originName + ".") {
 		t.Errorf("the agent's resolver was not asked for %s", originName)
 	}
-	body, err := s.tryGet("http://"+originName+contentPath+"/blob/5000", transferTimeout)
+	var body []byte
+	err = untilDNSAnswers(func() error {
+		var err error
+		body, err = s.tryGet("http://"+originName+contentPath+"/blob/5000", transferTimeout)
+		return err
+	})
 	if err != nil || sum(body) != sum(blob(5000)) {
 		t.Fatalf("fetch by name: %d bytes, %v", len(body), err)
 	}
 
-	c := s.quiesce()
-	if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-		t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
-	}
+	// The gateway meters exactly what the client's tun counted. The UDP
+	// and DNS flows stay open until they idle out.
+	c := s.settled(false)
 	s.stopGateway()
 	if up, down := s.api.UsageTotal(); up != c.gateway.Up || down != c.gateway.Down {
 		t.Errorf("usage events report %d up and %d down; the gateway metered %+v", up, down, c.gateway)
@@ -335,7 +344,7 @@ func TestARetriedUsageReportIsCountedOnce(t *testing.T) {
 				calls := usageCalls(s.api)
 				return len(calls) >= 2 && calls[len(calls)-1].Status == 200
 			})
-			c := s.quiesce()
+			c := s.settled(true) // the gateway meters exactly what the client's tun counted
 			s.stopGateway()
 
 			calls := usageCalls(s.api)
@@ -351,9 +360,6 @@ func TestARetriedUsageReportIsCountedOnce(t *testing.T) {
 			}
 			if up, down := s.api.UsageTotal(); up != c.gateway.Up || down != c.gateway.Down {
 				t.Errorf("usage events report %d up and %d down; the gateway metered %+v", up, down, c.gateway)
-			}
-			if c.gateway.Up != c.sent || c.gateway.Down != c.received {
-				t.Errorf("gateway metered %+v; the client's tun sent %d and received %d", c.gateway, c.sent, c.received)
 			}
 		})
 	}
@@ -374,7 +380,7 @@ func TestTheAgentReconnectsAfterTheGatewayDropsIt(t *testing.T) {
 	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
 		t.Fatal("download before the restart differs")
 	}
-	first := s.quiesce().gateway
+	first := s.settled(true).gateway
 
 	// The gateway restarts on the same ports with the same keys, as after
 	// a deploy. Its agents are dropped with it.
@@ -390,7 +396,7 @@ func TestTheAgentReconnectsAfterTheGatewayDropsIt(t *testing.T) {
 	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
 		t.Fatal("download after the restart differs")
 	}
-	second := s.quiesce().gateway
+	second := s.settled(true).gateway
 	s.stopGateway()
 
 	var types []string
@@ -453,4 +459,21 @@ func earliest(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// untilDNSAnswers runs f again while it fails with a DNS timeout, starting
+// no new try after slowTimeout. The client's resolver (wireguard-go's
+// netstack) gives a lookup two tries of 5 s each, and under the race
+// detector a lookup through the tunnel can take longer than that; without
+// it, a lookup takes about a millisecond.
+func untilDNSAnswers(f func() error) error {
+	deadline := time.Now().Add(slowTimeout)
+	for {
+		err := f()
+		var dnsErr *net.DNSError
+		if !errors.As(err, &dnsErr) || !dnsErr.IsTimeout || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
