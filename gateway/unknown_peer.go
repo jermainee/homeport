@@ -13,8 +13,9 @@ import (
 )
 
 // inspectEvery is the least time between two handshake initiations the
-// gateway decrypts to learn their sender. Each costs one X25519, so even a
-// flood of initiations costs a few percent of one core.
+// gateway decrypts to learn their sender. Each costs one X25519 (about
+// 50 µs on a current core), so even a flood of initiations costs a few
+// percent of one core.
 const inspectEvery = time.Millisecond
 
 // inspectQueue is how many initiations may wait for inspection. More are
@@ -71,7 +72,10 @@ func (u *unknownPeers) offer(pkt []byte) {
 	if len(pkt) != device.MessageInitiationSize || binary.LittleEndian.Uint32(pkt) != device.MessageInitiationType {
 		return
 	}
-	if !u.mac1.CheckMAC1(pkt) {
+	// offer runs on wireguard-go's receive goroutine, which also carries
+	// every data packet. In a flood the queue is full, so skip the MAC1
+	// BLAKE2s for initiations that would be dropped anyway.
+	if len(u.queue) == cap(u.queue) || !u.mac1.CheckMAC1(pkt) {
 		return
 	}
 	select {

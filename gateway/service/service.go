@@ -2,8 +2,9 @@
 // runs it: it announces the gateway, keeps its peers and lines in sync with
 // the API's config (fetched again at once when an unknown agent or
 // WireGuard key connects), holds a quota lease for each peer's session,
-// reports usage and line events, and shuts down in order. cmd/homeport-gateway is a thin wrapper
-// around it, and the end-to-end tests in e2e/ run it the same way.
+// reports usage and line events, and shuts down in order.
+// cmd/homeport-gateway is a thin wrapper around it, and the end-to-end
+// tests in e2e/ run it the same way.
 package service
 
 import (
