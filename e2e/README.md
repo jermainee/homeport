@@ -37,6 +37,7 @@ The client sends its flows to public-looking addresses, as a member would: TCP t
 | `TestTheSessionStopsAtTheLeaseAndClosesAfterGrace` | The API grants a 300 kB lease, then answers 402. Traffic stops at the lease plus at most two seconds of traffic (the gateway checks leases once a second); during grace only DNS works; the session closes after grace; the final usage event arrives, then the lease return; nothing more is metered. |
 | `TestARetriedUsageReportIsCountedOnce` | The API answers one usage report with 500, or applies it and drops the answer. The retry carries the same event IDs, and the totals stay exact. |
 | `TestTheAgentReconnectsAfterTheGatewayDropsIt` | The gateway restarts on the same ports and keys; the agent reconnects; traffic flows again; line events go online, offline, online, offline; usage across both runs stays exact. |
+| `TestShareTurnedOnWhileTheGatewayRunsWorksWithinSeconds` | The gateway fetches a config without the line or the peer; then the API lists both and the agent starts with the app's reconnect timings. The gateway refuses the agent's first attempt and fetches its config at once; the line is online within 3 s (about 0.6 s locally), not at the 30 s poll, and a download through it works. |
 | `TestLogsNeverNameADestination` | Drives TCP, UDP, DNS and refused flows, then checks the gateway's and agent's logs hold the session metadata but no destination address, origin port, DNS name or request path. |
 
 Every test also ends with the API's contract check and the destination check on both logs.
@@ -69,9 +70,8 @@ member B's WireGuard ──▶ gateway binary ──QUIC──▶ member A's age
 1. **API.** `npm run seed:dev -- --persist-to <tmp>` applies the migrations to an empty local D1 and adds a dev gateway; `wrangler dev` serves that database with `ENVIRONMENT=dev`, so the dev routes are on.
 2. **Gateway.** `go build` of `cmd/homeport-gateway`, started with the seeded token. It announces itself with `PUT /v1/gateway/self`.
 3. **Members,** through the member endpoints and the dev routes, as `memberapi` calls them: A and B sign in (`/dev/login-requests/{id}/confirm`), both are marked verified (`/dev/members/{id}/identity/verify`), B gets 1,000,000 credits (`/dev/members/{id}/credits`). A registers an agent key, creates a line and turns sharing on; B creates a WireGuard peer on it and gets its `.conf`.
-4. **Restart.** The gateway learns new lines and peers at its next config poll, every 30 s. The test restarts it (same state dir and ports), so its first poll serves both.
-5. **Agent and client.** A's agent dials the gateway the API named for the line, with the pin it named. B's client runs the API's `.conf` with B's own key, parsed by `wgclient.ParseConfig`.
-6. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the `wgcurl` binary fetches 1 MB more with the same `.conf` and reports the bytes its tunnel carried. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease.
+4. **Agent and client.** A's agent dials the gateway the API named for the line, with the pin it named. The gateway fetched its config before the line existed, so it refuses the first attempt and fetches its config at once; the agent's next attempt gets in, and the test checks that this takes less than 5 s. The same fetch brings B's peer. B's client runs the API's `.conf` with B's own key, parsed by `wgclient.ParseConfig`.
+5. **Traffic.** B downloads 3 MB and uploads 1 MB through A's line. Then the `wgcurl` binary fetches 1 MB more with the same `.conf` and reports the bytes its tunnel carried. Then the gateway gets SIGTERM, which ends the session with a final usage event and returns the lease.
 
 The agent and the client run in the test's process. The agent needs the `e2e` tag's `RouteTestOrigin` to reach the loopback origin through a real gateway (see [Destinations](#destinations)), and `cmd/homeport-agent` refuses that tag on purpose. The client's tun counts every inner byte, which the checks compare with what the API recorded. The [manual run](#manual-run) below uses the agent CLI and a public website instead.
 
@@ -153,7 +153,7 @@ HOMEPORT_GATEWAY_TOKEN=hpgw_… go run ./cmd/homeport-gateway \
 
 `--wg-endpoint` goes into every new peer's `.conf`. For the iPhone, it must be the Mac's address on the Wi-Fi the phone uses; for `wgcurl` alone, `127.0.0.1:51820` works. Agents dial the same host on port 4433. Ctrl-C stops the gateway in order: final usage events, lease returns, lines offline.
 
-The gateway polls its config every 30 s. A new line or peer works from the next poll; restarting the gateway polls at once.
+The gateway polls its config every 30 s. A new line's agent makes it fetch the config at once (at most every 2 s), so Share comes online within a few seconds. A new peer works from the next poll or from such a fetch; restarting the gateway polls at once.
 
 ### 3. Member A shares (profile A)
 
@@ -172,7 +172,7 @@ HOMEPORT_PROFILE=../.dev-state/profile-a ./bin/homeport
    cd e2e && go run ./cmd/member -session ../.dev-state/profile-a/session.json verify
    ```
 
-3. Turn Share on. The agent connects at the gateway's next config poll; until then it retries with a growing pause, so this takes up to about a minute.
+3. Turn Share on. The agent is online within a few seconds: the gateway refuses its first attempt (`tls: bad certificate` in the agent's log) and fetches its config at once, and the agent retries within a second.
 
 Without the desktop app (on Linux, say), the agent CLI shares the line instead:
 
@@ -247,4 +247,4 @@ B's `purchased` dropped by ⌊bytes × 10 / 10^6⌋ over all of B's sessions on 
 ## Not done yet
 
 - The smoke test's agent runs in-process with the `e2e` tag; the agent CLI is covered only by the manual run.
-- A new line or peer waits for the gateway's next config poll (up to 30 s), and a new agent backs off meanwhile, so turning Share on takes up to about a minute. A config refresh when an unknown agent key connects would make it immediate.
+- A new WireGuard peer waits for the gateway's next config poll (up to 30 s), unless an agent's refresh comes first: wireguard-go drops a handshake from an unknown key without telling the gateway.

@@ -129,12 +129,10 @@ func TestFullStackSmoke(t *testing.T) {
 		}
 	})
 
-	// The gateway learns new lines and peers at its next config poll, every
-	// 30 s. A restart polls at once, with the same keys from its state dir.
-	gw.stop()
-	gw.start()
-
-	// A's agent dials the gateway the API named for the line.
+	// A's agent dials the gateway the API named for the line. The gateway
+	// fetched its config before A turned sharing on, so it refuses the
+	// agent's first attempt and fetches its config again at once. That
+	// fetch brings B's peer too.
 	gwPin, err := hex.DecodeString(line.Gateway.SPKISHA256)
 	if err != nil || len(gwPin) != len(relayprotocol.Pin{}) {
 		t.Fatalf("the line's gateway pin %q", line.Gateway.SPKISHA256)
@@ -156,6 +154,7 @@ func TestFullStackSmoke(t *testing.T) {
 	}
 	agentCtx, stopAgent := context.WithCancel(ctx)
 	agentDone := make(chan error, 1)
+	agentStarted := time.Now()
 	go func() { agentDone <- ag.Run(agentCtx) }()
 	t.Cleanup(func() {
 		stopAgent()
@@ -172,6 +171,11 @@ func TestFullStackSmoke(t *testing.T) {
 		st := ag.Stats()
 		return st.State == agent.StateConnected && st.LineID == line.ID
 	})
+	if took := time.Since(agentStarted); took > 5*time.Second {
+		t.Errorf("A's agent served the line %v after it started; want a few seconds, not the gateway's 30 s config poll", took)
+	} else {
+		t.Logf("A's agent served the line %v after it started", took.Round(time.Millisecond))
+	}
 
 	// B's client runs the .conf the API handed out, with B's own key.
 	conf := wgclient.WithPrivateKey(peer.ConfigText, clientKey)

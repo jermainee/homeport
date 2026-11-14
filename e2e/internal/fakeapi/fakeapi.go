@@ -241,6 +241,14 @@ func New(token string, cfg Config) *API {
 	}
 }
 
+// SetConfig replaces the config the API serves, as a member's change does,
+// such as turning Share on. cfg needs an ETag of its own.
+func (a *API) SetConfig(cfg Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.config = cfg
+}
+
 // SetLeases sets how lease requests are answered.
 func (a *API) SetLeases(p LeasePolicy) {
 	a.mu.Lock()
