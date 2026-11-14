@@ -14,7 +14,7 @@ The wire format is [`relay-protocol/`](../relay-protocol/README.md).
   - **DNS:** each frame is a query, answered through the system resolver, so websites see the home ISP's resolver. The agent answers A and AAAA queries, answers HTTPS and SVCB queries with no records, and returns NOTIMP for other types. It never dials the virtual resolver address in the header.
   - **Gateway close:** STOP_SENDING from the gateway on a TCP flow means the client is gone. The agent stops reading the socket but still delivers the gateway's remaining bytes up to its FIN; with `FLOW_RESET` it resets the socket.
   - A malformed header resets the stream with `PROTOCOL_ERROR`, or `UNSUPPORTED_VERSION` for an unknown version.
-- **Reconnects:** after a failure the agent retries after 1 s, doubling up to 1 minute, with jitter. After `UNAUTHORIZED` (for example, a removed device) it waits the full minute.
+- **Reconnects:** after a failure the agent retries after 1 s, doubling up to 1 minute, with jitter. After `UNAUTHORIZED` (for example, a removed device) it waits the full minute. When the gateway refuses its certificate in the handshake (`bad_certificate`), its config may not list the line yet, as right after the member turned Share on. The refusal makes the gateway fetch its config at once (at most every 2 s), so the agent retries after 1 s (jittered to 0.5 to 1 s) up to five times in a row before the usual backoff takes over.
 - **Open files:** each flow holds a socket, so the agent raises its open-file limit to 2,048 where the hard limit allows it.
 
 ## Home network protection

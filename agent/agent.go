@@ -37,6 +37,13 @@ const (
 	DefaultTunnelCheckInterval = time.Second
 )
 
+// certificateRetries is how many times in a row the agent retries after
+// ReconnectMin when the gateway refuses its certificate. A gateway that does
+// not list the agent's line yet fetches its config at once, or at most 2 s
+// later, so five retries (2.5 to 5 s with the default ReconnectMin) land
+// soon after it. Then the usual backoff takes over.
+const certificateRetries = 5
+
 // Config configures an Agent.
 type Config struct {
 	// GatewayAddr is the gateway's QUIC address as host:port.
@@ -233,6 +240,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	wg.Go(func() { a.watchTunnel(ctx) })
 
 	retry := newBackoff(a.cfg.ReconnectMin, a.cfg.ReconnectMax)
+	refused := 0 // certificate refusals in a row
 	for {
 		if !a.waitActive(ctx) {
 			return nil
@@ -240,6 +248,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		res := a.runSession(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if res.certificateRefused() {
+			refused++
+		} else {
+			refused = 0
 		}
 		if errors.Is(res.err, errPaused) || !a.retrying(res.err) {
 			// Paused, and maybe resumed already: not a failure, and
@@ -250,9 +263,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		if res.stable() {
 			retry.reset()
 		}
-		delay := retry.next()
-		if res.unauthorized() {
-			delay = retry.longest()
+		var delay time.Duration
+		if refused > 0 && refused <= certificateRetries {
+			// The gateway may not know the agent's line yet, and is
+			// fetching its config because of this attempt.
+			delay = retry.shortest()
+		} else {
+			delay = retry.next()
+			if res.unauthorized() {
+				delay = retry.longest()
+			}
 		}
 		a.log.Warn("gateway connection ended; reconnecting", "error", res.err, "retry_in", delay.Round(time.Millisecond))
 		select {
