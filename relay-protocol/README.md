@@ -78,6 +78,8 @@ A reader rejects the header if any of these holds:
 - the port is 0;
 - the address is an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`), which must be sent as IPv4 so the agent's IPv4 deny-list applies.
 
+The destination is never in a private, local or special-purpose range (`SpecialPurpose`), which covers the tunnel networks and every network a home can number its devices in. The gateway refuses such flows before it opens a stream, and the agent answers one with POLICY anyway. The one exception is DNS to the virtual resolver.
+
 For DNS, the address and port are the virtual resolver the client queried (`10.77.0.1:53`). The agent does not connect to them. It resolves each query through the system resolver, so websites see the home ISP's resolver.
 
 DNS over TCP to the virtual resolver, which clients use after a truncated answer, is a DNS flow too. DNS over TCP already prefixes each message with a 2-byte length, which is the UDP frame format, so the gateway passes the client's byte stream through unchanged.
