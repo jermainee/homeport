@@ -153,8 +153,9 @@ export function checkoutEvent(
         metadata: { member_id: input.memberId, pack: input.pack ?? "credits_1000000" },
         currency: "eur",
         amount_subtotal: 4000,
-        // Stripe Tax is not on yet, so no VAT is added.
-        amount_total: 4000,
+        // Stripe Tax adds 19% German VAT on top of the €40 net price.
+        total_details: { amount_discount: 0, amount_shipping: 0, amount_tax: 760 },
+        amount_total: 4760,
         payment_status: paymentStatus,
         status: type === "expired" ? "expired" : "complete",
       },

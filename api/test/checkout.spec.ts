@@ -70,6 +70,7 @@ describe("POST /v1/checkout/sessions", () => {
         credits: CREDIT_PACK_CREDITS,
         netCents: CREDIT_PACK_NET_CENTS,
         currency: CREDIT_PACK_CURRENCY,
+        taxCode: "txcd_10000000",
         idempotencyKey: `checkout_session:${requestId}`,
         successUrl: "https://api.homeport.test/checkout/done",
         cancelUrl: "https://api.homeport.test/checkout/canceled",

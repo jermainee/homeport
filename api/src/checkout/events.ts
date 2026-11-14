@@ -23,6 +23,7 @@ interface CheckoutSessionFields {
   metadata?: Record<string, string> | null;
   payment_status?: unknown;
   amount_total?: unknown;
+  total_details?: { amount_tax?: unknown } | null;
 }
 
 /**
@@ -58,6 +59,7 @@ export async function checkoutEventStatements(db: D1Database, event: Stripe.Even
 
   if ((event.type === COMPLETED || event.type === ASYNC_SUCCEEDED) && session.payment_status === "paid") {
     const amountTotal = typeof session.amount_total === "number" ? session.amount_total : null;
+    const amountTax = typeof session.total_details?.amount_tax === "number" ? session.total_details.amount_tax : null;
     // The payment is marked in the grant's batch, so a duplicate grant finds it marked already.
     await grantCredits(db, {
       source: "credits_issued",
@@ -68,10 +70,10 @@ export async function checkoutEventStatements(db: D1Database, event: Stripe.Even
       alsoWrite: (guard, transactionId) => [
         db
           .prepare(
-            `UPDATE payments SET status = 'paid', transaction_id = ?, amount_total_cents = ?, updated_at = ?
+            `UPDATE payments SET status = 'paid', transaction_id = ?, amount_total_cents = ?, amount_tax_cents = ?, updated_at = ?
               WHERE id = ? AND ${guard.sql}`,
           )
-          .bind(transactionId, amountTotal, now, sessionId, ...guard.binds),
+          .bind(transactionId, amountTotal, amountTax, now, sessionId, ...guard.binds),
       ],
     });
     return [];

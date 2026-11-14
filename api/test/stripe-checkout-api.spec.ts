@@ -11,13 +11,14 @@ const input = {
   credits: 1_000_000,
   netCents: 4_000,
   currency: "eur",
+  taxCode: "txcd_10000000",
   idempotencyKey: "checkout_session:01a1d422-ae08-7094-9ddf-d64adb4fed8d",
   successUrl: "https://api.homeport.example/checkout/done",
   cancelUrl: "https://api.homeport.example/checkout/canceled",
 };
 
 describe("Stripe Checkout adapter", () => {
-  it("creates a one-time payment for one credit pack at its net price, tagged with the member", async () => {
+  it("creates a one-time payment for one credit pack at its net price plus tax, tagged with the member", async () => {
     const { fetcher, requests } = recordingFetch(() => ({
       id: "cs_test_123",
       object: "checkout.session",
@@ -39,10 +40,12 @@ describe("Stripe Checkout adapter", () => {
       "line_items[0][quantity]": "1",
       "line_items[0][price_data][currency]": "eur",
       "line_items[0][price_data][unit_amount]": "4000",
-      // VAT is added on top of the net price.
+      // Stripe Tax adds the tax for the buyer's location on top of the net price.
       "line_items[0][price_data][tax_behavior]": "exclusive",
       "line_items[0][price_data][product_data][name]": "Homeport credits",
       "line_items[0][price_data][product_data][description]": "1,000,000 credits",
+      "line_items[0][price_data][product_data][tax_code]": "txcd_10000000",
+      "automatic_tax[enabled]": "true",
       client_reference_id: input.memberId,
       "metadata[member_id]": input.memberId,
       "metadata[pack]": "credits_1000000",

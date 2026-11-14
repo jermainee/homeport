@@ -64,9 +64,9 @@ async function purchased(app: App, sessionToken: string): Promise<number> {
 }
 
 async function payment(sessionId: string) {
-  return env.DB.prepare(`SELECT status, transaction_id, amount_total_cents FROM payments WHERE id = ?`)
+  return env.DB.prepare(`SELECT status, transaction_id, amount_total_cents, amount_tax_cents FROM payments WHERE id = ?`)
     .bind(sessionId)
-    .first<{ status: string; transaction_id: string | null; amount_total_cents: number | null }>();
+    .first<{ status: string; transaction_id: string | null; amount_total_cents: number | null; amount_tax_cents: number | null }>();
 }
 
 async function purchaseTransactions(memberId: string): Promise<{ id: string; idempotency_key: string }[]> {
@@ -92,7 +92,13 @@ describe("POST /v1/stripe/webhook: Checkout events", () => {
     expect(await platformBalance("credits_issued")).toBe(issuedBefore - 1_000_000);
     const [transaction] = await purchaseTransactions(memberId);
     expect(transaction?.idempotency_key).toBe(`purchase:${sessionId}`);
-    expect(await payment(sessionId)).toEqual({ status: "paid", transaction_id: transaction?.id, amount_total_cents: 4000 });
+    // The tax Stripe collected is kept apart from the total, so the VAT owed can be booked.
+    expect(await payment(sessionId)).toEqual({
+      status: "paid",
+      transaction_id: transaction?.id,
+      amount_total_cents: 4760,
+      amount_tax_cents: 760,
+    });
     expect(await unbalancedTransactions()).toEqual([]);
     expect(await driftedBalances()).toEqual([]);
   });

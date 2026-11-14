@@ -143,12 +143,18 @@ Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected thr
 
 ## Buying credits (Stripe Checkout)
 
-A verified member buys one credit pack at a time: 1,000,000 credits for €40 net (`src/pricing.ts`), VAT on top. Stripe Tax is not on yet, so no VAT is charged until it is.
+A verified member buys one credit pack at a time: 1,000,000 credits for €40 net (`src/pricing.ts`). Stripe Tax adds the tax for the buyer's location on top.
 
-1. `POST /v1/checkout/sessions` (Bearer, `{request_id}`, verified identity) creates a hosted Checkout Session (`src/stripe/checkout-api.ts`): `mode: payment`, one line item with inline `price_data` (`unit_amount` 4,000 EUR cents, `tax_behavior: exclusive`), `client_reference_id` and `metadata {member_id, pack}` on the session and its PaymentIntent, no `payment_method_types` (the Dashboard picks the methods), and return pages `/checkout/done` and `/checkout/canceled` on `PUBLIC_BASE_URL`. It answers `201 {url}`, the page the app opens. The Stripe idempotency key is `checkout_session:<request_id>`. An unverified member gets `403 identity_required`, and a member who opened 10 sessions in the last hour gets `429 rate_limited` with `Retry-After`, since every session calls Stripe, whose rate limit all members share.
+**Stripe Tax setup.** Each Stripe account or sandbox needs this setup in its own Tax settings:
+- **Head office:** without it, the tax settings stay `pending` and Stripe refuses to create Checkout Sessions with `automatic_tax`.
+- **Registrations:** a registration for every jurisdiction where tax is collected. Without one, Stripe collects 0 tax there and reports no error.
+
+Check both in the Dashboard under Tax, or with the Tax Settings and Tax Registrations APIs, before members buy. Business buyers are treated as consumers, because tax IDs are not collected yet.
+
+1. `POST /v1/checkout/sessions` (Bearer, `{request_id}`, verified identity) creates a hosted Checkout Session (`src/stripe/checkout-api.ts`): `mode: payment`, one line item with inline `price_data` (`unit_amount` 4,000 EUR cents, `tax_behavior: exclusive`, product `tax_code` `CREDIT_PACK_TAX_CODE`), `automatic_tax: {enabled: true}`, `client_reference_id` and `metadata {member_id, pack}` on the session and its PaymentIntent, no `payment_method_types` (the Dashboard picks the methods), and return pages `/checkout/done` and `/checkout/canceled` on `PUBLIC_BASE_URL`. It answers `201 {url}`, the page the app opens. The Stripe idempotency key is `checkout_session:<request_id>`. An unverified member gets `403 identity_required`, and a member who opened 10 sessions in the last hour gets `429 rate_limited` with `Retry-After`, since every session calls Stripe, whose rate limit all members share.
 2. The same call writes a `payments` row (status `open`) that fixes what the session grants: pack, credits, net cents and currency.
 3. The webhook grants the credits, never the return page:
-   - `checkout.session.completed` with `payment_status: paid`, and `checkout.session.async_payment_succeeded`, book `credits_issued` → the member's `purchased` with idempotency key `purchase:<session id>`, and mark the payment `paid` in the same guarded batch (`grantCredits`' `alsoWrite`). A session never grants twice, whichever events arrive and however often.
+   - `checkout.session.completed` with `payment_status: paid`, and `checkout.session.async_payment_succeeded`, book `credits_issued` → the member's `purchased` with idempotency key `purchase:<session id>`, and mark the payment `paid`, with the total and the tax Stripe collected (`amount_total_cents`, `amount_tax_cents`), in the same guarded batch (`grantCredits`' `alsoWrite`). A session never grants twice, whichever events arrive and however often.
    - `checkout.session.completed` with `payment_status: unpaid` (a delayed payment method such as SEPA Direct Debit) marks it `processing`. `no_payment_required` changes nothing, since every pack has a price.
    - `checkout.session.async_payment_failed` and `checkout.session.expired` mark an unpaid payment `failed` or `expired`; a paid one stays paid.
    - Events of sessions Homeport did not create for that member change nothing, and the credits come from the `payments` row, not from the event.
