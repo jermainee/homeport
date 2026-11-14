@@ -31,6 +31,7 @@ npm run dev
 | `npm run types` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc`; CI fails if it is stale |
 | `npm run migrate:local` | Applies `migrations/` to the local D1 database |
 | `npm run seed:dev` | Applies the migrations locally, adds a dev gateway to the local database and prints its token (`HOMEPORT_GATEWAY_TOKEN=hpgw_...`) for the gateway binary. `npm run seed:dev -- --persist-to <dir>` seeds the database a `wrangler dev --persist-to <dir>` uses instead, as the full-stack smoke test in `e2e/` does |
+| `npm run stripe:listen` | `stripe listen` forwarding the Stripe events the webhook handles to `localhost:8787`. The Stripe CLI forwards only the events named in `--events`, and `test/stripe-listen-script.spec.ts` keeps that list equal to the events the handler acts on |
 
 ## Configuration
 
@@ -41,8 +42,8 @@ npm run dev
 | `PUBLIC_BASE_URL` | Origin used to build the links in sign-in emails and Checkout's return pages, and the first top-up host. Without a valid http(s) URL no link is sent (`503 email_unavailable`) and no Checkout Session is created (500) | empty |
 | `TOPUP_HOSTNAMES` | Comma-separated hosts a peer without credits can still reach through the gateway, besides the API's own host. They must not offer ECH (on Cloudflare, turn it off for those zones), since the gateway reads the clear SNI | Stripe Checkout's hosts |
 | `DB` | D1 database `homeport`, migrations in `migrations/` | |
-| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions and Checkout Sessions. Prefer a restricted key (`rk_`) with write access to Identity verification sessions and Checkout Sessions | |
-| `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with read access to Identity verification results and detailed results; reads document number and birth date for the identity hash | |
+| `STRIPE_SECRET_KEY` | Secret. Creates Identity verification sessions and Checkout Sessions. Prefer a restricted key (`rk_`) with Checkout Sessions: Write and Identity Verification Results: Write, as the Dashboard names them | |
+| `STRIPE_IDENTITY_RESTRICTED_KEY` | Secret. Restricted key (`rk_`) with Identity Verification Results: Read and Recent Detailed Verification Results: Read; reads document number and birth date for the identity hash. Only live-mode verifications read it, so a sandbox can leave it empty | |
 | `STRIPE_WEBHOOK_SECRET` | Secret. Signing secret of the webhook endpoint (`whsec_`), or the one `stripe listen` prints | |
 | `IDENTITY_HASH_KEY` | Secret. HMAC key of the identity hash. Changing it breaks the duplicate check for members verified before | |
 
@@ -137,7 +138,7 @@ Every member passes Stripe Identity (ID document and live selfie) before Share o
 4. **One person, one account.** In the `verified` handler, inside Stripe's 48-hour window, the restricted key reads the document number, issuing country and birth date. Their HMAC (`IDENTITY_HASH_KEY`) is stored as `members.identity_hash`, which is unique. A member whose hash another member already has stays at `requires_input` (`identity_failure = 'duplicate_identity'`), as does a live-mode document without those fields. Test mode (`livemode: false`) skips the hash and the check, since every test document is the same, and reads nothing sensitive. Document numbers are compared after Unicode NFKC normalization, without case, spaces or punctuation; letters and digits of every script count. Only the result and the hash are stored; the document data stays with Stripe.
 5. `requireVerifiedIdentity` (`src/identity/require-verified.ts`) answers `403 identity_required` until the member is verified. Lines, the available list, new WireGuard peers and credit purchases sit behind it; `verifiedMemberIdempotent` (`src/idempotency.ts`) runs it before `idempotent`, so a 403 is not stored for the `request_id`.
 
-Locally: `stripe listen --forward-to localhost:8787/v1/stripe/webhook` prints the signing secret for `.dev.vars`.
+Locally, `stripe listen --print-secret` prints the signing secret for `.dev.vars`, and `npm run stripe:listen` forwards the Identity and Checkout events to `wrangler dev`.
 
 Tests replace Stripe's API with a fake port (`test/fake-stripe.ts`, injected through `createApp` in `src/app.ts`) and sign webhook bodies with HMAC-SHA256 like Stripe does. `test/stripe-identity-api.spec.ts` and `test/stripe-checkout-api.spec.ts` check the real adapters' requests with a recording `fetch`.
 
