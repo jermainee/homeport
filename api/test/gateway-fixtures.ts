@@ -43,12 +43,12 @@ export async function announcedGateway(): Promise<{ gatewayId: string; token: st
 }
 
 /**
- * A verified member's shared line, served by `gatewayId`. Lines go to the
- * newest gateway, so the line is moved to this one.
+ * A verified member's shared line, served by `gatewayId`, where `cf` says the
+ * device is. Lines go to the newest gateway, so the line is moved to this one.
  */
-export async function lineOn(gatewayId: string) {
+export async function lineOn(gatewayId: string, cf?: Partial<IncomingRequestCfProperties>) {
   const owner = await verifiedMember();
-  const lineId = await sharingLine(owner.sessionToken);
+  const lineId = await sharingLine(owner.sessionToken, cf);
   await env.DB.prepare(`UPDATE lines SET gateway_id = ? WHERE id = ?`).bind(gatewayId, lineId).run();
   return { owner, lineId };
 }
@@ -77,6 +77,24 @@ export async function giveCredits(memberId: string, credits: number): Promise<vo
   if (response.status !== 200) throw new Error(`dev grant failed: ${response.status} ${await response.text()}`);
 }
 
+/**
+ * A gateway serving a peer on a line in Berlin and another Berlin line that
+ * takes over while the peer's line is offline. The peer's member holds
+ * 1,000,000 credits.
+ */
+export async function failoverPeer() {
+  const gateway = await announcedGateway();
+  const primary = await lineOn(gateway.gatewayId, BERLIN);
+  const fallback = await lineOn(gateway.gatewayId, BERLIN);
+  const { user, peer } = await peerOn(primary.lineId);
+  await giveCredits(user.memberId, 1_000_000);
+  return { gateway, primary, fallback, user, peer };
+}
+
+export const BERLIN: Partial<IncomingRequestCfProperties> = { country: "DE", city: "Berlin" };
+export const MUNICH: Partial<IncomingRequestCfProperties> = { country: "DE", city: "Munich" };
+export const PARIS: Partial<IncomingRequestCfProperties> = { country: "FR", city: "Paris" };
+
 /** A gateway serving one line with one peer whose member holds `credits`. */
 export async function servedPeer(credits = 1_000_000) {
   const gateway = await announcedGateway();
@@ -88,12 +106,13 @@ export async function servedPeer(credits = 1_000_000) {
 
 export function requestLease(
   token: string,
-  input: { peerId: string; sessionId: string; supersedes?: string; requestId?: string },
+  input: { peerId: string; sessionId: string; lineId?: string; supersedes?: string; requestId?: string },
 ): Promise<Response> {
   return gatewayCall(token, "POST", "/v1/gateway/leases", {
     request_id: input.requestId ?? uuidv7(),
     peer_id: input.peerId,
     session_id: input.sessionId,
+    ...(input.lineId === undefined ? {} : { line_id: input.lineId }),
     ...(input.supersedes === undefined ? {} : { supersedes_lease_id: input.supersedes }),
   });
 }
@@ -106,8 +125,13 @@ export interface LeaseBody {
   grace_seconds: number;
 }
 
-export async function grantedLease(token: string, peerId: string, sessionId = uuidv7()): Promise<LeaseBody & { sessionId: string }> {
-  const response = await requestLease(token, { peerId, sessionId });
+export async function grantedLease(
+  token: string,
+  peerId: string,
+  sessionId = uuidv7(),
+  lineId?: string,
+): Promise<LeaseBody & { sessionId: string }> {
+  const response = await requestLease(token, { peerId, sessionId, ...(lineId === undefined ? {} : { lineId }) });
   if (response.status !== 201) throw new Error(`lease failed: ${response.status} ${await response.text()}`);
   return { ...(await response.json<LeaseBody>()), sessionId };
 }

@@ -5,6 +5,7 @@
     "api.homeport.example",
     "checkout.stripe.com"
   ],
+  "failback_seconds": 300,
   "peers": [
     {
       "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
@@ -12,7 +13,10 @@
       "public_key": "ID8qVleL1sxlKXgzZQbzTPuAdlP3h/m37nfq8+IB9DA=",
       "ipv4": "10.77.0.2",
       "ipv6": "fd77:6870::2",
-      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "fallback_line_ids": [
+        "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57"
+      ]
     },
     {
       "peer_id": "01a1c4af-8896-7060-852d-c68d8a6174fc",
@@ -20,7 +24,8 @@
       "public_key": "6jNt20ZEki0n+WFznHNpE+YaFSCY/YH0HXDb5uklklU=",
       "ipv4": "10.77.0.3",
       "ipv6": "fd77:6870::3",
-      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
+      "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
+      "fallback_line_ids": []
     }
   ],
   "lines": [
@@ -28,6 +33,11 @@
       "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
       "owner_member_id": "01a1c4af-897b-7f0a-a915-c1ba8ba7b153",
       "device_spki_sha256": "9cbcb6d9cf5e797e8b18a940a0fd2a645edc317d1dc5f272a988223ae69cc2f8"
+    },
+    {
+      "line_id": "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57",
+      "owner_member_id": "01a1c4af-8d52-7b10-8e6f-2a4c7b9d3e18",
+      "device_spki_sha256": "4f1d2c8e7a6b5c3d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"
     }
   ]
 }

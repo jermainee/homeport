@@ -4,6 +4,7 @@ import { apiError, hasOnlyFields, invalidRequest } from "../http";
 import type { IdempotentVariables } from "../idempotency";
 import { releaseReservation, reserveCredits } from "../ledger";
 import { LEASE_CREDITS, LEASE_GRACE_SECONDS, LEASE_TTL_SECONDS, leaseTerms } from "../pricing";
+import { FALLBACK_LINE_SQL, TAKEOVER_LINE_SQL } from "../wireguard/failover";
 import type { GatewayVariables } from "./auth";
 import { PEER_JOINS, SERVED_PEER_SQL } from "./served";
 
@@ -12,6 +13,7 @@ type GatewayContext = Context<{ Bindings: Env; Variables: GatewayVariables & Ide
 interface LeaseRow {
   id: string;
   peer_id: string;
+  line_id: string;
   session_id: string;
   granted_bytes: number;
   renew_at_bytes: number;
@@ -30,7 +32,7 @@ function leaseBody(lease: LeaseRow) {
   };
 }
 
-const LEASE_COLUMNS = `id, peer_id, session_id, granted_bytes, renew_at_bytes, grace_seconds, expires_at`;
+const LEASE_COLUMNS = `id, peer_id, line_id, session_id, granted_bytes, renew_at_bytes, grace_seconds, expires_at`;
 
 /**
  * POST /v1/gateway/leases (contract createLease). Reserves credits for a
@@ -38,6 +40,13 @@ const LEASE_COLUMNS = `id, peer_id, session_id, granted_bytes, renew_at_bytes, g
  * price.
  *
  * - The peer must be one this gateway serves (see SERVED_PEER_SQL), or 403.
+ * - The session's line (line_id, else the superseded lease's line, else the
+ *   peer's line) must be the peer's line or one that may take it over
+ *   (FALLBACK_LINE_SQL), or 403. A renewal needs only the hard rules
+ *   (TAKEOVER_LINE_SQL): a session already on a fallback line goes on even
+ *   if the line has filled up or the member narrowed failover since; the
+ *   gateway moves it at its next config fetch. The lease names that line,
+ *   and usage on it pays that line's owner.
  * - A renewal names the session's current lease. A lease is superseded
  *   once: renewing it again returns its successor with 200.
  * - A member with fewer than LEASE_CREDITS available gets a smaller last
@@ -46,33 +55,43 @@ const LEASE_COLUMNS = `id, peer_id, session_id, granted_bytes, renew_at_bytes, g
  */
 export async function createLease(c: GatewayContext): Promise<Response> {
   const body = c.get("body");
-  if (!hasOnlyFields(body, ["request_id", "peer_id", "session_id", "supersedes_lease_id"])) {
+  if (!hasOnlyFields(body, ["request_id", "peer_id", "session_id", "line_id", "supersedes_lease_id"])) {
     return invalidRequest(c, "unknown field");
   }
   const peerId = body["peer_id"];
   const sessionId = body["session_id"];
+  const lineId = body["line_id"];
   const supersedes = body["supersedes_lease_id"];
   if (typeof peerId !== "string" || !ID.test(peerId)) return invalidRequest(c, "peer_id must be an id");
   if (typeof sessionId !== "string" || !UUID_V7.test(sessionId)) return invalidRequest(c, "session_id must be a UUIDv7");
+  if (lineId !== undefined && (typeof lineId !== "string" || !ID.test(lineId))) return invalidRequest(c, "line_id must be an id");
   if (supersedes !== undefined && (typeof supersedes !== "string" || !ID.test(supersedes))) {
     return invalidRequest(c, "supersedes_lease_id must be an id");
   }
 
   const db = c.env.DB;
   const gatewayId = c.get("gateway").id;
-  // One round trip: the peer, and for a renewal the current lease and its successor.
+  // One round trip: the peer and the session's line, and for a renewal the
+  // current lease and its successor.
   const [peerResult, currentResult, successorResult] = await db.batch([
     db
       .prepare(
-        `SELECT p.member_id, p.line_id FROM ${PEER_JOINS}
-          WHERE p.id = ? AND l.gateway_id = ? AND ${SERVED_PEER_SQL}`,
+        `SELECT p.member_id, e.line_id,
+                (e.line_id = p.line_id
+                 OR EXISTS (SELECT 1 FROM lines f JOIN members fo ON fo.id = f.member_id
+                             WHERE f.id = e.line_id
+                               AND ${supersedes === undefined ? FALLBACK_LINE_SQL : TAKEOVER_LINE_SQL})) AS line_allowed
+           FROM ${PEER_JOINS}
+           JOIN (SELECT COALESCE(?3, (SELECT line_id FROM leases WHERE id = ?4 AND gateway_id = ?2),
+                                 (SELECT line_id FROM wireguard_peers WHERE id = ?1)) AS line_id) e
+          WHERE p.id = ?1 AND l.gateway_id = ?2 AND ${SERVED_PEER_SQL}`,
       )
-      .bind(peerId, gatewayId),
+      .bind(peerId, gatewayId, lineId ?? null, supersedes ?? null),
     db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE id = ? AND gateway_id = ?`).bind(supersedes ?? null, gatewayId),
     db.prepare(`SELECT ${LEASE_COLUMNS} FROM leases WHERE supersedes_lease_id = ?`).bind(supersedes ?? null),
   ]);
-  const peer = peerResult?.results[0] as { member_id: string; line_id: string } | undefined;
-  if (!peer) return c.json({ error: "peer_inactive" }, 403);
+  const peer = peerResult?.results[0] as { member_id: string; line_id: string; line_allowed: number } | undefined;
+  if (!peer?.line_allowed) return c.json({ error: "peer_inactive" }, 403);
 
   if (supersedes !== undefined) {
     const current = currentResult?.results[0] as LeaseRow | undefined;
@@ -80,6 +99,7 @@ export async function createLease(c: GatewayContext): Promise<Response> {
     if (current.peer_id !== peerId || current.session_id !== sessionId) {
       return invalidRequest(c, "supersedes_lease_id belongs to another session");
     }
+    if (current.line_id !== peer.line_id) return invalidRequest(c, "a renewal stays on the line of the lease it supersedes");
     const successor = successorResult?.results[0] as LeaseRow | undefined;
     if (successor) return c.json(leaseBody(successor), 200);
   }
@@ -131,6 +151,7 @@ export async function createLease(c: GatewayContext): Promise<Response> {
     leaseBody({
       id: leaseId,
       peer_id: peerId,
+      line_id: peer.line_id,
       session_id: sessionId,
       granted_bytes: terms.grantedBytes,
       renew_at_bytes: terms.renewAtBytes,

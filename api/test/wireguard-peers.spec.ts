@@ -14,6 +14,8 @@ interface Peer {
   peer_id: string;
   name: string;
   line_id: string;
+  failover: "country" | "city" | "off";
+  exit_line: { line_id: string; country: string | null; city: string | null; since: string } | null;
   public_key: string;
   ipv4: string;
   ipv6: string;
@@ -45,7 +47,7 @@ describe("POST /v1/wireguard/peers", () => {
 
     const { peer, config_text } = await createdPeer(sessionToken, lineId, publicKey);
 
-    expect(peer).toMatchObject({ name: "iPhone", line_id: lineId, public_key: publicKey });
+    expect(peer).toMatchObject({ name: "iPhone", line_id: lineId, failover: "country", exit_line: null, public_key: publicKey });
     expect(config_text).toBe(
       [
         "[Interface]",
@@ -284,5 +286,155 @@ describe("GET and DELETE /v1/wireguard/peers", () => {
 
   it("returns 401 without a session", async () => {
     expect((await send("GET", "/v1/wireguard/peers", "hpm_nope")).status).toBe(401);
+  });
+});
+
+describe("PATCH /v1/wireguard/peers/{peer_id}", () => {
+  function update(sessionToken: string, peerId: string, body: unknown) {
+    return send("PATCH", `/v1/wireguard/peers/${peerId}`, sessionToken, body);
+  }
+
+  async function updated(sessionToken: string, peerId: string, body: unknown): Promise<Peer> {
+    const response = await update(sessionToken, peerId, body);
+    expect(response.status).toBe(200);
+    return expectContract<Peer>("PATCH", "/v1/wireguard/peers/{peer_id}", response);
+  }
+
+  it("moves a peer to another line: same key and addresses, so the device keeps its config", async () => {
+    const first = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const second = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, first);
+
+    const moved = await updated(sessionToken, peer.peer_id, { line_id: second });
+
+    expect(moved).toEqual({ ...peer, line_id: second });
+    const { peers } = await (await send("GET", "/v1/wireguard/peers", sessionToken)).json<{ peers: Peer[] }>();
+    expect(peers).toEqual([moved]);
+  });
+
+  it("changes a peer's failover", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, lineId);
+
+    const city = await updated(sessionToken, peer.peer_id, { failover: "city" });
+    const off = await updated(sessionToken, peer.peer_id, { failover: "off", line_id: lineId });
+
+    expect(city).toEqual({ ...peer, failover: "city" });
+    expect(off).toEqual({ ...peer, failover: "off" });
+  });
+
+  it("refuses the member's own line and a linked member's line with 403 line_not_allowed", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const user = await verifiedMember();
+    const { peer } = await createdPeer(user.sessionToken, lineId);
+    const ownLine = await sharingLine(user.sessionToken, BERLIN);
+    const relative = await verifiedMember();
+    const relativesLine = await sharingLine(relative.sessionToken, BERLIN);
+    await link(relative.memberId, user.memberId, "household");
+
+    const own = await update(user.sessionToken, peer.peer_id, { line_id: ownLine });
+    const linked = await update(user.sessionToken, peer.peer_id, { line_id: relativesLine });
+
+    expect([own.status, linked.status]).toEqual([403, 403]);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", own)).toEqual({ error: "line_not_allowed" });
+    expect(await linked.json()).toEqual({ error: "line_not_allowed" });
+  });
+
+  it("refuses a full line with 409 line_full, but moves a member to a line they already use", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const full = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const users = [await verifiedMember(), await verifiedMember(), await verifiedMember()];
+    for (const user of users) await createdPeer(user.sessionToken, full);
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, lineId);
+    const { peer: secondDevice } = await createdPeer(users[0]?.sessionToken ?? "", lineId);
+
+    const refused = await update(sessionToken, peer.peer_id, { line_id: full });
+    const backToItsUsersLine = await update(users[0]?.sessionToken ?? "", secondDevice.peer_id, { line_id: full });
+
+    expect(refused.status).toBe(409);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", refused)).toEqual({ error: "line_full" });
+    expect(backToItsUsersLine.status).toBe(200);
+  });
+
+  it("refuses a line on another gateway with 409 line_on_other_gateway: the device's config names its gateway", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const elsewhere = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    await env.DB.prepare(`UPDATE lines SET gateway_id = ? WHERE id = ?`).bind(await seedGateway(), elsewhere).run();
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, lineId);
+
+    const response = await update(sessionToken, peer.peer_id, { line_id: elsewhere });
+
+    expect(response.status).toBe(409);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toEqual({ error: "line_on_other_gateway" });
+  });
+
+  it("returns 404 for another member's peer, a deleted peer, an unknown line and a line that is not sharing", async () => {
+    const owner = await verifiedMember();
+    const lineId = await sharingLine(owner.sessionToken, BERLIN);
+    const paused = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const user = await verifiedMember();
+    const { peer } = await createdPeer(user.sessionToken, lineId);
+    const { peer: deleted } = await createdPeer(user.sessionToken, lineId);
+    await send("DELETE", `/v1/wireguard/peers/${deleted.peer_id}`, user.sessionToken);
+    const pausedOwner = await env.DB.prepare(`SELECT member_id FROM lines WHERE id = ?`).bind(paused).first<{ member_id: string }>();
+    await env.DB.prepare(`UPDATE lines SET sharing_enabled = 0 WHERE id = ? AND member_id = ?`).bind(paused, pausedOwner?.member_id).run();
+
+    const responses = [
+      await update((await verifiedMember()).sessionToken, peer.peer_id, { failover: "off" }),
+      await update(user.sessionToken, deleted.peer_id, { failover: "off" }),
+      await update(user.sessionToken, peer.peer_id, { line_id: crypto.randomUUID() }),
+      await update(user.sessionToken, peer.peer_id, { line_id: paused }),
+    ];
+
+    expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404]);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", responses[0] as Response)).toEqual({ error: "not_found" });
+    const { peers } = await (await send("GET", "/v1/wireguard/peers", user.sessionToken)).json<{ peers: Peer[] }>();
+    expect(peers).toEqual([peer]);
+  });
+
+  it("returns 404 for a line whose owner is no longer verified, which no gateway serves", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const lapsed = await verifiedMember();
+    const lapsedLine = await sharingLine(lapsed.sessionToken, BERLIN);
+    await env.DB.prepare(`UPDATE members SET identity_status = 'requires_input' WHERE id = ?`).bind(lapsed.memberId).run();
+    const user = await verifiedMember();
+    const { peer } = await createdPeer(user.sessionToken, lineId);
+
+    const moved = await update(user.sessionToken, peer.peer_id, { line_id: lapsedLine });
+    const created = await createPeer(user.sessionToken, lapsedLine);
+
+    expect([moved.status, created.status]).toEqual([404, 404]);
+  });
+
+  it("returns 403 identity_required once the member is no longer verified", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const user = await verifiedMember();
+    const { peer } = await createdPeer(user.sessionToken, lineId);
+    await env.DB.prepare(`UPDATE members SET identity_status = 'requires_input' WHERE id = ?`).bind(user.memberId).run();
+
+    const response = await update(user.sessionToken, peer.peer_id, { failover: "city" });
+
+    expect(response.status).toBe(403);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toEqual({ error: "identity_required" });
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["an unknown field", { failover: "city", name: "Phone" }],
+    ["an unknown failover", { failover: "everywhere" }],
+    ["a line_id that is not a string", { line_id: 7 }],
+  ])("rejects %s with 400 invalid_request", async (_case, body) => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, lineId);
+
+    const response = await update(sessionToken, peer.peer_id, body);
+
+    expect(response.status).toBe(400);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toMatchObject({ error: "invalid_request" });
   });
 });

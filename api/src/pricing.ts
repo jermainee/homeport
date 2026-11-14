@@ -59,6 +59,20 @@ export const MAX_USERS_PER_LINE = 3;
  */
 export const MAX_PEERS_PER_MEMBER = 20;
 
+/**
+ * Fallback lines the gateway gets for one peer: the lines that take over
+ * while the peer's own line is offline (src/wireguard/failover.ts).
+ */
+export const MAX_FALLBACK_LINES = 5;
+
+/**
+ * How long a peer's own line must be back online, without a break, before
+ * the gateway moves the peer back to it from a fallback line. Moving resets
+ * the peer's open connections, so a flapping line must not move it back
+ * and forth.
+ */
+export const FAILBACK_SECONDS = 5 * 60;
+
 /** Days before earned credits can be cashed out. */
 export const EARNED_CREDITS_HOLDBACK_DAYS = 30;
 

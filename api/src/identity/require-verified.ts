@@ -1,5 +1,6 @@
+import { every } from "hono/combine";
 import { createMiddleware } from "hono/factory";
-import type { SessionVariables } from "../auth/middleware";
+import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError } from "../http";
 
 /**
@@ -13,3 +14,6 @@ export const requireVerifiedIdentity = createMiddleware<{ Bindings: Env; Variabl
     await next();
   },
 );
+
+/** A signed-in member who passed Stripe Identity: requireSession, then requireVerifiedIdentity. */
+export const requireVerifiedMember = every(requireSession, requireVerifiedIdentity);

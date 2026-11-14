@@ -1,13 +1,22 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { expectContract } from "./contract";
-import { announcedGateway, gatewayCall, lineOn, peerOn } from "./gateway-fixtures";
+import { BERLIN, MUNICH, PARIS, announcedGateway, gatewayCall, lineOn, peerOn } from "./gateway-fixtures";
 import { link, registerDevice, send, sharingLine, verifiedMember } from "./share-fixtures";
 
 interface Config {
   etag: string;
   topup_hostnames: string[];
-  peers: { peer_id: string; member_id: string; public_key: string; ipv4: string; ipv6: string; line_id: string }[];
+  failback_seconds: number;
+  peers: {
+    peer_id: string;
+    member_id: string;
+    public_key: string;
+    ipv4: string;
+    ipv6: string;
+    line_id: string;
+    fallback_line_ids: string[];
+  }[];
   lines: { line_id: string; owner_member_id: string; device_spki_sha256: string }[];
 }
 
@@ -35,8 +44,22 @@ describe("GET /v1/gateway/config", () => {
     expect(body.lines).toEqual([{ line_id: lineId, owner_member_id: owner.memberId, device_spki_sha256: device?.spki_sha256 }]);
     expect(body.lines[0]?.device_spki_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(body.peers).toEqual([
-      { peer_id: peer.peer_id, member_id: user.memberId, public_key: peer.public_key, ipv4: peer.ipv4, ipv6: peer.ipv6, line_id: lineId },
+      {
+        peer_id: peer.peer_id,
+        member_id: user.memberId,
+        public_key: peer.public_key,
+        ipv4: peer.ipv4,
+        ipv6: peer.ipv6,
+        line_id: lineId,
+        fallback_line_ids: [],
+      },
     ]);
+  });
+
+  it("tells the gateway how long a peer's own line must be back online before the peer moves back to it", async () => {
+    const { token } = await announcedGateway();
+
+    expect((await configBody(token)).failback_seconds).toBe(300);
   });
 
   it("names the top-up hosts: the API's own host first", async () => {
@@ -154,5 +177,133 @@ describe("GET /v1/gateway/config", () => {
     const line = await env.DB.prepare(`SELECT gateway_id FROM lines WHERE id = ?`).bind(lineId).first<{ gateway_id: string }>();
     expect(line?.gateway_id).not.toBe(gatewayId);
     expect(other.gatewayId).toBeTruthy();
+  });
+});
+
+describe("GET /v1/gateway/config, fallback lines", () => {
+  async function fallbacksOf(token: string, peerId: string): Promise<string[] | undefined> {
+    return (await configBody(token)).peers.find((peer) => peer.peer_id === peerId)?.fallback_line_ids;
+  }
+
+  it("lists the lines on this gateway that take over a peer's line: same city first, then same country", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const munich = await lineOn(gatewayId, MUNICH);
+    const berlin = await lineOn(gatewayId, BERLIN);
+    await lineOn(gatewayId, PARIS);
+    const elsewhere = await announcedGateway();
+    await lineOn(elsewhere.gatewayId, BERLIN);
+    const { peer } = await peerOn(primary.lineId);
+
+    expect(await fallbacksOf(token, peer.peer_id)).toEqual([berlin.lineId, munich.lineId]);
+  });
+
+  it.each([
+    ["the member's own line", "own"],
+    ["a line whose owner is linked to the member", "linked"],
+    ["a line whose owner is linked to the member the other way round", "linked back"],
+    ["a line whose owner signed in from the member's app install", "same install"],
+    ["a line whose sharing is off", "not sharing"],
+    ["a line whose owner is suspended", "suspended owner"],
+    ["a line whose owner is no longer verified", "unverified owner"],
+    ["a line already used by three other members", "full"],
+  ])("never offers %s", async (_case, kind) => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const { user, peer } = await peerOn(primary.lineId);
+    const candidate = await lineOn(gatewayId, BERLIN);
+    switch (kind) {
+      case "own": {
+        const ownLine = await sharingLine(user.sessionToken, BERLIN);
+        await env.DB.prepare(`UPDATE lines SET gateway_id = ? WHERE id = ?`).bind(gatewayId, ownLine).run();
+        await send("PATCH", `/v1/lines/${candidate.lineId}`, candidate.owner.sessionToken, { sharing_enabled: false });
+        break;
+      }
+      case "linked":
+        await link(candidate.owner.memberId, user.memberId, "card");
+        break;
+      case "linked back":
+        await link(user.memberId, candidate.owner.memberId, "household");
+        break;
+      case "same install":
+        await env.DB.prepare(`UPDATE auth_sessions SET install_id = ? WHERE member_id IN (?, ?)`)
+          .bind(crypto.randomUUID(), user.memberId, candidate.owner.memberId)
+          .run();
+        break;
+      case "unverified owner":
+        await env.DB.prepare(`UPDATE members SET identity_status = 'requires_input' WHERE id = ?`).bind(candidate.owner.memberId).run();
+        break;
+      case "not sharing":
+        await send("PATCH", `/v1/lines/${candidate.lineId}`, candidate.owner.sessionToken, { sharing_enabled: false });
+        break;
+      case "suspended owner":
+        await env.DB.prepare(`UPDATE members SET status = 'suspended' WHERE id = ?`).bind(candidate.owner.memberId).run();
+        break;
+      case "full":
+        for (let i = 0; i < 3; i++) await peerOn(candidate.lineId);
+        break;
+    }
+
+    expect(await fallbacksOf(token, peer.peer_id)).toEqual([]);
+  });
+
+  it("offers a line the member already uses with another device", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const { user, peer } = await peerOn(primary.lineId);
+    const other = await lineOn(gatewayId, BERLIN);
+    for (let i = 0; i < 2; i++) await peerOn(other.lineId);
+    await peerOn(other.lineId, user);
+
+    expect(await fallbacksOf(token, peer.peer_id)).toEqual([other.lineId]);
+  });
+
+  it("offers at most five lines, and the same ones in the same order to all of a member's devices", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const berlin = [];
+    for (let i = 0; i < 3; i++) berlin.push(await lineOn(gatewayId, BERLIN));
+    const munich = [];
+    for (let i = 0; i < 4; i++) munich.push(await lineOn(gatewayId, MUNICH));
+    const { user, peer: phone } = await peerOn(primary.lineId);
+    const { peer: laptop } = await peerOn(primary.lineId, user);
+
+    const phoneFallbacks = await fallbacksOf(token, phone.peer_id);
+
+    expect(phoneFallbacks).toHaveLength(5);
+    expect(new Set(phoneFallbacks?.slice(0, 3))).toEqual(new Set(berlin.map((line) => line.lineId)));
+    expect(munich.map((line) => line.lineId)).toEqual(expect.arrayContaining(phoneFallbacks?.slice(3) ?? []));
+    expect(await fallbacksOf(token, laptop.peer_id)).toEqual(phoneFallbacks);
+  });
+
+  it("follows the peer's failover: same city only for city, none for off", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const berlin = await lineOn(gatewayId, BERLIN);
+    await lineOn(gatewayId, MUNICH);
+    const { user, peer } = await peerOn(primary.lineId);
+
+    await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { failover: "city" });
+    const city = await fallbacksOf(token, peer.peer_id);
+    await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { failover: "off" });
+    const off = await fallbacksOf(token, peer.peer_id);
+
+    expect(city).toEqual([berlin.lineId]);
+    expect(off).toEqual([]);
+  });
+
+  it("serves a moved peer on its new line, with that line's fallbacks", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const berlin = await lineOn(gatewayId, BERLIN);
+    const munich = await lineOn(gatewayId, MUNICH);
+    const otherMunich = await lineOn(gatewayId, MUNICH);
+    const { user, peer } = await peerOn(berlin.lineId);
+
+    const moved = await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { line_id: munich.lineId });
+
+    expect(moved.status).toBe(200);
+    const served = (await configBody(token)).peers.find((listed) => listed.peer_id === peer.peer_id);
+    expect(served?.line_id).toBe(munich.lineId);
+    expect(served?.fallback_line_ids).toEqual([otherMunich.lineId, berlin.lineId]);
   });
 });
