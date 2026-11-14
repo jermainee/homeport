@@ -203,6 +203,8 @@ A buyer keeps one line, but home lines go offline: a laptop sleeps, a router reb
 - Once the chosen line has been online for 5 minutes without a break, the device moves back. Moving ends open connections, so a flapping line does not move a device back and forth.
 - A backup line passes the same checks as a chosen one: never the buyer's own line or a linked member's, and it must have room for one more user. Its owner earns from the sessions it carries.
 - The app shows when a device runs on a backup line, and where.
+- The gateway's config lists at most 5 backup lines per device, online ones first, since it is a full snapshot the gateway fetches every 30 seconds.
+- Backup lines come from the device's own gateway only, because its WireGuard config names that gateway's endpoint and key. Failover across gateways is a later step: regional gateways that share one WireGuard key and endpoint (anycast), or that relay a peer's flows to each other.
 
 Gateways sit in the seller's region (Frankfurt for German lines). The buyer's long leg is unavoidable, and the seller leg stays short and stable. The seller's upload is the speed limit: a 100/40 Mbit/s line shared at 50% gives the buyer about 20 Mbit/s down.
 

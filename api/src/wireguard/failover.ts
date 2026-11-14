@@ -56,6 +56,8 @@ export interface FailoverLine {
   owner_member_id: string;
   country: string | null;
   city: string | null;
+  /** 1 while its agent is connected, as the gateway's line events say. */
+  online: number;
 }
 
 /** What fallbackLines needs to know beyond the peers and lines. */
@@ -68,12 +70,13 @@ export interface FailoverFacts {
 
 /**
  * Each peer's fallback lines among `lines` (the served lines of its
- * gateway), by the rules of FALLBACK_LINE_SQL, best first and at most
- * MAX_FALLBACK_LINES: same-city lines, then same-country lines. Within each
- * group the order differs from member to member, so the users of one
- * offline line spread over its fallbacks instead of all landing on one. It
- * is the same for all of a member's devices, so they keep sharing one exit,
- * and it stays the same from one config to the next.
+ * gateway, never another gateway's: the device's .conf names this one), by
+ * the rules of FALLBACK_LINE_SQL, best first and at most MAX_FALLBACK_LINES,
+ * since the config is a full snapshot: same-city lines, then same-country
+ * lines, online ones first within each, so the few listed ones work. Within
+ * that the order differs from member to member, so the users of one offline
+ * line spread over its fallbacks instead of all landing on one. It is the
+ * same for all of a member's devices, so they keep sharing one exit.
  *
  * It runs in memory over facts loaded once per gateway, rather than as one
  * SQL condition per peer and line, which grows with peers × lines.
@@ -104,6 +107,7 @@ export function fallbackLines(peers: FailoverPeer[], lines: FailoverLine[], fact
 interface Ranked {
   lineId: string;
   sameCity: boolean;
+  online: boolean;
   spread: number;
 }
 
@@ -116,7 +120,7 @@ function choose(peer: FailoverPeer, candidates: { line: FailoverLine; hash: numb
     if (line.line_id === peer.line_id || (peer.failover === "city" && !sameCity)) continue;
     if (line.owner_member_id === peer.member_id || facts.linked(peer.member_id, line.owner_member_id)) continue;
     if (!hasRoom(facts.users.get(line.line_id), peer.member_id)) continue;
-    insertRanked(best, { lineId: line.line_id, sameCity, spread: mix(memberHash, hash) });
+    insertRanked(best, { lineId: line.line_id, sameCity, online: line.online === 1, spread: mix(memberHash, hash) });
   }
   return best.map((ranked) => ranked.lineId);
 }
@@ -132,6 +136,7 @@ function insertRanked(best: Ranked[], next: Ranked): void {
 
 function before(a: Ranked, b: Ranked): boolean {
   if (a.sameCity !== b.sameCity) return a.sameCity;
+  if (a.online !== b.online) return a.online;
   if (a.spread !== b.spread) return a.spread < b.spread;
   return a.lineId < b.lineId;
 }

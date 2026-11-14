@@ -45,7 +45,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       .bind(gatewayId),
     db
       .prepare(
-        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256, l.country, l.city
+        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256, l.country, l.city, l.online
            FROM lines l JOIN members o ON o.id = l.member_id JOIN devices d ON d.id = l.device_id
           WHERE l.gateway_id = ?1 AND ${SERVED_LINE_SQL}
           ORDER BY l.id`,
