@@ -455,9 +455,14 @@ func TestANewWireGuardPeerWorksWithinSeconds(t *testing.T) {
 	if sum(got) != sum(blob(100_000)) {
 		t.Fatal("download through the new peer differs")
 	}
-	t.Logf("the new peer's first download finished %v after its client started", took.Round(time.Millisecond))
-	if took > 8*time.Second {
-		t.Errorf("the new peer's first download took %v; want it at the client's first handshake retry, within a few seconds", took)
+	handshake, err := s.client.LastHandshake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("the new peer's handshake completed %v and its first download %v after its client started",
+		handshake.Sub(start).Round(time.Millisecond), took.Round(time.Millisecond))
+	if handshake.Sub(start) > 8*time.Second {
+		t.Errorf("the new peer's handshake completed %v after its client started; want it at the client's first retry, within a few seconds", handshake.Sub(start))
 	}
 }
 

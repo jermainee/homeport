@@ -10,7 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -74,6 +77,32 @@ func (c *Client) Sent() uint64 { return c.tun.sent.Load() }
 
 // Received is the inner IP bytes WireGuard delivered to the client so far.
 func (c *Client) Received() uint64 { return c.tun.received.Load() }
+
+// LastHandshake is when the client last completed a handshake with the
+// gateway, or the zero time if it never did.
+func (c *Client) LastHandshake() (time.Time, error) {
+	state, err := c.dev.IpcGet()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("wgclient: read state: %w", err)
+	}
+	var sec, nsec int64
+	for line := range strings.Lines(state) {
+		k, v, _ := strings.Cut(strings.TrimSpace(line), "=")
+		switch k {
+		case "last_handshake_time_sec":
+			sec, err = strconv.ParseInt(v, 10, 64)
+		case "last_handshake_time_nsec":
+			nsec, err = strconv.ParseInt(v, 10, 64)
+		}
+		if err != nil {
+			return time.Time{}, fmt.Errorf("wgclient: parse %s: %w", k, err)
+		}
+	}
+	if sec == 0 && nsec == 0 {
+		return time.Time{}, nil
+	}
+	return time.Unix(sec, nsec), nil
+}
 
 // Close stops the client.
 func (c *Client) Close() { c.dev.Close() }
