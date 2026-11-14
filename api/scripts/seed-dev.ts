@@ -3,16 +3,24 @@
  * (`wrangler dev`) and prints its token, for the manual end-to-end run.
  * The gateway announces itself with PUT /v1/gateway/self when it starts.
  *
+ * `npm run seed:dev -- --persist-to <dir>` seeds the local database kept in
+ * <dir> instead of .wrangler/state, for a `wrangler dev --persist-to <dir>`
+ * (the full-stack smoke test in e2e/ starts every run from an empty one).
+ *
  * Local only: it never touches a remote database.
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { "persist-to": { type: "string" } } });
+const persistTo = values["persist-to"] ? ["--persist-to", values["persist-to"]] : [];
 
 const wrangler = (...args: string[]) => {
-  execFileSync("npx", ["wrangler", ...args], { stdio: ["ignore", "ignore", "inherit"] });
+  execFileSync("npx", ["wrangler", ...args, "--local", ...persistTo], { stdio: ["ignore", "ignore", "inherit"] });
 };
 
-wrangler("d1", "migrations", "apply", "homeport", "--local");
+wrangler("d1", "migrations", "apply", "homeport");
 
 const gatewayId = randomUUID();
 const secret = randomBytes(32).toString("base64url");
@@ -22,7 +30,6 @@ wrangler(
   "d1",
   "execute",
   "homeport",
-  "--local",
   "--command",
   `INSERT INTO gateway_credentials (gateway_id, secret_sha256, created_at) VALUES ('${gatewayId}', '${secretSha256}', ${Date.now()})`,
 );

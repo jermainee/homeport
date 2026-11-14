@@ -30,7 +30,7 @@ npm run dev
 | `npm run typecheck` | `tsc` for `src/` and `test/` |
 | `npm run types` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc`; CI fails if it is stale |
 | `npm run migrate:local` | Applies `migrations/` to the local D1 database |
-| `npm run seed:dev` | Applies the migrations locally, adds a dev gateway to the local database and prints its token (`HOMEPORT_GATEWAY_TOKEN=hpgw_...`) for the gateway binary |
+| `npm run seed:dev` | Applies the migrations locally, adds a dev gateway to the local database and prints its token (`HOMEPORT_GATEWAY_TOKEN=hpgw_...`) for the gateway binary. `npm run seed:dev -- --persist-to <dir>` seeds the database a `wrangler dev --persist-to <dir>` uses instead, as the full-stack smoke test in `e2e/` does |
 
 ## Configuration
 
@@ -192,6 +192,7 @@ Edge gateways (`gateway/`) call `/v1/gateway/*` (contract tag `gateway`, `src/ga
 Routes under `/dev` answer `404` unless `ENVIRONMENT` is exactly `dev`.
 
 - `POST /dev/login-requests/{id}/confirm` with `{session_token}` approves a login request without the email link, so automated tests can sign in.
+- `POST /dev/members/{member_id}/identity/verify` marks the member's identity verified, as Stripe Identity's `verified` webhook does in test mode, and returns `{identity_status: "verified"}`, so local runs and end-to-end tests can share and use lines without an Identity check.
 - `POST /dev/members/{member_id}/credits` with `{credits}` grants purchased credits from the `dev_grants` account and returns `{credits}`, so local runs and end-to-end tests can use lines without a Checkout payment.
 - `PUT /dev/gateways/{id}` with the contract's `GatewaySelf` body stores a gateway under any id without a token, for tests. A real gateway sends `PUT /v1/gateway/self` with the token from `npm run seed:dev`.
 

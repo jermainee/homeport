@@ -117,18 +117,26 @@ func TestUDPAndDNSFlowsPassThroughTheAgent(t *testing.T) {
 	buf := make([]byte, 2048)
 	for _, payload := range [][]byte{[]byte("ping"), blob(1200)} {
 		// Datagrams may get lost, so ask again until the echo comes back.
-		var got []byte
-		for try := 0; try < 10 && got == nil; try++ {
+		// Under the race detector the first flow's setup (handshake, lease,
+		// agent) can take seconds, longer than one wait, so the echo of an
+		// earlier datagram may still arrive: only the payload's own counts.
+		deadline := time.Now().Add(30 * time.Second)
+		echoed := false
+		for !echoed && time.Now().Before(deadline) {
 			if _, err := conn.Write(payload); err != nil {
 				t.Fatal(err)
 			}
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			if n, err := conn.Read(buf); err == nil {
-				got = buf[:n]
+			_ = conn.SetReadDeadline(earliest(time.Now().Add(3*time.Second), deadline))
+			for !echoed {
+				n, err := conn.Read(buf)
+				if err != nil {
+					break // ask again
+				}
+				echoed = bytes.Equal(buf[:n], payload)
 			}
 		}
-		if !bytes.Equal(got, payload) {
-			t.Fatalf("UDP echo of %d bytes came back as %d bytes", len(payload), len(got))
+		if !echoed {
+			t.Fatalf("no UDP echo of %d bytes came back", len(payload))
 		}
 	}
 
@@ -179,7 +187,11 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 			t.Errorf("a connection to %s was refused after %v", dst, elapsed)
 		}
 	}
-	// The agent refused them by its policy, never dialing them.
+	// The agent refused them by its policy, never dialing them. When the
+	// refusal takes longer than the client's SYN timeout (1 s, as under the
+	// race detector), a retransmitted SYN can reach the gateway after its
+	// RST and is refused as a flow of its own, so a destination may be
+	// refused more than once.
 	want := map[string]int{"special_range": 2, "blocked_port": 1}
 	var got map[string]int
 	waitUntil(t, "the agent logged its refusals", func() bool {
@@ -189,8 +201,16 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 				got[fmt.Sprint(rec["rule"])]++
 			}
 		}
-		return maps.Equal(got, want)
+		for rule, n := range want {
+			if got[rule] < n {
+				return false
+			}
+		}
+		return true
 	})
+	if !maps.EqualFunc(got, want, func(int, int) bool { return true }) {
+		t.Errorf("the agent refused by the rules %v, want only %v", got, want)
+	}
 	if st := s.agent.Stats(); st.FlowsTotal != 1 {
 		t.Errorf("the agent opened %d flows, want only the first fetch", st.FlowsTotal)
 	}
@@ -426,4 +446,11 @@ func logRecords(t *testing.T, b *syncBuffer) []map[string]any {
 		}
 	}
 	return out
+}
+
+func earliest(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

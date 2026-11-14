@@ -1,9 +1,11 @@
 version: "2"
 
 run:
-  # The tests need the e2e tag, which gives the agent its test hooks.
+  # The tests need the e2e tag, which gives the agent its test hooks; smoke
+  # adds the full-stack smoke test.
   build-tags:
     - e2e
+    - smoke
 
 linters:
   enable:
