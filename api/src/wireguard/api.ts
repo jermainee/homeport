@@ -1,26 +1,64 @@
 import { Hono } from "hono";
+import { every } from "hono/combine";
 import { requireSession, type SessionVariables } from "../auth/middleware";
-import { apiError, hasOnlyFields, invalidRequest } from "../http";
+import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
+import { timestamp } from "../formats";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
+import { requireVerifiedIdentity } from "../identity/require-verified";
 import { KEY32, isName } from "../keys";
 import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
 import { MAX_PEERS_PER_MEMBER } from "../pricing";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
+import { type Failover, isFailover } from "./failover";
 
 /**
  * WireGuard peers: the devices that use a line (contract operations
- * createWireguardPeer, listWireguardPeers, deleteWireguardPeer).
+ * createWireguardPeer, listWireguardPeers, updateWireguardPeer,
+ * deleteWireguardPeer).
  */
 export const wireguardApi = new Hono<{ Bindings: Env; Variables: SessionVariables & IdempotentVariables }>();
 
+
+/**
+ * How recent the gateway's last report of a session must be for the
+ * session's line to count as the peer's exit line. The gateway reports a
+ * session that moves bytes at least every 30 seconds, and ends one after 2
+ * idle minutes; a session older than this was left open by a gateway that
+ * stopped.
+ */
+const EXIT_LINE_WINDOW_MS = 3 * 60 * 1000;
 
 interface PeerRow {
   id: string;
   name: string;
   line_id: string;
+  failover: Failover;
   public_key: string;
   address_index: number;
   created_at: number;
+  exit_line_id?: string | null;
+  exit_country?: string | null;
+  exit_city?: string | null;
+  exit_since?: number | null;
+}
+
+const PEER_COLUMNS = `p.id, p.name, p.line_id, p.failover, p.public_key, p.address_index, p.created_at`;
+
+/**
+ * SELECT of PEER_COLUMNS for the peers `p` that WHERE `where` picks, with
+ * the line of each peer's newest session the gateway reported within
+ * EXIT_LINE_WINDOW_MS. The first placeholder (?1) is the window's start.
+ */
+function peersWithExitSql(where: string): string {
+  return `SELECT ${PEER_COLUMNS}, s.line_id AS exit_line_id, x.country AS exit_country, x.city AS exit_city,
+                 s.started_at AS exit_since
+            FROM wireguard_peers p
+            LEFT JOIN usage_sessions s ON s.session_id = (
+                   SELECT o.session_id FROM usage_sessions o
+                    WHERE o.peer_id = p.id AND o.ended = 0 AND o.updated_at >= ?1
+                    ORDER BY o.started_at DESC LIMIT 1)
+            LEFT JOIN lines x ON x.id = s.line_id
+           WHERE ${where}`;
 }
 
 function peerBody(peer: PeerRow) {
@@ -28,6 +66,16 @@ function peerBody(peer: PeerRow) {
     peer_id: peer.id,
     name: peer.name,
     line_id: peer.line_id,
+    failover: peer.failover,
+    exit_line:
+      peer.exit_line_id && peer.exit_since != null
+        ? {
+            line_id: peer.exit_line_id,
+            country: peer.exit_country ?? null,
+            city: peer.exit_city ?? null,
+            since: timestamp(peer.exit_since),
+          }
+        : null,
     public_key: peer.public_key,
     ipv4: tunnelIpv4(peer.address_index),
     ipv6: tunnelIpv6(peer.address_index),
@@ -82,7 +130,7 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
           WHERE free.host <= ${LAST_PEER_HOST} AND ${lineHasRoomSql("?3", "?2")}
             AND (SELECT COUNT(*) FROM wireguard_peers mine
                   WHERE mine.member_id = ?2 AND mine.deleted_at IS NULL) < ${MAX_PEERS_PER_MEMBER}
-         RETURNING id, name, line_id, public_key, address_index, created_at`,
+         RETURNING id, name, line_id, failover, public_key, address_index, created_at`,
       )
       .bind(crypto.randomUUID(), memberId, lineId, name, publicKey, Date.now())
       .first<PeerRow>();
@@ -121,12 +169,77 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
 
 wireguardApi.get("/peers", requireSession, async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT id, name, line_id, public_key, address_index, created_at FROM wireguard_peers
-      WHERE member_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, rowid DESC`,
+    `${peersWithExitSql("p.member_id = ?2 AND p.deleted_at IS NULL")} ORDER BY p.created_at DESC, p.rowid DESC`,
   )
-    .bind(c.get("member").id)
+    .bind(Date.now() - EXIT_LINE_WINDOW_MS, c.get("member").id)
     .all<PeerRow>();
   return c.json({ peers: results.map(peerBody) });
+});
+
+/**
+ * Moves a peer to another line, or changes its failover. The device keeps
+ * its .conf file, which names the peer's address and the gateway: the line
+ * a peer exits through is chosen on the gateway. A new line gets the
+ * checks of POST, and must be on the gateway the .conf names.
+ */
+wireguardApi.patch("/peers/:id", every(requireSession, requireVerifiedIdentity), async (c) => {
+  const body = await readJsonObject(c.req.raw);
+  if (!body || Object.keys(body).length === 0 || !hasOnlyFields(body, ["line_id", "failover"])) {
+    return invalidRequest(c, "send line_id, failover or both");
+  }
+  const { line_id: lineId, failover } = body;
+  if (lineId !== undefined && typeof lineId !== "string") return invalidRequest(c, "line_id must be an id");
+  if (failover !== undefined && !isFailover(failover)) return invalidRequest(c, "failover must be country, city or off");
+
+  const db = c.env.DB;
+  const memberId = c.get("member").id;
+  const peerId = c.req.param("id");
+  const current = await db
+    .prepare(
+      `SELECT p.line_id, l.gateway_id FROM wireguard_peers p JOIN lines l ON l.id = p.line_id
+        WHERE p.id = ? AND p.member_id = ? AND p.deleted_at IS NULL`,
+    )
+    .bind(peerId, memberId)
+    .first<{ line_id: string; gateway_id: string }>();
+  if (!current) return apiError(c, 404, "not_found");
+
+  const moving = lineId !== undefined && lineId !== current.line_id;
+  if (moving) {
+    const line = await db
+      .prepare(
+        `SELECT l.gateway_id, ${ownerIsLinkedSql("?2", "l.member_id")} AS linked
+           FROM lines l JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
+          WHERE l.id = ?1 AND l.sharing_enabled = 1`,
+      )
+      .bind(lineId, memberId)
+      .first<{ gateway_id: string; linked: number }>();
+    if (!line) return apiError(c, 404, "not_found");
+    if (line.linked) return apiError(c, 403, "line_not_allowed");
+    if (line.gateway_id !== current.gateway_id) return apiError(c, 409, "line_on_other_gateway");
+  }
+
+  // The new line's room is checked in the update itself, so two members
+  // moving at once never overfill it.
+  const changed = await db
+    .prepare(
+      `UPDATE wireguard_peers SET line_id = ?1, failover = COALESCE(?2, failover)
+        WHERE id = ?3 AND member_id = ?4 AND deleted_at IS NULL
+          AND (?1 = line_id OR ${lineHasRoomSql("?1", "?4")})
+        RETURNING id`,
+    )
+    .bind(moving ? lineId : current.line_id, failover ?? null, peerId, memberId)
+    .first();
+  if (!changed) {
+    const room = await db.prepare(`SELECT ${lineHasRoomSql("?1", "?2")} AS room`).bind(lineId, memberId).first<{ room: number }>();
+    return moving && !room?.room ? apiError(c, 409, "line_full") : apiError(c, 404, "not_found");
+  }
+
+  const peer = await db
+    .prepare(peersWithExitSql("p.id = ?2"))
+    .bind(Date.now() - EXIT_LINE_WINDOW_MS, peerId)
+    .first<PeerRow>();
+  if (!peer) throw new Error("peer missing after update");
+  return c.json(peerBody(peer));
 });
 
 /**

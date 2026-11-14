@@ -111,7 +111,10 @@ interface StoredEvent {
 interface PeerRow {
   id: string;
   member_id: string;
-  line_id: string;
+}
+
+interface LineRow {
+  id: string;
   owner_member_id: string;
 }
 
@@ -151,10 +154,12 @@ function sameEvent(stored: StoredEvent, event: UsageEvent): boolean {
  * POST /v1/gateway/usage (contract reportUsage). Applies each event exactly
  * once, in request order, and answers each.
  *
- * An applied event is charged to the peer's meter (meter_totals, one per
- * peer): the user pays floor(total × 10 / 10^6) minus what the meter
- * already charged, the line's owner earns at 5 and the platform keeps the
- * rest (chargeUsage). The charge counts against the event's lease. The
+ * An applied event is charged to the meter of its peer on its line
+ * (meter_totals, one per peer and line): the user pays floor(total × 10 /
+ * 10^6) minus what the meter already charged, the owner of the event's line
+ * earns at 5 and the platform keeps the rest (chargeUsage). The event's
+ * line is its lease's: the peer's own line, or a line that took it over
+ * while it was offline. The charge counts against the event's lease. The
  * event and the session log (usage_sessions: member, line, start, end,
  * bytes; never a destination) are written in the charge's batch, so a
  * retry after a failure finds all of it or none of it.
@@ -180,11 +185,12 @@ export async function reportUsage(c: GatewayContext): Promise<Response> {
       .bind(ids((event) => event.event_id)),
     db
       .prepare(
-        `SELECT p.id, p.member_id, p.line_id, l.member_id AS owner_member_id
-           FROM wireguard_peers p JOIN lines l ON l.id = p.line_id WHERE p.id IN (SELECT value FROM json_each(?))`,
+        `SELECT p.id, p.member_id FROM wireguard_peers p WHERE p.id IN (SELECT value FROM json_each(?))`,
       )
       .bind(ids((event) => event.peer_id)),
-    db.prepare(`SELECT id FROM lines WHERE id IN (SELECT value FROM json_each(?))`).bind(ids((event) => event.line_id)),
+    db
+      .prepare(`SELECT id, member_id AS owner_member_id FROM lines WHERE id IN (SELECT value FROM json_each(?))`)
+      .bind(ids((event) => event.line_id)),
     db
       .prepare(`SELECT id, peer_id, line_id, session_id FROM leases WHERE gateway_id = ? AND id IN (SELECT value FROM json_each(?))`)
       .bind(gatewayId, ids((event) => event.lease_id)),
@@ -197,7 +203,7 @@ export async function reportUsage(c: GatewayContext): Promise<Response> {
   ]);
   const stored = new Map(((storedResult?.results ?? []) as StoredEvent[]).map((row) => [row.event_id, row]));
   const peers = new Map(((peersResult?.results ?? []) as PeerRow[]).map((row) => [row.id, row]));
-  const lines = new Set(((linesResult?.results ?? []) as { id: string }[]).map((row) => row.id));
+  const lines = new Map(((linesResult?.results ?? []) as LineRow[]).map((row) => [row.id, row]));
   const leases = new Map(((leasesResult?.results ?? []) as LeaseRow[]).map((row) => [row.id, row]));
   const sessions = new Map(((sessionsResult?.results ?? []) as SessionRow[]).map((row) => [row.session_id, row]));
 
@@ -227,7 +233,7 @@ export async function reportUsage(c: GatewayContext): Promise<Response> {
 interface Known {
   stored: Map<string, StoredEvent>;
   peers: Map<string, PeerRow>;
-  lines: Set<string>;
+  lines: Map<string, LineRow>;
   leases: Map<string, LeaseRow>;
   sessions: Map<string, SessionRow>;
 }
@@ -246,7 +252,8 @@ async function applyUsageEvent(
 
   const peer = known.peers.get(event.peer_id);
   if (!peer) return { reason: "unknown_peer" };
-  if (!known.lines.has(event.line_id)) return { reason: "unknown_line" };
+  const line = known.lines.get(event.line_id);
+  if (!line) return { reason: "unknown_line" };
   const lease = known.leases.get(event.lease_id);
   if (!lease) return { reason: "unknown_lease" };
   if (lease.peer_id !== event.peer_id || lease.session_id !== event.session_id || lease.line_id !== event.line_id) {
@@ -263,9 +270,9 @@ async function applyUsageEvent(
   }
 
   const charged = await chargeUsage(db, {
-    meterId: event.peer_id,
+    meterId: `${event.peer_id}/${event.line_id}`,
     payerMemberId: peer.member_id,
-    payeeMemberId: peer.owner_member_id,
+    payeeMemberId: line.owner_member_id,
     bytes: event.bytes_up + event.bytes_down,
     usageKey: event.event_id,
     reservationId: event.lease_id,
@@ -306,7 +313,7 @@ async function applyUsageEvent(
               event.peer_id,
               peer.member_id,
               event.line_id,
-              peer.owner_member_id,
+              line.owner_member_id,
               event.session_start.exit_ip,
               event.session_start.started_at,
               event.period_end,

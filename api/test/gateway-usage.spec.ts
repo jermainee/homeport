@@ -1,13 +1,15 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LEASE_CREDITS } from "../src/pricing";
 import { expectContract } from "./contract";
 import {
   type UsageEventInput,
   announcedGateway,
   balancesOf,
+  failoverPeer,
   gatewayCall,
   grantedLease,
+  SESSION_START,
   reportUsage,
   servedPeer,
   usageEvent,
@@ -251,4 +253,117 @@ describe("POST /v1/gateway/usage", () => {
       expect(await expectContract("POST", "/v1/gateway/usage", response)).toMatchObject({ error: "invalid_request" });
     }
   });
+});
+
+describe("POST /v1/gateway/usage on a fallback line", () => {
+  async function sessionRows(peerId: string) {
+    const { results } = await env.DB.prepare(
+      `SELECT line_id, owner_member_id, bytes_down FROM usage_sessions WHERE peer_id = ? ORDER BY started_at, rowid`,
+    )
+      .bind(peerId)
+      .all<{ line_id: string; owner_member_id: string; bytes_down: number }>();
+    return results;
+  }
+
+  it("pays the owner of the line each session exits through", async () => {
+    const { gateway, primary, fallback, user, peer } = await failoverPeer();
+    const onPrimary = await grantedLease(gateway.token, peer.peer_id);
+    const onFallback = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+
+    const results = await report(gateway.token, [
+      usageEvent({
+        sessionId: onPrimary.sessionId,
+        peerId: peer.peer_id,
+        lineId: primary.lineId,
+        leaseId: onPrimary.lease_id,
+        seq: 0,
+        bytesUp: 0,
+        bytesDown: 2_000_000,
+        final: true,
+      }),
+      usageEvent({
+        sessionId: onFallback.sessionId,
+        peerId: peer.peer_id,
+        lineId: fallback.lineId,
+        leaseId: onFallback.lease_id,
+        seq: 0,
+        bytesUp: 0,
+        bytesDown: 4_000_000,
+      }),
+    ]);
+
+    expect(statuses(results)).toEqual(["applied", "applied"]);
+    expect((await balancesOf(user.memberId)).purchased).toBe(1_000_000 - 60);
+    expect((await balancesOf(primary.owner.memberId)).earned_pending).toBe(10);
+    expect((await balancesOf(fallback.owner.memberId)).earned_pending).toBe(20);
+    expect(await sessionRows(peer.peer_id)).toEqual([
+      { line_id: primary.lineId, owner_member_id: primary.owner.memberId, bytes_down: 2_000_000 },
+      { line_id: fallback.lineId, owner_member_id: fallback.owner.memberId, bytes_down: 4_000_000 },
+    ]);
+    expect(await unbalancedTransactions()).toEqual([]);
+  });
+
+  it("rejects an event on another line than its lease's", async () => {
+    const { gateway, primary, fallback, peer } = await failoverPeer();
+    const onFallback = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+
+    const results = await report(gateway.token, [
+      usageEvent({
+        sessionId: onFallback.sessionId,
+        peerId: peer.peer_id,
+        lineId: primary.lineId,
+        leaseId: onFallback.lease_id,
+        seq: 0,
+        bytesUp: 0,
+        bytesDown: 1_000_000,
+      }),
+    ]);
+
+    expect(statuses(results)).toEqual(["rejected:lease_mismatch"]);
+  });
+
+  it("pays the old line's owner for a session that started before the peer moved", async () => {
+    const { gateway, primary, fallback, user, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id);
+    const event = (seq: number) =>
+      usageEvent({ sessionId: lease.sessionId, peerId: peer.peer_id, lineId: primary.lineId, leaseId: lease.lease_id, seq, bytesUp: 0, bytesDown: 2_000_000 });
+    await report(gateway.token, [event(0)]);
+
+    await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { line_id: fallback.lineId });
+    const results = await report(gateway.token, [event(1)]);
+
+    expect(statuses(results)).toEqual(["applied"]);
+    expect((await balancesOf(primary.owner.memberId)).earned_pending).toBe(20);
+    expect((await balancesOf(fallback.owner.memberId)).earned_pending).toBe(0);
+  });
+
+  it("shows the member which line a device exits through, until its session ends or the gateway stops reporting it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { gateway, fallback, user, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+    const event = (seq: number, final = false) =>
+      usageEvent({ sessionId: lease.sessionId, peerId: peer.peer_id, lineId: fallback.lineId, leaseId: lease.lease_id, seq, bytesUp: 0, bytesDown: 1_000, final });
+    const exitLine = async () => {
+      const response = await send("GET", "/v1/wireguard/peers", user.sessionToken);
+      const { peers } = await expectContract<{ peers: { peer_id: string; exit_line: unknown }[] }>("GET", "/v1/wireguard/peers", response);
+      return peers.find((listed) => listed.peer_id === peer.peer_id)?.exit_line;
+    };
+
+    const before = await exitLine();
+    await report(gateway.token, [event(0)]);
+    const during = await exitLine();
+    vi.setSystemTime(Date.now() + 3 * 60_000 + 1_000);
+    const stale = await exitLine();
+    await report(gateway.token, [event(1, true)]);
+    const ended = await exitLine();
+
+    expect(before).toBeNull();
+    expect(during).toEqual({ line_id: fallback.lineId, country: "DE", city: "Berlin", since: new Date(SESSION_START).toISOString().replace(".000Z", "Z") });
+    expect(stale).toBeNull();
+    expect(ended).toBeNull();
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });

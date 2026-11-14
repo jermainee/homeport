@@ -4,7 +4,10 @@ import { LEASE_BYTES, LEASE_CREDITS, LEASE_GRACE_SECONDS, LEASE_RENEW_AT_BYTES, 
 import { expectContract } from "./contract";
 import {
   type LeaseBody,
+  PARIS,
   announcedGateway,
+  failoverPeer,
+  lineOn,
   gatewayCall,
   giveCredits,
   grantedLease,
@@ -256,6 +259,75 @@ describe("POST /v1/gateway/leases", () => {
       expect(response.status).toBe(402);
       expect((await reservations(user.memberId)).map((r) => r.id)).toEqual([current.lease_id]);
     });
+  });
+});
+
+describe("POST /v1/gateway/leases on a fallback line", () => {
+  it("grants a lease for a session on one of the peer's fallback lines", async () => {
+    const { gateway, fallback, peer } = await failoverPeer();
+
+    const response = await requestLease(gateway.token, { peerId: peer.peer_id, sessionId: uuidv7(), lineId: fallback.lineId });
+
+    expect(response.status).toBe(201);
+    await expectContract<LeaseBody>("POST", "/v1/gateway/leases", response);
+  });
+
+  it.each([
+    ["a line in another country", "abroad"],
+    ["the fallback line once the member turns failover off", "off"],
+    ["a line whose owner is linked to the member", "linked"],
+    ["a line of another gateway", "elsewhere"],
+  ])("refuses %s with 403 peer_inactive", async (_case, kind) => {
+    const { gateway, fallback, user, peer } = await failoverPeer();
+    let lineId = fallback.lineId;
+    switch (kind) {
+      case "abroad":
+        lineId = (await lineOn(gateway.gatewayId, PARIS)).lineId;
+        break;
+      case "off":
+        await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { failover: "off" });
+        break;
+      case "linked":
+        await link(user.memberId, fallback.owner.memberId, "device");
+        break;
+      case "elsewhere":
+        lineId = (await lineOn((await announcedGateway()).gatewayId)).lineId;
+        break;
+    }
+
+    const response = await requestLease(gateway.token, { peerId: peer.peer_id, sessionId: uuidv7(), lineId });
+
+    expect(response.status).toBe(403);
+    expect(await expectContract("POST", "/v1/gateway/leases", response)).toEqual({ error: "peer_inactive" });
+  });
+
+  it("answers 400 to a renewal on another line than the lease it supersedes", async () => {
+    const { gateway, primary, fallback, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+
+    const response = await requestLease(gateway.token, {
+      peerId: peer.peer_id,
+      sessionId: lease.sessionId,
+      lineId: primary.lineId,
+      supersedes: lease.lease_id,
+    });
+
+    expect(response.status).toBe(400);
+    expect(await expectContract("POST", "/v1/gateway/leases", response)).toMatchObject({ error: "invalid_request" });
+  });
+
+  it("renews a lease on a fallback line, with or without naming the line again", async () => {
+    const { gateway, fallback, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+
+    const response = await requestLease(gateway.token, {
+      peerId: peer.peer_id,
+      sessionId: lease.sessionId,
+      lineId: fallback.lineId,
+      supersedes: lease.lease_id,
+    });
+
+    expect(response.status).toBe(201);
   });
 });
 

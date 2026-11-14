@@ -37,7 +37,7 @@ describe("scheduled cleanup", () => {
     expect(await count(`SELECT COUNT(*) AS n FROM line_events WHERE line_id = ?`, lineId)).toBe(0);
     // The ledger, meter totals and the session log stay.
     expect(await count(`SELECT COUNT(*) AS n FROM ledger_entries`)).toBe(ledgerBefore);
-    expect(await count(`SELECT COUNT(*) AS n FROM meter_totals WHERE meter_id = ?`, peer.peer_id)).toBe(1);
+    expect(await count(`SELECT COUNT(*) AS n FROM meter_totals WHERE meter_id = ?`, `${peer.peer_id}/${lineId}`)).toBe(1);
     expect(await count(`SELECT COUNT(*) AS n FROM usage_sessions WHERE session_id = ?`, lease.sessionId)).toBe(1);
   });
 

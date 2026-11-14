@@ -1,25 +1,37 @@
 import { sha256Hex } from "../crypto";
 import { HOSTNAME } from "../formats";
 import { httpOrigin } from "../http";
+import { FAILBACK_SECONDS } from "../pricing";
 import { tunnelIpv4, tunnelIpv6 } from "../wireguard/config";
+import { FALLBACK_LINE_SQL, type FallbackCandidate, fallbackLines } from "../wireguard/failover";
 import { PEER_JOINS, SERVED_LINE_SQL, SERVED_PEER_SQL } from "./served";
 
 /** The contract's GatewayConfig. */
 export interface GatewayConfig {
   etag: string;
   topup_hostnames: string[];
-  peers: { peer_id: string; member_id: string; public_key: string; ipv4: string; ipv6: string; line_id: string }[];
+  failback_seconds: number;
+  peers: {
+    peer_id: string;
+    member_id: string;
+    public_key: string;
+    ipv4: string;
+    ipv6: string;
+    line_id: string;
+    fallback_line_ids: string[];
+  }[];
   lines: { line_id: string; owner_member_id: string; device_spki_sha256: string }[];
 }
 
 /**
  * Everything a gateway serves: its shared lines with their agents' SPKI
  * pins (hex, as the devices table stores them), the peers it may accept
- * on them, and the hosts a peer without credits can still reach. The etag
- * is a hash of the rest, so it changes exactly when the config does.
+ * on them with the lines that take over while a peer's line is offline,
+ * and the hosts a peer without credits can still reach. The etag is a hash
+ * of the rest, so it changes exactly when the config does.
  */
 export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string): Promise<GatewayConfig> {
-  const [peers, lines] = await db.batch([
+  const [peers, lines, fallbacks] = await db.batch([
     db
       .prepare(
         `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id
@@ -36,9 +48,18 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
           ORDER BY l.id`,
       )
       .bind(gatewayId),
+    db
+      .prepare(
+        `SELECT p.id AS peer_id, p.member_id, f.id AS line_id, (f.city IS NOT NULL AND f.city = l.city) AS same_city
+           FROM ${PEER_JOINS} JOIN lines f JOIN members fo ON fo.id = f.member_id
+          WHERE l.gateway_id = ? AND ${SERVED_PEER_SQL} AND ${FALLBACK_LINE_SQL}`,
+      )
+      .bind(gatewayId),
   ]);
+  const fallbackIds = fallbackLines((fallbacks?.results ?? []) as FallbackCandidate[]);
   const content = {
     topup_hostnames: topupHostnames(env),
+    failback_seconds: FAILBACK_SECONDS,
     peers: ((peers?.results ?? []) as PeerRow[]).map((peer) => ({
       peer_id: peer.peer_id,
       member_id: peer.member_id,
@@ -46,6 +67,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       ipv4: tunnelIpv4(peer.address_index),
       ipv6: tunnelIpv6(peer.address_index),
       line_id: peer.line_id,
+      fallback_line_ids: fallbackIds.get(peer.peer_id) ?? [],
     })),
     lines: (lines?.results ?? []) as GatewayConfig["lines"],
   };

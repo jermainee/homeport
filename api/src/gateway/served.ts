@@ -1,10 +1,16 @@
 import { ownerIsLinkedSql } from "../lines/rules";
 
 /**
- * SQL condition, with `l` a line and `o` its owner (members): the line is
- * shared and its owner may share. Such lines are in a gateway's config.
+ * SQL condition, with `line` a line and `owner` its owner (members): the
+ * line is shared and its owner may share. Such lines are in a gateway's
+ * config.
  */
-export const SERVED_LINE_SQL = `l.sharing_enabled = 1 AND o.status = 'active' AND o.identity_status = 'verified'`;
+export function servedLineSql(line: string, owner: string): string {
+  return `${line}.sharing_enabled = 1 AND ${owner}.status = 'active' AND ${owner}.identity_status = 'verified'`;
+}
+
+/** servedLineSql for the line `l` and its owner `o`. */
+export const SERVED_LINE_SQL = servedLineSql("l", "o");
 
 /**
  * SQL condition, with `p` a WireGuard peer, `m` its member, `l` its line and
