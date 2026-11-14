@@ -60,6 +60,13 @@ type Config struct {
 	// OnLineEvent, if set, is called when a line's agent connects or
 	// disconnects. It must return quickly and must not call the Server.
 	OnLineEvent func(LineEvent)
+
+	// OnUnknownAgent, if set, is called during the handshake of an agent
+	// whose certificate pin belongs to no line, before the gateway refuses
+	// it. The line may be newer than the gateway's config, so the callback
+	// can have the config fetched again; the agent's next attempt then finds
+	// its line. It must return quickly and must not call the Server.
+	OnUnknownAgent func()
 }
 
 // Peer is a member device allowed to connect.
@@ -160,7 +167,7 @@ func New(cfg Config) (*Server, error) {
 		if cfg.OnLineEvent != nil {
 			onEvent = func(e relay.Event) { cfg.OnLineEvent(LineEvent(e)) }
 		}
-		r, err := relay.Listen(cfg.QUICListen, cfg.Certificate, netip.AddrPortFrom(cfg.DNS, 53), onEvent)
+		r, err := relay.Listen(cfg.QUICListen, cfg.Certificate, netip.AddrPortFrom(cfg.DNS, 53), onEvent, cfg.OnUnknownAgent)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: %w", err)
 		}

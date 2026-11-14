@@ -150,21 +150,53 @@ func keepForRetry(err error) bool {
 	return Temporary(err) || ae.Status < 400 || ae.Status == http.StatusRequestTimeout
 }
 
-// Run polls the config every ConfigInterval, steps every second and
-// reports what is queued, until ctx ends. Call Close afterwards.
+// Run polls the config every ConfigInterval and whenever RefreshConfig
+// asks, steps every second and reports what is queued, until ctx ends. Call
+// Close afterwards.
 func (c *Controller) Run(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.loop(ctx, ConfigInterval, func() {
-			if err := c.SyncConfig(ctx); err != nil && ctx.Err() == nil {
-				c.log.Warn("config sync failed", "err", err)
-			}
-		})
+		c.syncLoop(ctx)
 	}()
 	go c.loop(ctx, time.Second, func() { c.Flush(ctx) })
 	c.loop(ctx, time.Second, c.Step)
 	<-done
+}
+
+// syncLoop fetches the config now, ConfigInterval after each fetch, and
+// when RefreshConfig asks, but at most once per ConfigRefreshInterval for
+// RefreshConfig: an unknown key costs a handshake, so a flood of them must
+// not turn into a flood of requests to the API.
+func (c *Controller) syncLoop(ctx context.Context) {
+	poll := time.NewTicker(ConfigInterval)
+	defer poll.Stop()
+	var refreshed time.Time // when the last fetch that RefreshConfig asked for started
+	for {
+		// A request made before this fetch starts is answered by it.
+		select {
+		case <-c.refresh:
+		default:
+		}
+		if err := c.SyncConfig(ctx); err != nil && ctx.Err() == nil {
+			c.log.Warn("config sync failed", "err", err)
+		}
+		poll.Reset(ConfigInterval)
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+		case <-c.refresh:
+			wait := time.NewTimer(time.Until(refreshed.Add(ConfigRefreshInterval)))
+			select {
+			case <-ctx.Done():
+				wait.Stop()
+				return
+			case <-wait.C:
+			}
+			refreshed = time.Now()
+		}
+	}
 }
 
 // loop runs fn now and then every interval until ctx ends.

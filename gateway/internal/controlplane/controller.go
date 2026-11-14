@@ -19,6 +19,10 @@ import (
 // contract asks.
 const ConfigInterval = 30 * time.Second
 
+// ConfigRefreshInterval is the least time between two config fetches that
+// RefreshConfig asks for, however many unknown agents connect.
+const ConfigRefreshInterval = 2 * time.Second
+
 // Gateway is the part of *gateway.Server the controller drives.
 type Gateway interface {
 	AddPeer(gateway.Peer) error
@@ -50,6 +54,8 @@ type Controller struct {
 	api   *Client
 	clock Clock
 	log   *slog.Logger
+
+	refresh chan struct{} // RefreshConfig's request, at most one pending
 
 	mu         sync.Mutex
 	gw         Gateway
@@ -98,6 +104,7 @@ func New(api *Client, opts Options) *Controller {
 	}
 	return &Controller{
 		api:        api,
+		refresh:    make(chan struct{}, 1),
 		clock:      opts.Clock,
 		log:        opts.Logger,
 		topUp:      map[string]bool{},
@@ -136,6 +143,17 @@ func (c *Controller) SyncConfig(ctx context.Context) error {
 	}
 	c.etag = cfg.ETag
 	return nil
+}
+
+// RefreshConfig asks Run to fetch the config again now, for example because
+// an agent with an unknown key connected: its line may be newer than the
+// gateway's config. Requests made before a fetch starts share that fetch.
+// It never blocks, so the gateway may call it from a TLS handshake.
+func (c *Controller) RefreshConfig() {
+	select {
+	case c.refresh <- struct{}{}:
+	default: // a fetch is already due
+	}
 }
 
 // applyLocked makes the gateway serve exactly cfg. Removals go first, so an
