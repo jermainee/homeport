@@ -44,6 +44,15 @@ const (
 	lineID       = "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
 	topUpHost    = "homeport.example"
 	originName   = "origin.homeport.test"
+
+	// Member C's line in A's city, which takes over B's peer while A's
+	// line is offline (withFallbackLine).
+	fallbackLineID = "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57"
+	fallbackOwner  = "01a1c4af-8d52-7b10-8e6f-2a4c7b9d3e18" // C
+
+	// failbackSeconds is the failback_seconds the fake API sends with a
+	// fallback line: production's 5 minutes, shortened for the test.
+	failbackSeconds = 2
 )
 
 var (
@@ -86,7 +95,10 @@ type stack struct {
 	config    fakeapi.Config // what the API serves once Share is on
 	agentCert tls.Certificate
 	agent     *agent.Agent
+	stopAgent func() // stops agent; startAgent starts a new one
 	agentLogs *syncBuffer
+
+	fallbackCert tls.Certificate // C's agent's, with withFallbackLine
 
 	clientKey gateway.Key
 	client    *wgclient.Client
@@ -96,6 +108,7 @@ type stackOptions struct {
 	leases     fakeapi.LeasePolicy
 	shareLater bool
 	peerLater  bool
+	fallback   bool
 }
 
 func withLeases(p fakeapi.LeasePolicy) func(*stackOptions) {
@@ -114,6 +127,14 @@ func withShareLater() func(*stackOptions) {
 // then creates the peer with addPeer.
 func withPeerLater() func(*stackOptions) {
 	return func(o *stackOptions) { o.peerLater = true }
+}
+
+// withFallbackLine adds member C's line in A's city to the config: it takes
+// over B's peer while A's line is offline, and B's peer moves back once A's
+// line has been online for failbackSeconds. C's agent starts with
+// startFallbackAgent.
+func withFallbackLine() func(*stackOptions) {
+	return func(o *stackOptions) { o.fallback = true }
 }
 
 // newStack starts everything and returns once the agent serves the line
@@ -154,6 +175,19 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 			OwnerMemberID:    ownerMember,
 			DeviceSPKISHA256: hex.EncodeToString(agentPin[:]),
 		}},
+	}
+	if o.fallback {
+		if s.fallbackCert, err = relayprotocol.GenerateSelfSigned("homeport-agent"); err != nil {
+			t.Fatal(err)
+		}
+		pin := relayprotocol.PinOf(s.fallbackCert.Leaf)
+		s.config.Lines = append(s.config.Lines, fakeapi.Line{
+			LineID:           fallbackLineID,
+			OwnerMemberID:    fallbackOwner,
+			DeviceSPKISHA256: hex.EncodeToString(pin[:]),
+		})
+		s.config.Peers[0].FallbackLineIDs = []string{fallbackLineID}
+		s.config.FailbackSeconds = failbackSeconds
 	}
 	served := s.config
 	switch {
@@ -197,10 +231,7 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 		return s
 	}
 
-	s.startAgent(func(cfg *agent.Config) {
-		cfg.ReconnectMin = 50 * time.Millisecond
-		cfg.ReconnectMax = 500 * time.Millisecond
-	})
+	s.startAgent(quickReconnect)
 	s.waitLineOnline()
 	if !o.peerLater {
 		s.newClient()
@@ -232,9 +263,33 @@ func (s *stack) addPeer() {
 	s.newClient()
 }
 
-// startAgent runs member A's agent until the test ends. configure may
-// change its config.
+// startAgent runs member A's agent until stopAgent or the end of the
+// test. configure may change its config.
 func (s *stack) startAgent(configure func(*agent.Config)) {
+	s.t.Helper()
+	s.agent, s.stopAgent = s.runAgent(s.agentCert, configure)
+}
+
+// startFallbackAgent runs member C's agent (withFallbackLine) until the
+// test ends, and returns once it serves C's line.
+func (s *stack) startFallbackAgent() *agent.Agent {
+	s.t.Helper()
+	a, _ := s.runAgent(s.fallbackCert, quickReconnect)
+	waitUntil(s.t, "C's agent serves its line", func() bool {
+		return s.gw.Server().LineOnline(fallbackLineID) && a.Stats().State == agent.StateConnected
+	})
+	return a
+}
+
+// quickReconnect has an agent retry within half a second.
+func quickReconnect(cfg *agent.Config) {
+	cfg.ReconnectMin = 50 * time.Millisecond
+	cfg.ReconnectMax = 500 * time.Millisecond
+}
+
+// runAgent runs an agent with cert until the returned stop or the end of
+// the test.
+func (s *stack) runAgent(cert tls.Certificate, configure func(*agent.Config)) (*agent.Agent, func()) {
 	t := s.t
 	t.Helper()
 	// The agent learns the gateway's QUIC endpoint and pin the way the
@@ -247,7 +302,7 @@ func (s *stack) startAgent(configure func(*agent.Config)) {
 	cfg := agent.Config{
 		GatewayAddr:   self.QUICEndpoint,
 		GatewayPin:    relayprotocol.Pin(pinBytes),
-		Certificate:   s.agentCert,
+		Certificate:   cert,
 		Resolver:      s.resolver,
 		Logger:        slog.New(slog.NewJSONHandler(s.agentLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		StatsInterval: 200 * time.Millisecond,
@@ -258,23 +313,29 @@ func (s *stack) startAgent(configure func(*agent.Config)) {
 	}
 	agent.RouteTestOrigin(&cfg, tcpDst, s.origin.tcp)
 	agent.RouteTestOrigin(&cfg, udpDst, s.origin.udp)
-	if s.agent, err = agent.New(cfg); err != nil {
+	a, err := agent.New(cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- s.agent.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("agent: %v", err)
+	go func() { done <- a.Run(ctx) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("agent: %v", err)
+				}
+			case <-time.After(waitFor):
+				t.Error("the agent did not stop")
 			}
-		case <-time.After(waitFor):
-			t.Error("the agent did not stop")
-		}
-	})
+		})
+	}
+	t.Cleanup(stop)
+	return a, stop
 }
 
 // startGateway runs the gateway from the API, as cmd/homeport-gateway
