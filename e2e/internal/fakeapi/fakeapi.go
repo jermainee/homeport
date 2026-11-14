@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,20 +44,24 @@ const (
 
 // Config is the body of GET /v1/gateway/config.
 type Config struct {
-	ETag           string   `json:"etag"`
-	TopUpHostnames []string `json:"topup_hostnames"`
-	Peers          []Peer   `json:"peers"`
-	Lines          []Line   `json:"lines"`
+	ETag            string   `json:"etag"`
+	TopUpHostnames  []string `json:"topup_hostnames"`
+	FailbackSeconds int      `json:"failback_seconds"`
+	Peers           []Peer   `json:"peers"`
+	Lines           []Line   `json:"lines"`
 }
 
-// Peer is a member device the gateway serves.
+// Peer is a member device the gateway serves. FallbackLineIDs are the
+// lines that take over while LineID is offline, best first; nil is sent as
+// an empty list.
 type Peer struct {
-	PeerID    string `json:"peer_id"`
-	MemberID  string `json:"member_id"`
-	PublicKey string `json:"public_key"`
-	IPv4      string `json:"ipv4"`
-	IPv6      string `json:"ipv6"`
-	LineID    string `json:"line_id"`
+	PeerID          string   `json:"peer_id"`
+	MemberID        string   `json:"member_id"`
+	PublicKey       string   `json:"public_key"`
+	IPv4            string   `json:"ipv4"`
+	IPv6            string   `json:"ipv6"`
+	LineID          string   `json:"line_id"`
+	FallbackLineIDs []string `json:"fallback_line_ids"`
 }
 
 // Line is a shared line whose agent may connect.
@@ -81,6 +86,7 @@ type LeaseRequest struct {
 	RequestID         string `json:"request_id"`
 	PeerID            string `json:"peer_id"`
 	SessionID         string `json:"session_id"`
+	LineID            string `json:"line_id,omitempty"`
 	SupersedesLeaseID string `json:"supersedes_lease_id,omitempty"`
 }
 
@@ -212,6 +218,7 @@ type storedAnswer struct {
 type grantedLease struct {
 	lease        Lease
 	peerID       string
+	lineID       string
 	sessionID    string
 	supersededBy string
 	returned     bool
@@ -456,7 +463,15 @@ func (a *API) getConfig(r *http.Request) (int, []byte, http.Header) {
 	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.TrimPrefix(inm, "W/") == a.config.ETag {
 		return http.StatusNotModified, nil, h
 	}
-	b, _ := json.Marshal(a.config)
+	cfg := a.config
+	cfg.Peers = make([]Peer, len(a.config.Peers))
+	for i, p := range a.config.Peers {
+		if p.FallbackLineIDs == nil {
+			p.FallbackLineIDs = []string{}
+		}
+		cfg.Peers[i] = p
+	}
+	b, _ := json.Marshal(cfg)
 	return http.StatusOK, b, h
 }
 
@@ -477,15 +492,22 @@ func (a *API) createLease(body []byte) (int, []byte, error) {
 			return 0, nil, err
 		}
 	}
+	if req.LineID != "" {
+		if err := match("line_id", req.LineID, id); err != nil {
+			return 0, nil, err
+		}
+	}
 	if stored, ok := a.answers[req.RequestID]; ok {
 		if !bytes.Equal(stored.body, body) {
 			return 0, nil, &requestError{status: http.StatusConflict, code: "idempotency_conflict", msg: "request_id reused with another body"}
 		}
 		return stored.status, stored.answer, nil
 	}
-	if !a.knownPeer(req.PeerID) {
+	peer, ok := a.peer(req.PeerID)
+	if !ok {
 		return 0, nil, invalid("lease for unknown peer %s", req.PeerID)
 	}
+	lineID := req.LineID
 	if old := req.SupersedesLeaseID; old != "" {
 		prev, ok := a.granted[old]
 		if !ok {
@@ -494,13 +516,27 @@ func (a *API) createLease(body []byte) (int, []byte, error) {
 		if prev.sessionID != req.SessionID || prev.peerID != req.PeerID {
 			return 0, nil, invalid("renewal of lease %s from another session", old)
 		}
+		if lineID == "" {
+			lineID = prev.lineID
+		}
+		if lineID != prev.lineID {
+			return 0, nil, invalid("renewal of lease %s on line %s, not its line %s", old, lineID, prev.lineID)
+		}
 		if next := prev.supersededBy; next != "" {
 			b, _ := json.Marshal(a.granted[next].lease)
 			a.answers[req.RequestID] = storedAnswer{body: body, status: http.StatusOK, answer: b}
 			return http.StatusOK, b, nil
 		}
 	}
+	if lineID == "" {
+		lineID = peer.LineID
+	}
 	ans := a.leases(len(a.leaseReqs), req)
+	if !slices.Contains(append([]string{peer.LineID}, peer.FallbackLineIDs...), lineID) {
+		// The API refuses a line that is not (or no longer) one of the
+		// peer's, as after a config change the gateway has not fetched yet.
+		ans = Inactive()
+	}
 	a.leaseReqs = append(a.leaseReqs, req)
 	var status int
 	var answer []byte
@@ -517,7 +553,7 @@ func (a *API) createLease(body []byte) (int, []byte, error) {
 			ExpiresAt:    time.Now().Add(ttl).UTC().Format(time.RFC3339),
 			GraceSeconds: ans.GraceSeconds,
 		}
-		a.granted[l.LeaseID] = &grantedLease{lease: l, peerID: req.PeerID, sessionID: req.SessionID}
+		a.granted[l.LeaseID] = &grantedLease{lease: l, peerID: req.PeerID, lineID: lineID, sessionID: req.SessionID}
 		if old := req.SupersedesLeaseID; old != "" {
 			a.granted[old].supersededBy = l.LeaseID
 		}
@@ -607,7 +643,7 @@ func (a *API) applyUsage(e UsageEvent) string {
 	if !ok {
 		return "unknown_lease"
 	}
-	if l.peerID != e.PeerID || l.sessionID != e.SessionID {
+	if l.peerID != e.PeerID || l.sessionID != e.SessionID || l.lineID != e.LineID {
 		return "lease_mismatch"
 	}
 	s := a.sessions[e.SessionID]
@@ -717,12 +753,17 @@ func (a *API) reportLineEvents(body []byte, call *Call) (int, []byte, error) {
 }
 
 func (a *API) knownPeer(peerID string) bool {
+	_, ok := a.peer(peerID)
+	return ok
+}
+
+func (a *API) peer(peerID string) (Peer, bool) {
 	for _, p := range a.config.Peers {
 		if p.PeerID == peerID {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return Peer{}, false
 }
 
 func (a *API) knownLine(lineID string) bool {
