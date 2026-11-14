@@ -155,6 +155,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("GET /v1/lines/available", s.listAvailableLines)
 	mux.HandleFunc("POST /v1/wireguard/peers", s.createPeer)
 	mux.HandleFunc("GET /v1/wireguard/peers", s.listPeers)
+	mux.HandleFunc("PATCH /v1/wireguard/peers/{id}", s.updatePeer)
 	mux.HandleFunc("DELETE /v1/wireguard/peers/{id}", s.deletePeer)
 	s.Server = httptest.NewServer(s.injectFailures(mux))
 	t.Cleanup(s.Close)

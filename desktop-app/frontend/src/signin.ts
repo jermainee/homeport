@@ -46,6 +46,8 @@ export const ERROR_CODES = [
   "line_unavailable",
   "line_full",
   "line_not_allowed",
+  "line_on_other_gateway",
+  "device_gone",
   "config_gone",
   "invalid_name",
   "unexpected",

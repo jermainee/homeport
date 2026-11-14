@@ -43,7 +43,25 @@ export interface Credits {
 export interface Device {
     "peerId": string;
     "name": string;
+
+    /**
+     * LineID is the line the member chose. The device exits through it
+     * whenever it is online.
+     */
     "lineId": string;
+
+    /**
+     * Failover is where the device goes while its line is offline:
+     * FailoverCountry, FailoverCity or FailoverOff.
+     */
+    "failover": string;
+
+    /**
+     * ExitLine is the line the device's current session exits through:
+     * LineID, or a backup line while LineID is offline. Nil while the
+     * device has no session.
+     */
+    "exitLine": ExitLine | null;
     "ipv4": string;
     "ipv6": string;
     "createdAt": string;
@@ -122,6 +140,17 @@ export enum ErrorCode {
     ErrLineNotAllowed = "line_not_allowed",
 
     /**
+     * ErrLineOnOtherGateway: the line is served by another gateway than the
+     * one the device's config names, so the device can't move to it.
+     */
+    ErrLineOnOtherGateway = "line_on_other_gateway",
+
+    /**
+     * ErrDeviceGone: the device was removed, say from another computer.
+     */
+    ErrDeviceGone = "device_gone",
+
+    /**
      * ErrConfigGone: the device's config was shown once and is gone; the
      * private key in it was never stored.
      */
@@ -137,6 +166,21 @@ export enum ErrorCode {
      */
     ErrUnexpected = "unexpected",
 };
+
+/**
+ * ExitLine is the line a device's session exits through. Country (ISO
+ * 3166-1 alpha-2) and City are empty when the API doesn't know them.
+ */
+export interface ExitLine {
+    "lineId": string;
+    "country": string;
+    "city": string;
+
+    /**
+     * when the session on this line started
+     */
+    "since": string;
+}
 
 /**
  * IdentityCheck is the answer to Start and Poll.
