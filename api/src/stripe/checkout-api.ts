@@ -7,10 +7,12 @@ export interface CheckoutSessionInput {
   /** pricing.ts CREDIT_PACK_ID. */
   pack: string;
   credits: number;
-  /** Net price in integer cents; VAT is added on top. */
+  /** Net price in integer cents; Stripe Tax adds tax on top. */
   netCents: number;
   /** ISO 4217, lowercase. */
   currency: string;
+  /** Stripe product tax code (pricing.ts CREDIT_PACK_TAX_CODE). */
+  taxCode: string;
   idempotencyKey: string;
   /** Where Stripe sends the member after paying, and after giving up. */
   successUrl: string;
@@ -58,10 +60,15 @@ export function stripeCheckoutApi(env: Env, fetcher: typeof fetch = fetch): Stri
                 product_data: {
                   name: "Homeport credits",
                   description: `${input.credits.toLocaleString("en-US")} credits`,
+                  tax_code: input.taxCode,
                 },
               },
             },
           ],
+          // Stripe Tax adds the tax for the buyer's location. Checkout asks
+          // for the address it needs, so no forced billing address. It collects
+          // nothing where the account has no active tax registration.
+          automatic_tax: { enabled: true },
           client_reference_id: input.memberId,
           metadata,
           payment_intent_data: { metadata },

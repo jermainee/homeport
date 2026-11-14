@@ -29,10 +29,18 @@ export const CREDIT_PACK_ID = "credits_1000000";
 /** Credits in one credit pack. */
 export const CREDIT_PACK_CREDITS = 1_000_000;
 
-/** Net price of one credit pack in euro cents (€40). VAT is added at checkout. */
+/** Net price of one credit pack in euro cents (€40). Stripe Tax adds tax at checkout. */
 export const CREDIT_PACK_NET_CENTS = 4_000;
 
 export const CREDIT_PACK_CURRENCY = "eur";
+
+/**
+ * Stripe product tax code for credit packs: General - Electronically Supplied
+ * Services (https://docs.stripe.com/tax/tax-codes). Chosen by the owner on
+ * 2026-11-14; confirm with a tax advisor before selling in the US, where a more
+ * specific code may apply.
+ */
+export const CREDIT_PACK_TAX_CODE = "txcd_10000000";
 
 /**
  * Checkout Sessions one member may open per CHECKOUT_SESSION_WINDOW_MS.

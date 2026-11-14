@@ -9,6 +9,7 @@ import {
   CREDIT_PACK_CURRENCY,
   CREDIT_PACK_ID,
   CREDIT_PACK_NET_CENTS,
+  CREDIT_PACK_TAX_CODE,
   MAX_CHECKOUT_SESSIONS_PER_WINDOW,
 } from "../pricing";
 import type { StripeCheckoutApi } from "../stripe/checkout-api";
@@ -46,6 +47,7 @@ export function checkoutApi(stripeCheckout: (env: Env) => StripeCheckoutApi) {
       credits: CREDIT_PACK_CREDITS,
       netCents: CREDIT_PACK_NET_CENTS,
       currency: CREDIT_PACK_CURRENCY,
+      taxCode: CREDIT_PACK_TAX_CODE,
       idempotencyKey: `checkout_session:${requestId}`,
       successUrl: new URL("/checkout/done", baseUrl).href,
       cancelUrl: new URL("/checkout/canceled", baseUrl).href,
