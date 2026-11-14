@@ -18,6 +18,20 @@ export function ownerIsLinkedSql(member: string, owner: string): string {
 }
 
 /**
+ * SQL query of the pairs (member_id, linked_id) that ownerIsLinkedSql calls
+ * linked, for each member the SQL query `members` returns: member_links rows
+ * in either direction, and members with sessions from the same app install.
+ * The two definitions must agree; this one serves many members at once.
+ */
+export function linkedPairsSql(members: string): string {
+  return `SELECT ml.member_id, ml.linked_member_id AS linked_id FROM member_links ml WHERE ml.member_id IN (${members})
+    UNION SELECT ml.linked_member_id, ml.member_id FROM member_links ml WHERE ml.linked_member_id IN (${members})
+    UNION SELECT mine.member_id, theirs.member_id FROM auth_sessions mine
+            JOIN auth_sessions theirs ON theirs.install_id = mine.install_id
+           WHERE mine.install_id IS NOT NULL AND mine.member_id IN (${members}) AND theirs.member_id <> mine.member_id`;
+}
+
+/**
  * SQL condition: the line `line` has room for the member `member`, who may
  * already use it. Both arguments are SQL expressions.
  */

@@ -2,8 +2,6 @@ package fakeapi_test
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,9 +13,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jermainee/homeport/e2e/internal/fakeapi"
+	"github.com/jermainee/homeport/e2e/internal/memberapi"
 )
 
 const token = "hpgw_e2e.secret" // #nosec G101 -- the fake API's test token
@@ -334,25 +332,11 @@ const (
 	exampleFallback = "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57"
 )
 
-// newRequestID returns a UUIDv7 for request, session and event IDs.
-func newRequestID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
-	}
-	var ms [8]byte
-	binary.BigEndian.PutUint64(ms[:], uint64(time.Now().UnixMilli())) // #nosec G115 -- a time after 1970
-	copy(b[:6], ms[2:])
-	b[6] = b[6]&0x0f | 0x70
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
 // leaseOn asks for a first lease for peer A on lineID and returns the
 // answer's status and lease ID.
 func leaseOn(t *testing.T, srv *httptest.Server, sessionID, lineID string) (int, string) {
 	t.Helper()
-	req := map[string]any{"request_id": newRequestID(), "peer_id": examplePeerA, "session_id": sessionID}
+	req := map[string]any{"request_id": memberapi.NewRequestID(), "peer_id": examplePeerA, "session_id": sessionID}
 	if lineID != "" {
 		req["line_id"] = lineID
 	}
@@ -368,7 +352,7 @@ func eventOn(t *testing.T, sessionID, lineID, leaseID string) []byte {
 	t.Helper()
 	batch := decode(t, example(t, "usage-batch.json")).(map[string]any)
 	ev := batch["events"].([]any)[0].(map[string]any)
-	ev["event_id"], ev["session_id"], ev["peer_id"] = newRequestID(), sessionID, examplePeerA
+	ev["event_id"], ev["session_id"], ev["peer_id"] = memberapi.NewRequestID(), sessionID, examplePeerA
 	ev["line_id"], ev["lease_id"] = lineID, leaseID
 	batch["events"] = []any{ev}
 	return mustJSON(t, batch)
@@ -376,7 +360,7 @@ func eventOn(t *testing.T, sessionID, lineID, leaseID string) []byte {
 
 func TestALeaseOnAFallbackLineCountsUsageOnThatLine(t *testing.T) {
 	api, srv := newAPI(t)
-	session := newRequestID()
+	session := memberapi.NewRequestID()
 	status, leaseID := leaseOn(t, srv, session, exampleFallback)
 	if status != http.StatusCreated {
 		t.Fatalf("lease on the fallback line answered %d, want 201", status)
@@ -395,7 +379,7 @@ func TestALeaseOnAFallbackLineCountsUsageOnThatLine(t *testing.T) {
 
 func TestUsageOnAnotherLineThanItsLeaseIsAViolation(t *testing.T) {
 	api, srv := newAPI(t)
-	session := newRequestID()
+	session := memberapi.NewRequestID()
 	_, leaseID := leaseOn(t, srv, session, exampleFallback)
 
 	_, _, body := call(t, srv, http.MethodPost, "/v1/gateway/usage", eventOn(t, session, examplePrimary, leaseID))
@@ -412,7 +396,7 @@ func TestUsageOnAnotherLineThanItsLeaseIsAViolation(t *testing.T) {
 func TestALeaseOnALineThatIsNotThePeersIsRefused(t *testing.T) {
 	api, srv := newAPI(t)
 
-	status, _ := leaseOn(t, srv, newRequestID(), "01a1c4af-0000-7000-8000-00000000abcd")
+	status, _ := leaseOn(t, srv, memberapi.NewRequestID(), "01a1c4af-0000-7000-8000-00000000abcd")
 
 	if status != http.StatusForbidden {
 		t.Errorf("lease on a line that is not the peer's answered %d, want 403", status)
@@ -422,9 +406,9 @@ func TestALeaseOnALineThatIsNotThePeersIsRefused(t *testing.T) {
 
 func TestARenewalOnAnotherLineIsAViolation(t *testing.T) {
 	api, srv := newAPI(t)
-	session := newRequestID()
+	session := memberapi.NewRequestID()
 	_, leaseID := leaseOn(t, srv, session, exampleFallback)
-	req := map[string]any{"request_id": newRequestID(), "peer_id": examplePeerA, "session_id": session, "line_id": examplePrimary, "supersedes_lease_id": leaseID}
+	req := map[string]any{"request_id": memberapi.NewRequestID(), "peer_id": examplePeerA, "session_id": session, "line_id": examplePrimary, "supersedes_lease_id": leaseID}
 
 	if status, _, _ := call(t, srv, http.MethodPost, "/v1/gateway/leases", mustJSON(t, req)); status != http.StatusBadRequest {
 		t.Errorf("renewal on another line answered %d, want 400", status)

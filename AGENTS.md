@@ -58,7 +58,6 @@ These are the current values. Keep them in one pricing module, and have all othe
 - **Ledger:** double-entry and append-only. A correction is made with a reversing entry. Euros appear only at purchase and cash-out, in integer cents.
 - **Purchased vs. earned credits:** purchased credits are spent first and are never paid out. Earned credits can be cashed out after a 30-day holdback.
 - **Metering:** the gateway is the meter of record and counts usage per WireGuard peer or SOCKS5 login. That way, a stock WireGuard client on a travel router is metered the same as the app.
-- **Failover:** a WireGuard device exits through the line its member chose whenever that line is online. While it is offline, the gateway moves the device to another line on the same gateway: the same city first, then the same country. Each device has a `failover` setting: `country` (the default), `city` or `off`. The device moves back once its own line has been online for 5 minutes. Fallback lines pass the same checks as a chosen line (no self-dealing, room for the member), the owner of the line a session exits through earns from it, and the device's WireGuard config never changes.
 - **No self-dealing:** a member's traffic always exits through someone else's line. It never exits through their own line, or through a line linked to them by household, device, card or Connect account.
 - **Logging:** logs hold only session metadata (member, line, start, end, bytes). Destinations and content are never logged.
 

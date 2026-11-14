@@ -118,9 +118,14 @@ func TestLinesCanSwapAgentPins(t *testing.T) {
 	}
 	f.api.setConfig(func(cfg map[string]any) {
 		cfg["etag"] = `"cfg-2"`
-		lines := cfg["lines"].([]any)
-		lines[0].(map[string]any)["device_spki_sha256"] = otherPin
-		lines[1].(map[string]any)["device_spki_sha256"] = linePin
+		for _, l := range cfg["lines"].([]any) {
+			switch line := l.(map[string]any); line["line_id"] {
+			case lineID:
+				line["device_spki_sha256"] = otherPin
+			case secondLine:
+				line["device_spki_sha256"] = linePin
+			}
+		}
 	})
 
 	if err := f.ctl.SyncConfig(t.Context()); err != nil {

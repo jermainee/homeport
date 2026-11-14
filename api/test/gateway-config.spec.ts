@@ -201,8 +201,11 @@ describe("GET /v1/gateway/config, fallback lines", () => {
   it.each([
     ["the member's own line", "own"],
     ["a line whose owner is linked to the member", "linked"],
+    ["a line whose owner is linked to the member the other way round", "linked back"],
+    ["a line whose owner signed in from the member's app install", "same install"],
     ["a line whose sharing is off", "not sharing"],
     ["a line whose owner is suspended", "suspended owner"],
+    ["a line whose owner is no longer verified", "unverified owner"],
     ["a line already used by three other members", "full"],
   ])("never offers %s", async (_case, kind) => {
     const { gatewayId, token } = await announcedGateway();
@@ -218,6 +221,17 @@ describe("GET /v1/gateway/config, fallback lines", () => {
       }
       case "linked":
         await link(candidate.owner.memberId, user.memberId, "card");
+        break;
+      case "linked back":
+        await link(user.memberId, candidate.owner.memberId, "household");
+        break;
+      case "same install":
+        await env.DB.prepare(`UPDATE auth_sessions SET install_id = ? WHERE member_id IN (?, ?)`)
+          .bind(crypto.randomUUID(), user.memberId, candidate.owner.memberId)
+          .run();
+        break;
+      case "unverified owner":
+        await env.DB.prepare(`UPDATE members SET identity_status = 'requires_input' WHERE id = ?`).bind(candidate.owner.memberId).run();
         break;
       case "not sharing":
         await send("PATCH", `/v1/lines/${candidate.lineId}`, candidate.owner.sessionToken, { sharing_enabled: false });

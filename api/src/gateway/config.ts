@@ -3,7 +3,8 @@ import { HOSTNAME } from "../formats";
 import { httpOrigin } from "../http";
 import { FAILBACK_SECONDS } from "../pricing";
 import { tunnelIpv4, tunnelIpv6 } from "../wireguard/config";
-import { FALLBACK_LINE_SQL, type FallbackCandidate, fallbackLines } from "../wireguard/failover";
+import { linkedPairsSql } from "../lines/rules";
+import { type FailoverLine, type FailoverPeer, fallbackLines } from "../wireguard/failover";
 import { PEER_JOINS, SERVED_LINE_SQL, SERVED_PEER_SQL } from "./served";
 
 /** The contract's GatewayConfig. */
@@ -31,36 +32,55 @@ export interface GatewayConfig {
  * of the rest, so it changes exactly when the config does.
  */
 export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string): Promise<GatewayConfig> {
-  const [peers, lines, fallbacks] = await db.batch([
+  const gatewayMembers = `SELECT u.member_id FROM wireguard_peers u JOIN lines ul ON ul.id = u.line_id
+                           WHERE ul.gateway_id = ?1 AND u.deleted_at IS NULL`;
+  const [peers, lines, users, links] = await db.batch([
     db
       .prepare(
-        `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id
+        `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id, p.failover, l.country, l.city
            FROM ${PEER_JOINS}
-          WHERE l.gateway_id = ? AND ${SERVED_PEER_SQL}
+          WHERE l.gateway_id = ?1 AND ${SERVED_PEER_SQL}
           ORDER BY p.id`,
       )
       .bind(gatewayId),
     db
       .prepare(
-        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256
+        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256, l.country, l.city
            FROM lines l JOIN members o ON o.id = l.member_id JOIN devices d ON d.id = l.device_id
-          WHERE l.gateway_id = ? AND ${SERVED_LINE_SQL}
+          WHERE l.gateway_id = ?1 AND ${SERVED_LINE_SQL}
           ORDER BY l.id`,
       )
       .bind(gatewayId),
+    // Each line's users, and who the gateway's members are linked to: what
+    // fallbackLines needs, read once instead of per peer and line.
     db
       .prepare(
-        `SELECT p.id AS peer_id, p.member_id, f.id AS line_id, (f.city IS NOT NULL AND f.city = l.city) AS same_city
-           FROM ${PEER_JOINS} JOIN lines f JOIN members fo ON fo.id = f.member_id
-          WHERE l.gateway_id = ? AND ${SERVED_PEER_SQL} AND ${FALLBACK_LINE_SQL}`,
+        `SELECT DISTINCT u.line_id, u.member_id FROM wireguard_peers u JOIN lines ul ON ul.id = u.line_id
+          WHERE ul.gateway_id = ?1 AND u.deleted_at IS NULL`,
       )
       .bind(gatewayId),
+    db.prepare(linkedPairsSql(gatewayMembers)).bind(gatewayId),
   ]);
-  const fallbackIds = fallbackLines((fallbacks?.results ?? []) as FallbackCandidate[]);
+  const peerRows = (peers?.results ?? []) as PeerRow[];
+  const lineRows = (lines?.results ?? []) as LineRow[];
+  const lineUsers = new Map<string, Set<string>>();
+  for (const { line_id, member_id } of (users?.results ?? []) as { line_id: string; member_id: string }[]) {
+    const set = lineUsers.get(line_id) ?? new Set<string>();
+    set.add(member_id);
+    lineUsers.set(line_id, set);
+  }
+  const linkedPairs = new Set(
+    ((links?.results ?? []) as { member_id: string; linked_id: string }[]).map((row) => `${row.member_id}\n${row.linked_id}`),
+  );
+  const fallbackIds = fallbackLines(peerRows, lineRows, {
+    users: lineUsers,
+    linked: (memberId, otherId) => linkedPairs.has(`${memberId}\n${otherId}`),
+  });
+
   const content = {
     topup_hostnames: topupHostnames(env),
     failback_seconds: FAILBACK_SECONDS,
-    peers: ((peers?.results ?? []) as PeerRow[]).map((peer) => ({
+    peers: peerRows.map((peer) => ({
       peer_id: peer.peer_id,
       member_id: peer.member_id,
       public_key: peer.public_key,
@@ -69,18 +89,23 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       line_id: peer.line_id,
       fallback_line_ids: fallbackIds.get(peer.peer_id) ?? [],
     })),
-    lines: (lines?.results ?? []) as GatewayConfig["lines"],
+    lines: lineRows.map((line) => ({
+      line_id: line.line_id,
+      owner_member_id: line.owner_member_id,
+      device_spki_sha256: line.device_spki_sha256,
+    })),
   };
   const etag = `"cfg-${(await sha256Hex(JSON.stringify(content))).slice(0, 32)}"`;
   return { etag, ...content };
 }
 
-interface PeerRow {
-  peer_id: string;
-  member_id: string;
+interface PeerRow extends FailoverPeer {
   public_key: string;
   address_index: number;
-  line_id: string;
+}
+
+interface LineRow extends FailoverLine {
+  device_spki_sha256: string;
 }
 
 /**

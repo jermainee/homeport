@@ -1,10 +1,10 @@
 import { Hono } from "hono";
-import { every } from "hono/combine";
 import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
 import { timestamp } from "../formats";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
-import { requireVerifiedIdentity } from "../identity/require-verified";
+import { requireVerifiedMember } from "../identity/require-verified";
+import { servedLineSql } from "../gateway/served";
 import { KEY32, isName } from "../keys";
 import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
 import { MAX_PEERS_PER_MEMBER } from "../pricing";
@@ -61,6 +61,32 @@ function peersWithExitSql(where: string): string {
            WHERE ${where}`;
 }
 
+/** A line a member may pick for a peer, with its gateway. */
+interface UsableLine {
+  gateway_id: string;
+  wg_public_key: string;
+  wg_endpoint: string;
+  linked: number;
+}
+
+/**
+ * The line `lineId` if a gateway serves it (sharing on, owner active and
+ * verified), with its gateway and whether its owner is the member or linked
+ * to them. A line no gateway serves is offered to no one.
+ */
+function usableLine(db: D1Database, lineId: string, memberId: string): Promise<UsableLine | null> {
+  return db
+    .prepare(
+      `SELECT l.gateway_id, g.wg_public_key, g.wg_endpoint, ${ownerIsLinkedSql("?2", "l.member_id")} AS linked
+         FROM lines l
+         JOIN gateways g ON g.id = l.gateway_id
+         JOIN members owner ON owner.id = l.member_id
+        WHERE l.id = ?1 AND ${servedLineSql("l", "owner")}`,
+    )
+    .bind(lineId, memberId)
+    .first<UsableLine>();
+}
+
 function peerBody(peer: PeerRow) {
   return {
     peer_id: peer.id,
@@ -95,17 +121,7 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
 
   const db = c.env.DB;
   const memberId = c.get("member").id;
-  const line = await db
-    .prepare(
-      `SELECT l.member_id, g.wg_public_key, g.wg_endpoint, ${ownerIsLinkedSql("?2", "l.member_id")} AS linked
-         FROM lines l
-         JOIN gateways g ON g.id = l.gateway_id
-         JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
-        WHERE l.id = ?1 AND l.sharing_enabled = 1`,
-    )
-    .bind(lineId, memberId)
-    .first<{ member_id: string; wg_public_key: string; wg_endpoint: string; linked: number }>();
-  // A line that is not sharing, or whose owner is suspended, is offered to no one.
+  const line = await usableLine(db, lineId, memberId);
   if (!line) return apiError(c, 404, "not_found");
   // No self-dealing: never the member's own line, or a linked member's.
   if (line.linked) return apiError(c, 403, "line_not_allowed");
@@ -182,7 +198,7 @@ wireguardApi.get("/peers", requireSession, async (c) => {
  * a peer exits through is chosen on the gateway. A new line gets the
  * checks of POST, and must be on the gateway the .conf names.
  */
-wireguardApi.patch("/peers/:id", every(requireSession, requireVerifiedIdentity), async (c) => {
+wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
   const body = await readJsonObject(c.req.raw);
   if (!body || Object.keys(body).length === 0 || !hasOnlyFields(body, ["line_id", "failover"])) {
     return invalidRequest(c, "send line_id, failover or both");
@@ -203,35 +219,30 @@ wireguardApi.patch("/peers/:id", every(requireSession, requireVerifiedIdentity),
     .first<{ line_id: string; gateway_id: string }>();
   if (!current) return apiError(c, 404, "not_found");
 
-  const moving = lineId !== undefined && lineId !== current.line_id;
-  if (moving) {
-    const line = await db
-      .prepare(
-        `SELECT l.gateway_id, ${ownerIsLinkedSql("?2", "l.member_id")} AS linked
-           FROM lines l JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
-          WHERE l.id = ?1 AND l.sharing_enabled = 1`,
-      )
-      .bind(lineId, memberId)
-      .first<{ gateway_id: string; linked: number }>();
+  const newLine = lineId !== undefined && lineId !== current.line_id ? lineId : null;
+  if (newLine !== null) {
+    const line = await usableLine(db, newLine, memberId);
     if (!line) return apiError(c, 404, "not_found");
     if (line.linked) return apiError(c, 403, "line_not_allowed");
     if (line.gateway_id !== current.gateway_id) return apiError(c, 409, "line_on_other_gateway");
   }
 
-  // The new line's room is checked in the update itself, so two members
-  // moving at once never overfill it.
+  // Only what the request names changes, so concurrent changes to the other
+  // field survive. The new line's room is checked in the update itself, so
+  // two members moving at once never overfill it.
   const changed = await db
     .prepare(
-      `UPDATE wireguard_peers SET line_id = ?1, failover = COALESCE(?2, failover)
+      `UPDATE wireguard_peers SET line_id = COALESCE(?1, line_id), failover = COALESCE(?2, failover)
         WHERE id = ?3 AND member_id = ?4 AND deleted_at IS NULL
-          AND (?1 = line_id OR ${lineHasRoomSql("?1", "?4")})
+          AND (?1 IS NULL OR ?1 = line_id OR ${lineHasRoomSql("?1", "?4")})
         RETURNING id`,
     )
-    .bind(moving ? lineId : current.line_id, failover ?? null, peerId, memberId)
+    .bind(newLine, failover ?? null, peerId, memberId)
     .first();
   if (!changed) {
-    const room = await db.prepare(`SELECT ${lineHasRoomSql("?1", "?2")} AS room`).bind(lineId, memberId).first<{ room: number }>();
-    return moving && !room?.room ? apiError(c, 409, "line_full") : apiError(c, 404, "not_found");
+    if (newLine === null) return apiError(c, 404, "not_found");
+    const room = await db.prepare(`SELECT ${lineHasRoomSql("?1", "?2")} AS room`).bind(newLine, memberId).first<{ room: number }>();
+    return room?.room ? apiError(c, 404, "not_found") : apiError(c, 409, "line_full");
   }
 
   const peer = await db

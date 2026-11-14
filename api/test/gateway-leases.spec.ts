@@ -316,6 +316,28 @@ describe("POST /v1/gateway/leases on a fallback line", () => {
     expect(await expectContract("POST", "/v1/gateway/leases", response)).toMatchObject({ error: "invalid_request" });
   });
 
+  it("renews a lease on a fallback line that filled up since, so the session goes on", async () => {
+    const { gateway, fallback, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+    for (let i = 0; i < 3; i++) await peerOn(fallback.lineId);
+
+    const renewal = await requestLease(gateway.token, { peerId: peer.peer_id, sessionId: lease.sessionId, supersedes: lease.lease_id });
+    const fresh = await requestLease(gateway.token, { peerId: peer.peer_id, sessionId: uuidv7(), lineId: fallback.lineId });
+
+    expect(renewal.status).toBe(201);
+    expect(fresh.status).toBe(403);
+  });
+
+  it("refuses to renew a lease on a fallback line whose owner became linked to the member", async () => {
+    const { gateway, fallback, user, peer } = await failoverPeer();
+    const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);
+    await link(user.memberId, fallback.owner.memberId, "household");
+
+    const renewal = await requestLease(gateway.token, { peerId: peer.peer_id, sessionId: lease.sessionId, supersedes: lease.lease_id });
+
+    expect(renewal.status).toBe(403);
+  });
+
   it("renews a lease on a fallback line, with or without naming the line again", async () => {
     const { gateway, fallback, peer } = await failoverPeer();
     const lease = await grantedLease(gateway.token, peer.peer_id, uuidv7(), fallback.lineId);

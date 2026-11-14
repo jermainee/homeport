@@ -4,7 +4,7 @@ import { apiError, hasOnlyFields, invalidRequest } from "../http";
 import type { IdempotentVariables } from "../idempotency";
 import { releaseReservation, reserveCredits } from "../ledger";
 import { LEASE_CREDITS, LEASE_GRACE_SECONDS, LEASE_TTL_SECONDS, leaseTerms } from "../pricing";
-import { FALLBACK_LINE_SQL } from "../wireguard/failover";
+import { FALLBACK_LINE_SQL, TAKEOVER_LINE_SQL } from "../wireguard/failover";
 import type { GatewayVariables } from "./auth";
 import { PEER_JOINS, SERVED_PEER_SQL } from "./served";
 
@@ -42,8 +42,11 @@ const LEASE_COLUMNS = `id, peer_id, line_id, session_id, granted_bytes, renew_at
  * - The peer must be one this gateway serves (see SERVED_PEER_SQL), or 403.
  * - The session's line (line_id, else the superseded lease's line, else the
  *   peer's line) must be the peer's line or one that may take it over
- *   (FALLBACK_LINE_SQL), or 403. The lease names that line, and usage on
- *   it pays that line's owner.
+ *   (FALLBACK_LINE_SQL), or 403. A renewal needs only the hard rules
+ *   (TAKEOVER_LINE_SQL): a session already on a fallback line goes on even
+ *   if the line has filled up or the member narrowed failover since; the
+ *   gateway moves it at its next config fetch. The lease names that line,
+ *   and usage on it pays that line's owner.
  * - A renewal names the session's current lease. A lease is superseded
  *   once: renewing it again returns its successor with 200.
  * - A member with fewer than LEASE_CREDITS available gets a smaller last
@@ -76,7 +79,8 @@ export async function createLease(c: GatewayContext): Promise<Response> {
         `SELECT p.member_id, e.line_id,
                 (e.line_id = p.line_id
                  OR EXISTS (SELECT 1 FROM lines f JOIN members fo ON fo.id = f.member_id
-                             WHERE f.id = e.line_id AND ${FALLBACK_LINE_SQL})) AS line_allowed
+                             WHERE f.id = e.line_id
+                               AND ${supersedes === undefined ? FALLBACK_LINE_SQL : TAKEOVER_LINE_SQL})) AS line_allowed
            FROM ${PEER_JOINS}
            JOIN (SELECT COALESCE(?3, (SELECT line_id FROM leases WHERE id = ?4 AND gateway_id = ?2),
                                  (SELECT line_id FROM wireguard_peers WHERE id = ?1)) AS line_id) e

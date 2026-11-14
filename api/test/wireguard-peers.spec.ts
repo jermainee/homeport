@@ -396,6 +396,20 @@ describe("PATCH /v1/wireguard/peers/{peer_id}", () => {
     expect(peers).toEqual([peer]);
   });
 
+  it("returns 404 for a line whose owner is no longer verified, which no gateway serves", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const lapsed = await verifiedMember();
+    const lapsedLine = await sharingLine(lapsed.sessionToken, BERLIN);
+    await env.DB.prepare(`UPDATE members SET identity_status = 'requires_input' WHERE id = ?`).bind(lapsed.memberId).run();
+    const user = await verifiedMember();
+    const { peer } = await createdPeer(user.sessionToken, lineId);
+
+    const moved = await update(user.sessionToken, peer.peer_id, { line_id: lapsedLine });
+    const created = await createPeer(user.sessionToken, lapsedLine);
+
+    expect([moved.status, created.status]).toEqual([404, 404]);
+  });
+
   it("returns 403 identity_required once the member is no longer verified", async () => {
     const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
     const user = await verifiedMember();

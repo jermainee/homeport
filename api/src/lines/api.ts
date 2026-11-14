@@ -1,9 +1,8 @@
 import { Hono } from "hono";
-import { every } from "hono/combine";
-import { requireSession, type SessionVariables } from "../auth/middleware";
+import type { SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
-import { requireVerifiedIdentity } from "../identity/require-verified";
+import { requireVerifiedMember } from "../identity/require-verified";
 import { lineHasRoomSql, ownerIsLinkedSql } from "./rules";
 
 /**
@@ -11,8 +10,6 @@ import { lineHasRoomSql, ownerIsLinkedSql } from "./rules";
  * createLine, updateLine, listAvailableLines). All need a verified identity.
  */
 export const linesApi = new Hono<{ Bindings: Env; Variables: SessionVariables & IdempotentVariables }>();
-
-const verified = every(requireSession, requireVerifiedIdentity);
 
 interface LineWithGateway {
   id: string;
@@ -86,7 +83,7 @@ linesApi.post("/", verifiedMemberIdempotent, async (c) => {
   );
 });
 
-linesApi.get("/available", verified, async (c) => {
+linesApi.get("/available", requireVerifiedMember, async (c) => {
   // A line needs a known country to be listed (the contract requires one)
   // and an owner who is not suspended.
   const { results } = await c.env.DB.prepare(
@@ -111,7 +108,7 @@ linesApi.get("/available", verified, async (c) => {
   });
 });
 
-linesApi.patch("/:id", verified, async (c) => {
+linesApi.patch("/:id", requireVerifiedMember, async (c) => {
   const body = await readJsonObject(c.req.raw);
   const sharing = body?.["sharing_enabled"];
   if (!body || !hasOnlyFields(body, ["sharing_enabled"]) || typeof sharing !== "boolean") {
