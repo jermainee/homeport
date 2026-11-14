@@ -68,11 +68,20 @@ func New(app *application.App, window application.Window, share *services.ShareS
 	})
 }
 
-// Show brings the window to the front.
+// Show brings the window to the front. Menu clicks and app events arrive on
+// their own goroutines, and app.Show calls AppKit directly, which aborts the
+// app off the main thread; so it all runs there.
 func Show(app *application.App, window application.Window) {
-	app.Show()
-	window.Show()
-	window.Focus()
+	show(application.InvokeSync, app, window)
+}
+
+// show is Show with the main-thread dispatch passed in, for the tests.
+func show(onMainThread func(func()), app interface{ Show() }, window application.Window) {
+	onMainThread(func() {
+		app.Show()
+		window.Show()
+		window.Focus()
+	})
 }
 
 func switchLabel() string {
