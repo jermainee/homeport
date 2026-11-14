@@ -244,13 +244,20 @@ func (s *ShareService) SignOut(ctx context.Context) {
 	s.publish()
 }
 
-// SignIn shows the newly signed-in member's count for today.
+// SignIn shows the newly signed-in member's count for today. A signed_out
+// error from turning Share on before the sign-in is about the missing
+// session, so it goes: the window reads it as the session being gone.
 //
 //wails:ignore
 func (s *ShareService) SignIn() {
-	if _, _, ok := s.signedInShare(); ok {
-		s.publish()
+	// The day count may fail to load; the stale error goes anyway.
+	s.signedInShare()
+	s.mu.Lock()
+	if !s.on && s.err == ErrSignedOut {
+		s.err = ""
 	}
+	s.mu.Unlock()
+	s.publish()
 }
 
 // signedInShare returns the session and the Share state of the signed-in
