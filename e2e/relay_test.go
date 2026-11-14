@@ -179,7 +179,11 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 			t.Errorf("a connection to %s was refused after %v", dst, elapsed)
 		}
 	}
-	// The agent refused them by its policy, never dialing them.
+	// The agent refused them by its policy, never dialing them. When the
+	// refusal takes longer than the client's SYN timeout (1 s, as under the
+	// race detector), a retransmitted SYN can reach the gateway after its
+	// RST and is refused as a flow of its own, so a destination may be
+	// refused more than once.
 	want := map[string]int{"special_range": 2, "blocked_port": 1}
 	var got map[string]int
 	waitUntil(t, "the agent logged its refusals", func() bool {
@@ -189,8 +193,16 @@ func TestHomeNetworksAndMailPortsAreRefusedQuickly(t *testing.T) {
 				got[fmt.Sprint(rec["rule"])]++
 			}
 		}
-		return maps.Equal(got, want)
+		for rule, n := range want {
+			if got[rule] < n {
+				return false
+			}
+		}
+		return true
 	})
+	if !maps.EqualFunc(got, want, func(int, int) bool { return true }) {
+		t.Errorf("the agent refused by the rules %v, want only %v", got, want)
+	}
 	if st := s.agent.Stats(); st.FlowsTotal != 1 {
 		t.Errorf("the agent opened %d flows, want only the first fetch", st.FlowsTotal)
 	}
