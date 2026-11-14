@@ -410,12 +410,6 @@ input:focus-visible {
   font-size: 13px;
 }
 
-.soon {
-  flex: none;
-  color: var(--slate);
-  font-size: 12.5px;
-}
-
 .group-title {
   margin: 28px 0 8px;
   padding-left: 2px;
@@ -450,13 +444,15 @@ input:focus-visible {
    shared, warms up while it connects, glows dimly while paused, and is dark
    when Share is off or can't reach Homeport. */
 
-.share-panel {
+.share-panel,
+.panel {
   border: 1px solid var(--rule);
   border-radius: 10px;
   background: var(--surface);
 }
 
-.share-head {
+.share-head,
+.panel-head {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: start;
@@ -464,19 +460,23 @@ input:focus-visible {
   padding: 16px;
 }
 
-.share-head h2 {
+.share-head h2,
+.panel-head h2,
+.step-head h2 {
   font: 600 22px/1 var(--font-sign);
   letter-spacing: 0.005em;
 }
 
-.share-line {
+.share-line,
+.panel-line {
   margin: 5px 0 0;
   color: var(--slate);
   font-size: 13px;
   text-wrap: pretty;
 }
 
-.share-line.is-problem {
+.share-line.is-problem,
+.panel-line.is-problem {
   color: var(--brick);
 }
 
@@ -582,12 +582,14 @@ input:focus-visible {
   margin: -6px 16px 12px;
 }
 
-.share-facts {
+.share-facts,
+.panel-facts {
   margin: 0;
   border-top: 1px solid var(--rule);
 }
 
-.share-facts .row {
+.share-facts .row,
+.panel-facts .row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -595,21 +597,25 @@ input:focus-visible {
   padding: 10px 16px;
 }
 
-.share-facts .row + .row {
+.share-facts .row + .row,
+.panel-facts .row + .row {
   border-top: 1px solid var(--rule);
 }
 
-.share-facts dt {
+.share-facts dt,
+.panel-facts dt {
   color: var(--slate);
 }
 
-.share-facts dd {
+.share-facts dd,
+.panel-facts dd {
   margin: 0;
   -webkit-user-select: text;
   user-select: text;
 }
 
-.share-note {
+.share-note,
+.panel-note {
   margin: -4px 16px 0;
   color: var(--slate);
   font-size: 13px;
@@ -626,11 +632,353 @@ input:focus-visible {
   font-size: 12px;
 }
 
-.group.modes {
-  margin-top: 20px;
+/* Tabs: Share and Use, as a segmented control. The labels are set in
+   the house-sign face, like the panel titles. */
+
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 16px;
+  padding: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--rule) 70%, var(--wall));
+}
+
+.tab {
+  min-width: 84px;
+  padding: 6px 18px 5px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--slate);
+  font: 600 16px/1.1 var(--font-sign);
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.tab:hover:not([aria-selected="true"]) {
+  color: var(--ink);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow:
+    0 0 0 1px rgb(12 22 38 / 0.06),
+    0 1px 2px rgb(12 22 38 / 0.16);
+}
+
+/* Panels: Use's, and the identity check inside Share's. */
+
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  padding: 12px 16px 16px;
+}
+
+.panel-facts + .panel-actions {
+  border-top: 1px solid var(--rule);
+}
+
+.panel-hint {
+  margin: 0;
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.panel > .panel-hint {
+  margin: -8px 16px 16px;
+}
+
+.panel-error {
+  margin: -6px 16px 14px;
+}
+
+.share-identity .panel-actions {
+  padding-top: 14px;
+}
+
+.status.is-done {
+  color: var(--ink);
+}
+
+.tick {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--enamel-ink);
+}
+
+.panel-actions .status {
+  font-size: 13px;
+}
+
+/* The door at the head of Use: another member's front door, with a brass
+   knob. */
+.door {
+  display: grid;
+  width: 26px;
+  height: 36px;
+  padding: 3px;
+  border-radius: 13px 13px 3px 3px;
+  background: var(--frame);
+  box-shadow: 0 3px 0 -1px var(--frame);
+}
+
+.door i {
+  position: relative;
+  border-radius: 10px 10px 1px 1px;
+  background-color: var(--glass);
+  background-image: linear-gradient(140deg, rgb(255 255 255 / 0.16), rgb(255 255 255 / 0) 55%);
+}
+
+.door i::after {
+  content: "";
+  position: absolute;
+  top: 56%;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--lamplight);
+  box-shadow: 0 0 0 1px rgb(12 22 38 / 0.25);
+}
+
+/* Devices */
+
+.devices .row {
+  padding-block: 12px;
+}
+
+.device h3 {
+  margin: 0;
+  font: 600 14px/1.3 var(--font-ui);
+  overflow-wrap: anywhere;
+}
+
+.device p {
+  margin: 2px 0 0;
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.device .field-error {
+  margin-top: 6px;
+}
+
+.device.is-confirming {
+  flex-wrap: wrap;
+}
+
+.row-actions {
+  display: flex;
+  flex: none;
+  gap: 18px;
+}
+
+.button.danger {
+  min-height: 32px;
+  padding: 0;
+  background: none;
+  color: var(--brick);
+}
+
+.button.danger:hover:not(:disabled, [aria-disabled="true"]) {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.empty {
+  margin: 0;
+  color: var(--slate);
+  font-size: 13px;
+  text-wrap: pretty;
+}
+
+/* Adding a device: pick a line, name the device. Each line is a window in
+   another member's house, lit while the line is online. */
+
+.step-head {
+  padding: 16px 16px 4px;
+}
+
+.step-head h2 {
+  outline: none;
+}
+
+.add-form {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 0;
+}
+
+.add-form .panel-actions {
+  padding: 8px 0 16px;
+}
+
+.add-form .panel-error {
+  margin: 0 0 4px;
+}
+
+.lines {
+  min-width: 0;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+}
+
+.label {
+  display: block;
+  padding: 0;
+  margin: 0 0 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.line-list {
+  overflow: hidden;
+  background: var(--wall);
+}
+
+.line-option {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  font-weight: 400;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.line-option + .line-option {
+  border-top: 1px solid var(--rule);
+}
+
+.line-option:has(input:checked) {
+  background: var(--surface);
+}
+
+input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--button);
+}
+
+.house-window.is-small {
+  gap: 1.5px;
+  width: 18px;
+  height: 22px;
+  padding: 2px;
+  border-radius: 3px 3px 1px 1px;
+  box-shadow: 0 2px 0 -1px var(--frame);
+}
+
+.house-window.is-small[data-light="on"] {
+  box-shadow:
+    0 2px 0 -1px var(--frame),
+    0 0 10px 1px var(--lamp-glow);
+}
+
+.line-text {
+  min-width: 0;
+}
+
+.line-place {
+  display: block;
+  font-weight: 600;
+}
+
+.line-meta,
+.line-state {
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.line-meta {
+  display: block;
+}
+
+/* The new device's config, handed over once: a white card in the enamel
+   plate's rim, which swings into place like a hung plate. Only its angle
+   moves, so it is readable from the first frame, even where animations
+   don't run. */
+
+.key-card {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 12px auto 14px;
+  padding: 18px 18px 14px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow:
+    inset 0 0 0 5px var(--enamel),
+    inset 0 0 0 7px var(--rim),
+    0 1px 1px rgb(12 22 38 / 0.25),
+    0 12px 26px -14px rgb(12 22 38 / 0.6);
+  transform-origin: 50% 0;
+  animation: settle 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes settle {
+  from {
+    transform: translateY(-6px) rotate(-2.5deg);
+  }
+}
+
+.key-card.is-hung {
+  animation: none;
+}
+
+.key-card img {
+  display: block;
+  width: 216px;
+  height: 216px;
+  image-rendering: pixelated;
+}
+
+.key-card figcaption {
+  text-align: center;
+}
+
+.key-name {
+  display: block;
+  color: #1d3f72;
+  font: 600 18px/1.1 var(--font-sign);
+  overflow-wrap: anywhere;
+}
+
+.key-place {
+  display: block;
+  margin-top: 2px;
+  color: #566273;
+  font-size: 12.5px;
+}
+
+.once {
+  margin: 2px 16px 0;
+  color: var(--slate);
+  font-size: 12.5px;
+  text-wrap: pretty;
+}
+
+.once strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.use-step > .panel-actions:last-child {
+  padding-top: 14px;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .key-card,
   #app[data-fresh] .plate,
   .beacon,
   .house-window[data-light="warming"] i {

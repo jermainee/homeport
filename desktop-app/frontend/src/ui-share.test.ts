@@ -2,11 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SignIn } from "./signin";
 import { FakeAuth, member } from "./test/fake-auth";
+import { FakeIdentity } from "./test/fake-identity";
 import { FakeShare } from "./test/fake-share";
+import { FakeUse } from "./test/fake-use";
 import { mount } from "./ui";
 
 let auth: FakeAuth;
 let share: FakeShare;
+let identity: FakeIdentity;
 let signIn: SignIn;
 let app: HTMLElement;
 let announcer: HTMLElement;
@@ -19,7 +22,8 @@ async function openHome(identityStatus = "verified") {
   auth.signedIn = { ...member, identityStatus };
   share = new FakeShare();
   signIn = new SignIn(auth);
-  mount(signIn, app, announcer, share);
+  identity = new FakeIdentity();
+  mount(signIn, app, announcer, { share, identity, use: new FakeUse() });
   await signIn.boot();
   await vi.waitFor(() => expect(app.querySelector(".share-panel[aria-busy]")).toBeNull());
 }
@@ -92,16 +96,29 @@ describe("for a member who isn't verified", () => {
   it("asks them to verify instead of showing a switch", () => {
     expect(app.querySelector('[role="switch"]')).toBeNull();
     expect(app.querySelector("#share-line")?.textContent).toBe("Verify your identity first");
-    expect(app.querySelector('[data-action="share-recheck"]')?.textContent?.trim()).toBe("Check again");
+    expect(app.querySelector('[data-action="identity-verify"]')?.textContent?.trim()).toBe("Verify identity");
   });
 
-  it("shows the switch once a check finds them verified, and focuses it", async () => {
-    const recheck = app.querySelector<HTMLElement>('[data-action="share-recheck"]')!;
-    recheck.focus();
-    recheck.click();
+  it("shows the switch once the check finds them verified, and focuses it", async () => {
+    identity.startAnswer = "verified";
+    const verify = app.querySelector<HTMLElement>('[data-action="identity-verify"]')!;
+    verify.focus();
+    verify.click();
 
     await vi.waitFor(() => expect(app.querySelector('[role="switch"]')).not.toBeNull());
+    expect(identity.starts).toBe(1);
     expect(share.identityChecks).toBe(1);
     expect(document.activeElement).toBe(app.querySelector('[role="switch"]'));
+  });
+
+  it("follows the check in the browser", async () => {
+    const verify = app.querySelector<HTMLElement>('[data-action="identity-verify"]')!;
+    verify.focus();
+    verify.click();
+
+    await vi.waitFor(() =>
+      expect(app.querySelector("#share-line")?.textContent).toBe("Finish the check in your browser"),
+    );
+    expect(announcer.textContent).toBe("Finish the check in your browser.");
   });
 });
