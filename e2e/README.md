@@ -113,18 +113,30 @@ Both are for local runs against `wrangler dev`, and both build without the `e2e`
 
 A local run of the whole product on one Mac, with real Stripe test mode: two desktop-app profiles, the API, the gateway and the iPhone WireGuard app or `wgcurl`. Paths below put keys, sessions and configs into `.dev-state/` at the repo root, which git ignores. Run each long-running command in its own terminal, from the repo root.
 
-**You need** Node.js 26, Go, the Wails CLI (see [`desktop-app/README.md`](../desktop-app/README.md)), the [Stripe CLI](https://docs.stripe.com/stripe-cli) logged in to a sandbox, and for the iPhone `qrencode` (`brew install qrencode`) and the WireGuard app.
+**You need:**
+- Node.js 26 (CI's version; Wrangler runs on 22.12 or later), Go, and the Wails CLI (see [`desktop-app/README.md`](../desktop-app/README.md));
+- the [Stripe CLI](https://docs.stripe.com/stripe-cli), logged in to the sandbox (`stripe login`, then pick the sandbox);
+- for the iPhone, the WireGuard app.
+
+The desktop app shows the QR code itself. `qrencode` (`brew install qrencode`) is needed only on the `member` tool's path.
+
+**In the Stripe sandbox, first:**
+- create two restricted keys (Dashboard → Developers → API keys):
+  - one with write access to Checkout Sessions and Identity Verification Sessions, for `STRIPE_SECRET_KEY`;
+  - one with read access to Identity verification sessions and reports, including their sensitive verified outputs, for `STRIPE_IDENTITY_RESTRICTED_KEY`;
+- check under Identity that the sandbox may create verification sessions;
+- for tax, the head office and the registrations are set up in Tax (see [`api/README.md`](../api/README.md)).
 
 ### 1. API and Stripe
 
 ```sh
 cd api
 npm ci
-cp .dev.vars.example .dev.vars  # the sandbox's test keys, and any long random IDENTITY_HASH_KEY
+[ -f .dev.vars ] || cp .dev.vars.example .dev.vars  # then add the two restricted keys and any long random IDENTITY_HASH_KEY
 stripe listen --forward-to localhost:8787/v1/stripe/webhook
 ```
 
-Put the `whsec_…` that `stripe listen` prints into `.dev.vars` as `STRIPE_WEBHOOK_SECRET`, and keep it running. Then:
+Put the `whsec_…` that `stripe listen` prints into `.dev.vars` as `STRIPE_WEBHOOK_SECRET`, and keep `stripe listen` running. Then:
 
 ```sh
 npm run seed:dev  # prints HOMEPORT_GATEWAY_TOKEN=hpgw_…
@@ -154,14 +166,14 @@ HOMEPORT_PROFILE=../.dev-state/profile-a ./bin/homeport
 ```
 
 1. Sign in as `a@example.com`: open the link from the `npm run dev` log and confirm the match code.
-2. Verify the identity. The app has no identity screen yet, so start the check with the `member` tool on A's app session, open the page it prints and use Stripe's test verification:
+2. On the Share tab, click "Verify identity". Stripe's test page opens in the browser; choose its verified option. The `identity.verification_session.verified` webhook arrives through `stripe listen`, and the app turns Share on without a restart.
+
+   Without Stripe keys, the dev route does the same:
 
    ```sh
-   cd e2e
-   go run ./cmd/member -session ../.dev-state/profile-a/session.json identity
+   cd e2e && go run ./cmd/member -session ../.dev-state/profile-a/session.json verify
    ```
 
-   The `identity.verification_session.verified` webhook arrives through `stripe listen`. Without Stripe, `member … verify` does the same through the dev route.
 3. Turn Share on. The agent connects at the gateway's next config poll; until then it retries with a growing pause, so this takes up to about a minute.
 
 Without the desktop app (on Linux, say), the agent CLI shares the line instead:
@@ -177,25 +189,36 @@ cd ../agent && env $(grep -v '^#' ../.dev-state/a-agent.env) go run ./cmd/homepo
 
 ### 4. Member B uses A's line (profile B)
 
-Run profile B from the same build and sign in as `b@example.com`. Use mode is not in the app yet, so the `member` tool acts on B's app session:
+Run profile B from the same build:
 
 ```sh
 HOMEPORT_PROFILE=../.dev-state/profile-b ./bin/homeport  # in desktop-app/
+```
 
+Then, in profile B's window:
+1. Sign in as `b@example.com`.
+2. On the Use tab, click "Verify identity" and choose Stripe's verified test option.
+3. Click "Buy credits" and pay on Stripe Checkout with `4242 4242 4242 4242`, any future date and any CVC. Checkout asks for an address, which sets the tax: a German address adds 19% VAT. Once `checkout.session.completed` arrives through `stripe listen`, the balance shows 1,000,000 credits.
+4. Pick A's line.
+5. Add a device. The app shows its WireGuard config **once**: as a QR code for the iPhone, and through "Save .conf file" for a Mac, saved as `.dev-state/b.conf` for the next step.
+
+The same steps work from the terminal on B's app session:
+
+```sh
 cd e2e
 member() { go run ./cmd/member -session ../.dev-state/profile-b/session.json "$@"; }
-member identity   # open the page, verify with Stripe's test option
-member checkout   # open the page, pay with 4242 4242 4242 4242, any future date, any CVC
-member me         # purchased: 1000000 once checkout.session.completed arrived
-member lines      # A's line
+member identity   # or: member verify, through the dev route
+member checkout
+member me
+member lines
 member peer <A's line_id> > ../.dev-state/b.conf
 ```
 
-`member lines` lists only lines with a known country, which `wrangler dev` takes from Cloudflare's view of the request; offline it has none. `member peer` still works with the line id from the gateway's log or the database.
+Only lines with a known country are listed, in the app and in `member lines`. `wrangler dev` takes the country from Cloudflare's view of the request, so offline there is none. `member peer` still works offline, with the line id from the gateway's log or the database.
 
 ### 5. Traffic
 
-- **iPhone:** `qrencode -t ansiutf8 < ../.dev-state/b.conf`, then in the WireGuard app: Add a tunnel, Create from QR code, turn it on and browse.
+- **iPhone:** in the WireGuard app, add a tunnel with "Create from QR code", scan the QR code in profile B's window, turn the tunnel on and browse. On the `member` tool's path, `qrencode -t ansiutf8 < ../.dev-state/b.conf` prints the QR code in the terminal instead.
 - **Mac:** `go run ./cmd/wgcurl -conf ../.dev-state/b.conf -o /dev/null 'https://speed.cloudflare.com/__down?bytes=5000000'` prints the status, the SHA-256 and the bytes the tunnel carried.
 
 Either way the traffic leaves through A's agent, and the gateway logs `session started` for B's peer.
