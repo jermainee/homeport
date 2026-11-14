@@ -206,11 +206,11 @@ func TestSetPeerLineSendsTheNextFlowsToThatLinesAgent(t *testing.T) {
 		t.Fatalf("add peer: %v", err)
 	}
 	client := newClient(t, gw, key, peerIP)
-	before := string(client.get(t, "http://203.0.113.10/"))
+	before := string(client.get(t, "http://11.22.33.44/"))
 
 	gw.SetPeerLine(key.PublicKey(), "line-2")
 
-	if got := string(client.get(t, "http://203.0.113.10/")); before != "from line-1" || got != "from line-2" {
+	if got := string(client.get(t, "http://11.22.33.44/")); before != "from line-1" || got != "from line-2" {
 		t.Fatalf("got %q, then %q after moving the peer; want from line-1, then from line-2", before, got)
 	}
 }
