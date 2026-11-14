@@ -652,6 +652,28 @@ func TestShareNeedsASignedInMember(t *testing.T) {
 	}
 }
 
+// Turning Share on before signing in fails with signed_out. That error is
+// about the session that was missing, so signing in clears it; the window
+// would otherwise read it as the new session being gone, and go back to
+// sign-in, find the member signed in, and read it again, over and over.
+func TestSigningInClearsTheSignedOutError(t *testing.T) {
+	f := verified(t)
+	auth := newAuth(t, f.api, f.dir)
+	if err := auth.SignOut(t.Context()); err != nil {
+		t.Fatalf("SignOut: %v", err)
+	}
+	if got := f.share.SetSharing(t.Context(), true); got.Error != services.ErrSignedOut {
+		t.Fatalf("status before sign-in = %+v, want error %q", got, services.ErrSignedOut)
+	}
+
+	auth.AfterSignIn(f.share.SignIn)
+	signIn(t, f.api, auth, email)
+
+	if got := f.share.Status(); got.State != services.ShareOff || got.Error != "" || got.Sharing {
+		t.Errorf("status after sign-in = %+v, want off with no error", got)
+	}
+}
+
 // A listener may wait for the main thread, as the tray's menu updates do,
 // while the main thread runs ServiceShutdown. Share must not wait for it.
 func TestAListenerThatBlocksHoldsNothingUp(t *testing.T) {
