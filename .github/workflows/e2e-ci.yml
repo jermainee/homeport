@@ -8,6 +8,7 @@ on:
       - "agent/**"
       - "relay-protocol/**"
       - "contracts/**"
+      - "api/**"
       - ".github/workflows/e2e-ci.yml"
   push:
     branches: [main]
@@ -17,6 +18,7 @@ on:
       - "agent/**"
       - "relay-protocol/**"
       - "contracts/**"
+      - "api/**"
       - ".github/workflows/e2e-ci.yml"
 
 permissions:
@@ -28,6 +30,7 @@ concurrency:
 
 env:
   GOWORK: "off"
+  WRANGLER_SEND_METRICS: "false"
 
 jobs:
   test:
@@ -69,3 +72,34 @@ jobs:
           working-directory: e2e
       - name: Test
         run: go test -race -count=1 -tags e2e ./...
+
+  # The full stack on one machine: the real Worker (wrangler dev, local D1),
+  # the gateway binary, the agent and a WireGuard client. Ubuntu only: the
+  # Worker runs the same everywhere, and the test job covers the gateway and
+  # the agent on macOS.
+  smoke:
+    name: smoke (real API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: api/.nvmrc
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: e2e/go.mod
+          cache-dependency-path: e2e/go.sum
+      - name: Install the API's dependencies
+        working-directory: api
+        run: npm ci
+      - name: Vet
+        working-directory: e2e
+        run: go vet -tags e2e,smoke ./...
+      - name: Smoke test
+        working-directory: e2e
+        run: go test -count=1 -tags e2e,smoke -run TestFullStackSmoke -v .
