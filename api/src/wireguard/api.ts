@@ -25,6 +25,7 @@ interface PeerRow {
   name: string;
   line_id: string;
   failover: Failover;
+  https_only: number;
   public_key: string;
   address_index: number;
   created_at: number;
@@ -34,7 +35,7 @@ interface PeerRow {
   exit_since?: number | null;
 }
 
-const PEER_COLUMNS = `p.id, p.name, p.line_id, p.failover, p.public_key, p.address_index, p.created_at`;
+const PEER_COLUMNS = `p.id, p.name, p.line_id, p.failover, p.https_only, p.public_key, p.address_index, p.created_at`;
 
 /**
  * SELECT of PEER_COLUMNS for the peers `p` that WHERE `where` picks, with
@@ -85,6 +86,7 @@ function peerBody(peer: PeerRow) {
     name: peer.name,
     line_id: peer.line_id,
     failover: peer.failover,
+    https_only: peer.https_only === 1,
     exit_line:
       peer.exit_line_id && peer.exit_since != null
         ? {
@@ -103,9 +105,10 @@ function peerBody(peer: PeerRow) {
 
 wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
   const body = c.get("body");
-  if (!hasOnlyFields(body, ["request_id", "line_id", "name", "public_key"])) return invalidRequest(c, "unknown field");
-  const { line_id: lineId, name, public_key: publicKey } = body;
+  if (!hasOnlyFields(body, ["request_id", "line_id", "name", "public_key", "https_only"])) return invalidRequest(c, "unknown field");
+  const { line_id: lineId, name, public_key: publicKey, https_only: httpsOnly = true } = body;
   if (typeof lineId !== "string") return invalidRequest(c, "line_id is required");
+  if (typeof httpsOnly !== "boolean") return invalidRequest(c, "https_only must be true or false");
   if (!isName(name)) return invalidRequest(c, "name must have 1 to 64 characters");
   if (typeof publicKey !== "string" || !KEY32.test(publicKey)) {
     return invalidRequest(c, "public_key must be a 32-byte key in standard base64");
@@ -125,8 +128,8 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
   try {
     peer = await db
       .prepare(
-        `INSERT INTO wireguard_peers (id, member_id, line_id, name, public_key, address_index, created_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, free.host, ?6
+        `INSERT INTO wireguard_peers (id, member_id, line_id, name, public_key, address_index, created_at, https_only)
+         SELECT ?1, ?2, ?3, ?4, ?5, free.host, ?6, ?7
            FROM (SELECT CASE
                    WHEN NOT EXISTS (SELECT 1 FROM wireguard_peers WHERE deleted_at IS NULL AND address_index = ${FIRST_PEER_HOST})
                      THEN ${FIRST_PEER_HOST}
@@ -138,9 +141,9 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
           WHERE free.host <= ${LAST_PEER_HOST} AND ${lineHasRoomSql("?3", "?2")}
             AND (SELECT COUNT(*) FROM wireguard_peers mine
                   WHERE mine.member_id = ?2 AND mine.deleted_at IS NULL) < ${MAX_PEERS_PER_MEMBER}
-         RETURNING id, name, line_id, failover, public_key, address_index, created_at`,
+         RETURNING id, name, line_id, failover, https_only, public_key, address_index, created_at`,
       )
-      .bind(crypto.randomUUID(), memberId, lineId, name, publicKey, Date.now())
+      .bind(crypto.randomUUID(), memberId, lineId, name, publicKey, Date.now(), httpsOnly ? 1 : 0)
       .first<PeerRow>();
   } catch (error) {
     if (error instanceof Error && error.message.includes("wireguard_peers.public_key")) {
@@ -185,19 +188,20 @@ wireguardApi.get("/peers", requireSession, async (c) => {
 });
 
 /**
- * Moves a peer to another line, or changes its failover. The device keeps
+ * Moves a peer to another line, or changes its failover or HTTPS only. The device keeps
  * its .conf file, which names the peer's address and the gateway: the line
  * a peer exits through is chosen on the gateway. A new line gets the
  * checks of POST, and must be on the gateway the .conf names.
  */
 wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
   const body = await readJsonObject(c.req.raw);
-  if (!body || Object.keys(body).length === 0 || !hasOnlyFields(body, ["line_id", "failover"])) {
-    return invalidRequest(c, "send line_id, failover or both");
+  if (!body || Object.keys(body).length === 0 || !hasOnlyFields(body, ["line_id", "failover", "https_only"])) {
+    return invalidRequest(c, "send line_id, failover, https_only or more of them");
   }
-  const { line_id: lineId, failover } = body;
+  const { line_id: lineId, failover, https_only: httpsOnly } = body;
   if (lineId !== undefined && typeof lineId !== "string") return invalidRequest(c, "line_id must be an id");
   if (failover !== undefined && !isFailover(failover)) return invalidRequest(c, "failover must be country, city or off");
+  if (httpsOnly !== undefined && typeof httpsOnly !== "boolean") return invalidRequest(c, "https_only must be true or false");
 
   const db = c.env.DB;
   const memberId = c.get("member").id;
@@ -220,16 +224,17 @@ wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
   }
 
   // Only what the request names changes, so concurrent changes to the other
-  // field survive. The new line's room is checked in the update itself, so
+  // fields survive. The new line's room is checked in the update itself, so
   // two members moving at once never overfill it.
   const changed = await db
     .prepare(
-      `UPDATE wireguard_peers SET line_id = COALESCE(?1, line_id), failover = COALESCE(?2, failover)
+      `UPDATE wireguard_peers
+          SET line_id = COALESCE(?1, line_id), failover = COALESCE(?2, failover), https_only = COALESCE(?5, https_only)
         WHERE id = ?3 AND member_id = ?4 AND deleted_at IS NULL
           AND (?1 IS NULL OR ?1 = line_id OR ${lineHasRoomSql("?1", "?4")})
         RETURNING id`,
     )
-    .bind(newLine, failover ?? null, peerId, memberId)
+    .bind(newLine, failover ?? null, peerId, memberId, httpsOnly === undefined ? null : httpsOnly ? 1 : 0)
     .first();
   if (!changed) {
     if (newLine === null) return apiError(c, 404, "not_found");

@@ -15,6 +15,7 @@ interface Peer {
   name: string;
   line_id: string;
   failover: "country" | "city" | "off";
+  https_only: boolean;
   exit_line: { line_id: string; country: string | null; city: string | null; since: string } | null;
   public_key: string;
   ipv4: string;
@@ -47,7 +48,7 @@ describe("POST /v1/wireguard/peers", () => {
 
     const { peer, config_text } = await createdPeer(sessionToken, lineId, publicKey);
 
-    expect(peer).toMatchObject({ name: "iPhone", line_id: lineId, failover: "country", exit_line: null, public_key: publicKey });
+    expect(peer).toMatchObject({ name: "iPhone", line_id: lineId, failover: "country", https_only: true, exit_line: null, public_key: publicKey });
     expect(config_text).toBe(
       [
         "[Interface]",
@@ -64,6 +65,20 @@ describe("POST /v1/wireguard/peers", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("leaves HTTPS only off when the request turns it off, and refuses anything but a boolean", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const body = (httpsOnly: unknown) => ({ request_id: uuidv7(), line_id: lineId, name: "Router", public_key: randomKey(), https_only: httpsOnly });
+
+    const off = await send("POST", "/v1/wireguard/peers", sessionToken, body(false));
+    const bad = await send("POST", "/v1/wireguard/peers", sessionToken, body("yes"));
+
+    expect(off.status).toBe(201);
+    const { peer } = await expectContract<{ peer: Peer }>("POST", "/v1/wireguard/peers", off);
+    expect(peer.https_only).toBe(false);
+    expect(bad.status).toBe(400);
   });
 
   it("gives each peer its own address in 10.77.0.0/16 and fd77::/64, never the gateway's", async () => {
@@ -323,6 +338,20 @@ describe("PATCH /v1/wireguard/peers/{peer_id}", () => {
 
     expect(city).toEqual({ ...peer, failover: "city" });
     expect(off).toEqual({ ...peer, failover: "off" });
+  });
+
+  it("turns a peer's HTTPS only off and on, and refuses anything but a boolean", async () => {
+    const lineId = await sharingLine((await verifiedMember()).sessionToken, BERLIN);
+    const { sessionToken } = await verifiedMember();
+    const { peer } = await createdPeer(sessionToken, lineId);
+
+    const off = await updated(sessionToken, peer.peer_id, { https_only: false });
+    const on = await updated(sessionToken, peer.peer_id, { https_only: true, failover: "city" });
+    const bad = await update(sessionToken, peer.peer_id, { https_only: 1 });
+
+    expect(off).toEqual({ ...peer, https_only: false });
+    expect(on).toEqual({ ...peer, https_only: true, failover: "city" });
+    expect(bad.status).toBe(400);
   });
 
   it("refuses the member's own line and a linked member's line with 403 line_not_allowed", async () => {
