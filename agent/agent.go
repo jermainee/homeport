@@ -58,8 +58,10 @@ type Config struct {
 	// Version is the release sent in Hello. Empty means [Version].
 	Version string
 
-	// Resolver answers DNS flows. Nil means net.DefaultResolver, the
-	// system resolver, so websites see the home ISP's resolver.
+	// Resolver answers DNS flows. Nil means DNS over HTTPS to Cloudflare,
+	// then Quad9, through the line, verified against the roots built into
+	// the agent, so neither the member's network nor their ISP can read or
+	// change the answers. Tests pass their own.
 	Resolver Resolver
 	// Logger receives session metadata only. Nil discards logs.
 	Logger *slog.Logger
@@ -193,7 +195,7 @@ func New(cfg Config) (*Agent, error) {
 		cfg.Version = Version
 	}
 	if cfg.Resolver == nil {
-		cfg.Resolver = systemResolver
+		cfg.Resolver = newDoHResolver(defaultDoHServers, bundledRoots())
 	}
 	if cfg.StatsInterval <= 0 {
 		cfg.StatsInterval = DefaultStatsInterval

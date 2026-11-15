@@ -19,6 +19,7 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/quic-go/quic-go v0.65.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261113174652-9ccaac6145fb // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
