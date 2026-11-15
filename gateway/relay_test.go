@@ -185,6 +185,62 @@ func TestFlowsAreRelayedToTheLinesAgent(t *testing.T) {
 	}
 }
 
+func TestSetPeerLineSendsTheNextFlowsToThatLinesAgent(t *testing.T) {
+	gw := relayGateway(t)
+	key := newKey(t)
+	peerIP := netip.MustParseAddr("10.77.0.2")
+	for _, line := range []string{"line-1", "line-2"} {
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("from " + line))
+		}))
+		t.Cleanup(origin.Close)
+		cert, pin := newAgentCert(t)
+		if err := gw.AddLine(gateway.Line{ID: line, OwnerMemberID: "owner-of-" + line, AgentPin: pin}); err != nil {
+			t.Fatalf("add %s: %v", line, err)
+		}
+		if _, err := startAgent(t, gw, cert, relayTo(origin.Listener.Addr().String())); err != nil {
+			t.Fatalf("agent of %s: %v", line, err)
+		}
+	}
+	if err := gw.AddPeer(gateway.Peer{PublicKey: key.PublicKey(), IPv4: peerIP, LineID: "line-1", MemberID: "member-user"}); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+	client := newClient(t, gw, key, peerIP)
+	before := string(client.get(t, "http://11.22.33.44/"))
+
+	gw.SetPeerLine(key.PublicKey(), "line-2")
+
+	if got := string(client.get(t, "http://11.22.33.44/")); before != "from line-1" || got != "from line-2" {
+		t.Fatalf("got %q, then %q after moving the peer; want from line-1, then from line-2", before, got)
+	}
+}
+
+func TestSetPeerLineNeverSendsAMembersFlowsThroughTheirOwnLine(t *testing.T) {
+	gw := relayGateway(t)
+	cert, pin := newAgentCert(t)
+	if err := gw.AddLine(gateway.Line{ID: "own-line", OwnerMemberID: "member-user", AgentPin: pin}); err != nil {
+		t.Fatalf("add line: %v", err)
+	}
+	agent, err := startAgent(t, gw, cert, answer(relayprotocol.StatusOK))
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	key := newKey(t)
+	peerIP := netip.MustParseAddr("10.77.0.2")
+	if err := gw.AddPeer(gateway.Peer{PublicKey: key.PublicKey(), IPv4: peerIP, LineID: "line-1", MemberID: "member-user"}); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	gw.SetPeerLine(key.PublicKey(), "own-line")
+
+	assertResetQuickly(t, newClient(t, gw, key, peerIP))
+	select {
+	case open := <-agent.opens:
+		t.Fatalf("the member's flow reached their own line's agent: %+v", open)
+	default:
+	}
+}
+
 // answer makes the agent answer every flow with status and end it.
 func answer(status relayprotocol.Status) flowHandler {
 	return func(_ relayprotocol.FlowOpen, s *quic.Stream) {

@@ -1,7 +1,20 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { expectContract } from "./contract";
-import { BERLIN, MUNICH, PARIS, announcedGateway, gatewayCall, lineOn, peerOn } from "./gateway-fixtures";
+import {
+  BERLIN,
+  MUNICH,
+  PARIS,
+  announcedGateway,
+  gatewayCall,
+  giveCredits,
+  grantedLease,
+  lineOn,
+  peerOn,
+  reportUsage,
+  usageEvent,
+} from "./gateway-fixtures";
+import { uuidv7 } from "./helpers";
 import { link, registerDevice, send, sharingLine, verifiedMember } from "./share-fixtures";
 
 interface Config {
@@ -305,5 +318,44 @@ describe("GET /v1/gateway/config, fallback lines", () => {
     const served = (await configBody(token)).peers.find((listed) => listed.peer_id === peer.peer_id);
     expect(served?.line_id).toBe(munich.lineId);
     expect(served?.fallback_line_ids).toEqual([otherMunich.lineId, berlin.lineId]);
+  });
+
+  async function sessionOn(token: string, peerId: string, lineId: string) {
+    const lease = await grantedLease(token, peerId, uuidv7(), lineId);
+    const response = await reportUsage(token, [
+      usageEvent({ sessionId: lease.sessionId, peerId, lineId, leaseId: lease.lease_id, seq: 0, bytesUp: 0, bytesDown: 1_000 }),
+    ]);
+    expect(response.status).toBe(200);
+  }
+
+  it("keeps the line a peer's session runs on among its fallbacks, though five better lines came online since", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const current = await lineOn(gatewayId, BERLIN);
+    const { user, peer } = await peerOn(primary.lineId);
+    await giveCredits(user.memberId, 1_000_000);
+    await sessionOn(token, peer.peer_id, current.lineId);
+    for (let i = 0; i < 5; i++) {
+      const better = await lineOn(gatewayId, BERLIN);
+      await env.DB.prepare(`UPDATE lines SET online = 1 WHERE id = ?`).bind(better.lineId).run();
+    }
+
+    const fallbacks = await fallbacksOf(token, peer.peer_id);
+
+    expect(fallbacks).toHaveLength(5);
+    expect(fallbacks).toContain(current.lineId);
+  });
+
+  it("drops the session's line once the member turns failover off", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const primary = await lineOn(gatewayId, BERLIN);
+    const current = await lineOn(gatewayId, BERLIN);
+    const { user, peer } = await peerOn(primary.lineId);
+    await giveCredits(user.memberId, 1_000_000);
+    await sessionOn(token, peer.peer_id, current.lineId);
+
+    await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { failover: "off" });
+
+    expect(await fallbacksOf(token, peer.peer_id)).toEqual([]);
   });
 });

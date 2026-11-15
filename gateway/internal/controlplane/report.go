@@ -39,8 +39,16 @@ func (c *Controller) OnLineEvent(e gateway.LineEvent) {
 	defer c.lineMu.Unlock()
 	if e.Online {
 		c.lineIPs[e.LineID] = e.ObservedIP
+		if _, up := c.lineUp[e.LineID]; !up {
+			// An agent's new connection replaces its old one with a second
+			// online event: the line never went offline.
+			c.lineUp[e.LineID] = now
+		}
+		delete(c.lineDown, e.LineID)
 	} else {
 		delete(c.lineIPs, e.LineID)
+		delete(c.lineUp, e.LineID)
+		c.lineDown[e.LineID] = now
 	}
 	if e.ObservedIP.IsValid() {
 		c.lineEvents = append(c.lineEvents, ev)

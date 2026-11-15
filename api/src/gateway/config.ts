@@ -4,7 +4,7 @@ import { httpOrigin } from "../http";
 import { FAILBACK_SECONDS } from "../pricing";
 import { tunnelIpv4, tunnelIpv6 } from "../wireguard/config";
 import { linkedPairsSql } from "../lines/rules";
-import { type FailoverLine, type FailoverPeer, fallbackLines } from "../wireguard/failover";
+import { CURRENT_SESSION_WINDOW_MS, type FailoverLine, type FailoverPeer, fallbackLines } from "../wireguard/failover";
 import { PEER_JOINS, SERVED_LINE_SQL, SERVED_PEER_SQL } from "./served";
 
 /** The contract's GatewayConfig. */
@@ -34,7 +34,7 @@ export interface GatewayConfig {
 export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string): Promise<GatewayConfig> {
   const gatewayMembers = `SELECT u.member_id FROM wireguard_peers u JOIN lines ul ON ul.id = u.line_id
                            WHERE ul.gateway_id = ?1 AND u.deleted_at IS NULL`;
-  const [peers, lines, users, links] = await db.batch([
+  const [peers, lines, users, links, sessions] = await db.batch([
     db
       .prepare(
         `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id, p.failover, l.country, l.city
@@ -45,7 +45,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       .bind(gatewayId),
     db
       .prepare(
-        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256, l.country, l.city
+        `SELECT l.id AS line_id, l.member_id AS owner_member_id, d.spki_sha256 AS device_spki_sha256, l.country, l.city, l.online
            FROM lines l JOIN members o ON o.id = l.member_id JOIN devices d ON d.id = l.device_id
           WHERE l.gateway_id = ?1 AND ${SERVED_LINE_SQL}
           ORDER BY l.id`,
@@ -60,6 +60,14 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       )
       .bind(gatewayId),
     db.prepare(linkedPairsSql(gatewayMembers)).bind(gatewayId),
+    // The line each peer's session runs on now, which stays in its list.
+    db
+      .prepare(
+        `SELECT peer_id, line_id FROM usage_sessions
+          WHERE gateway_id = ?1 AND ended = 0 AND updated_at >= ?2
+          ORDER BY started_at`,
+      )
+      .bind(gatewayId, Date.now() - CURRENT_SESSION_WINDOW_MS),
   ]);
   const peerRows = (peers?.results ?? []) as PeerRow[];
   const lineRows = (lines?.results ?? []) as LineRow[];
@@ -72,9 +80,13 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
   const linkedPairs = new Set(
     ((links?.results ?? []) as { member_id: string; linked_id: string }[]).map((row) => `${row.member_id}\n${row.linked_id}`),
   );
+  const current = new Map(
+    ((sessions?.results ?? []) as { peer_id: string; line_id: string }[]).map((row) => [row.peer_id, row.line_id]),
+  );
   const fallbackIds = fallbackLines(peerRows, lineRows, {
     users: lineUsers,
     linked: (memberId, otherId) => linkedPairs.has(`${memberId}\n${otherId}`),
+    current,
   });
 
   const content = {

@@ -447,6 +447,19 @@ func (s *Server) RemovePeer(publicKey Key) (Usage, error) {
 	return Usage{Up: up, Down: down}, nil
 }
 
+// SetPeerLine makes the line the peer's new flows exit through lineID,
+// for example a line that takes over while the peer's own line is offline.
+// Open flows stay on their line. The member still never exits through a
+// line they own. A peer that is not on the gateway is ignored.
+func (s *Server) SetPeerLine(publicKey Key, lineID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.peers[publicKey]; ok {
+		p.LineID = lineID
+		s.peers[publicKey] = p
+	}
+}
+
 // ResetPeerFlows ends the peer's open flows. A TCP client gets a reset.
 func (s *Server) ResetPeerFlows(publicKey Key) {
 	s.mu.Lock()

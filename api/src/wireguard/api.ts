@@ -9,7 +9,7 @@ import { KEY32, isName } from "../keys";
 import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
 import { MAX_PEERS_PER_MEMBER } from "../pricing";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
-import { type Failover, isFailover } from "./failover";
+import { CURRENT_SESSION_WINDOW_MS, type Failover, isFailover } from "./failover";
 
 /**
  * WireGuard peers: the devices that use a line (contract operations
@@ -19,14 +19,6 @@ import { type Failover, isFailover } from "./failover";
 export const wireguardApi = new Hono<{ Bindings: Env; Variables: SessionVariables & IdempotentVariables }>();
 
 
-/**
- * How recent the gateway's last report of a session must be for the
- * session's line to count as the peer's exit line. The gateway reports a
- * session that moves bytes at least every 30 seconds, and ends one after 2
- * idle minutes; a session older than this was left open by a gateway that
- * stopped.
- */
-const EXIT_LINE_WINDOW_MS = 3 * 60 * 1000;
 
 interface PeerRow {
   id: string;
@@ -47,7 +39,7 @@ const PEER_COLUMNS = `p.id, p.name, p.line_id, p.failover, p.public_key, p.addre
 /**
  * SELECT of PEER_COLUMNS for the peers `p` that WHERE `where` picks, with
  * the line of each peer's newest session the gateway reported within
- * EXIT_LINE_WINDOW_MS. The first placeholder (?1) is the window's start.
+ * CURRENT_SESSION_WINDOW_MS. The first placeholder (?1) is the window's start.
  */
 function peersWithExitSql(where: string): string {
   return `SELECT ${PEER_COLUMNS}, s.line_id AS exit_line_id, x.country AS exit_country, x.city AS exit_city,
@@ -187,7 +179,7 @@ wireguardApi.get("/peers", requireSession, async (c) => {
   const { results } = await c.env.DB.prepare(
     `${peersWithExitSql("p.member_id = ?2 AND p.deleted_at IS NULL")} ORDER BY p.created_at DESC, p.rowid DESC`,
   )
-    .bind(Date.now() - EXIT_LINE_WINDOW_MS, c.get("member").id)
+    .bind(Date.now() - CURRENT_SESSION_WINDOW_MS, c.get("member").id)
     .all<PeerRow>();
   return c.json({ peers: results.map(peerBody) });
 });
@@ -247,7 +239,7 @@ wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
 
   const peer = await db
     .prepare(peersWithExitSql("p.id = ?2"))
-    .bind(Date.now() - EXIT_LINE_WINDOW_MS, peerId)
+    .bind(Date.now() - CURRENT_SESSION_WINDOW_MS, peerId)
     .first<PeerRow>();
   if (!peer) throw new Error("peer missing after update");
   return c.json(peerBody(peer));

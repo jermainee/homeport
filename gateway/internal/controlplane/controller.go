@@ -28,6 +28,7 @@ const ConfigRefreshInterval = 2 * time.Second
 type Gateway interface {
 	AddPeer(gateway.Peer) error
 	RemovePeer(gateway.Key) (gateway.Usage, error)
+	SetPeerLine(key gateway.Key, lineID string)
 	AddLine(gateway.Line) error
 	RemoveLine(id string)
 	PeerUsage(addr netip.Addr) gateway.Usage
@@ -66,6 +67,7 @@ type Controller struct {
 	lines      map[string]ConfigLine
 	peers      map[string]*peerState // by peer ID
 	grace      time.Duration         // for a session without a lease: the last grace_seconds the API sent
+	failback   time.Duration         // the config's failback_seconds
 	events     []UsageEvent          // cut, not reported yet, oldest first
 	afterFinal map[string][]leaseReturn
 	returns    []leaseReturn  // leases to return now
@@ -78,6 +80,8 @@ type Controller struct {
 	// OnLineEvent never takes mu. Lock order: mu, then lineMu.
 	lineMu     sync.Mutex
 	lineIPs    map[string]netip.Addr // online lines and their agents' public IPs
+	lineUp     map[string]time.Time  // online lines: since when, without a break
+	lineDown   map[string]time.Time  // lines that went offline: since when
 	lineEvents []LineEvent           // not reported yet, oldest first
 }
 
@@ -113,8 +117,11 @@ func New(api *Client, opts Options) *Controller {
 		lines:      map[string]ConfigLine{},
 		peers:      map[string]*peerState{},
 		grace:      defaultGrace,
+		failback:   defaultFailback,
 		afterFinal: map[string][]leaseReturn{},
 		lineIPs:    map[string]netip.Addr{},
+		lineUp:     map[string]time.Time{},
+		lineDown:   map[string]time.Time{},
 	}
 }
 
@@ -192,9 +199,15 @@ func (c *Controller) applyLocked(cfg Config) error {
 	}
 
 	for id, ps := range c.peers {
-		if want, ok := wantPeers[id]; !ok || want != ps.cfg {
+		want, ok := wantPeers[id]
+		if !ok || !sameDevice(want, ps.cfg) {
 			c.removePeerLocked(ps)
+			continue
 		}
+		// The same device on other lines stays on the gateway, WireGuard
+		// session included. Step moves its session if its line is no
+		// longer one of them.
+		ps.cfg, ps.peer.LineID = want, want.LineID
 	}
 	for id, old := range c.lines {
 		// A line whose pin changes is removed too: its agent is
@@ -238,6 +251,14 @@ func (c *Controller) applyLocked(cfg Config) error {
 	for _, h := range cfg.TopUpHostnames {
 		c.topUp[normalizeHost(h)] = true
 	}
+	c.failback = time.Duration(cfg.FailbackSeconds) * time.Second
+	c.lineMu.Lock()
+	for id := range c.lineDown {
+		if _, ok := wantLines[id]; !ok {
+			delete(c.lineDown, id) // a line that left the config
+		}
+	}
+	c.lineMu.Unlock()
 	return errors.Join(errs...)
 }
 

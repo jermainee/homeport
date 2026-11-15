@@ -34,6 +34,10 @@ const (
 	lineID   = "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6"
 	ownerID  = "01a1c4af-897b-7f0a-a915-c1ba8ba7b153"
 	linePin  = "9cbcb6d9cf5e797e8b18a940a0fd2a645edc317d1dc5f272a988223ae69cc2f8"
+
+	// Peer A's fallback line in the example config, and its owner.
+	fallbackLineID = "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57"
+	fallbackOwner  = "01a1c4af-8d52-7b10-8e6f-2a4c7b9d3e18"
 )
 
 // The contract's patterns, which the fake API checks every request against.
@@ -104,6 +108,7 @@ type leaseRequest struct {
 	RequestID         string `json:"request_id"`
 	PeerID            string `json:"peer_id"`
 	SessionID         string `json:"session_id"`
+	LineID            string `json:"line_id"`
 	SupersedesLeaseID string `json:"supersedes_lease_id"`
 }
 
@@ -259,8 +264,8 @@ func (a *fakeAPI) checkLeaseRequest(r leaseRequest) {
 	if !uuidV7Pattern.MatchString(r.RequestID) || !uuidV7Pattern.MatchString(r.SessionID) {
 		a.t.Errorf("lease request IDs are not UUIDv7: %+v", r)
 	}
-	if !idPattern.MatchString(r.PeerID) {
-		a.t.Errorf("lease request peer_id %q is not an ID", r.PeerID)
+	if !idPattern.MatchString(r.PeerID) || !idPattern.MatchString(r.LineID) {
+		a.t.Errorf("lease request peer_id %q or line_id %q is not an ID", r.PeerID, r.LineID)
 	}
 }
 
@@ -478,6 +483,21 @@ func (g *fakeGateway) PeerUsage(addr netip.Addr) gateway.Usage {
 		}
 	}
 	return gateway.Usage{}
+}
+
+func (g *fakeGateway) SetPeerLine(k gateway.Key, lineID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if p, ok := g.peers[k]; ok {
+		p.LineID = lineID
+		g.peers[k] = p
+	}
+}
+
+func (g *fakeGateway) removedCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.removed)
 }
 
 func (g *fakeGateway) ResetPeerFlows(k gateway.Key) {
