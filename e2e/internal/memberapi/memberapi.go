@@ -260,9 +260,10 @@ func (c *Client) AvailableLines(ctx context.Context) ([]AvailableLine, error) {
 // Peer is a created WireGuard peer.
 type Peer struct {
 	Peer struct {
-		ID   string `json:"peer_id"`
-		IPv4 string `json:"ipv4"`
-		IPv6 string `json:"ipv6"`
+		ID        string `json:"peer_id"`
+		IPv4      string `json:"ipv4"`
+		IPv6      string `json:"ipv6"`
+		HTTPSOnly bool   `json:"https_only"`
 	} `json:"peer"`
 	// ConfigText is the .conf file with {{PRIVATE_KEY}} where the client's
 	// key goes (wgclient.WithPrivateKey).
@@ -279,6 +280,12 @@ func (c *Client) CreatePeer(ctx context.Context, lineID, name, publicKey string)
 		"public_key": publicKey,
 	}, http.StatusCreated, &p)
 	return p, err
+}
+
+// SetHTTPSOnly turns a peer's HTTPS only on or off.
+func (c *Client) SetHTTPSOnly(ctx context.Context, peerID string, on bool) error {
+	return c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), true,
+		map[string]any{"https_only": on}, http.StatusOK, nil)
 }
 
 // DevVerifyIdentity marks a member's identity verified (dev only).

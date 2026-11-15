@@ -104,6 +104,14 @@ func TestFullStackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A new device gets HTTPS only. The smoke test's origin speaks plain
+	// HTTP, so B turns it off, as a member who needs plain HTTP would.
+	if !peer.Peer.HTTPSOnly {
+		t.Error("a new peer does not have HTTPS only")
+	}
+	if err := b.SetHTTPSOnly(ctx, peer.Peer.ID, false); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("no self-dealing: B gets no peer on B's own line", func(t *testing.T) {
 		bAgent, _ := newAgentIdentity(t)

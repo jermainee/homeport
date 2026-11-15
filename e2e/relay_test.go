@@ -533,3 +533,23 @@ func untilDNSAnswers(f func() error) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+func TestAnHTTPSOnlyDeviceGetsNoPlainHTTPButStillResolves(t *testing.T) {
+	s := newStack(t, withHTTPSOnly())
+
+	if _, err := s.tryGet("http://"+tcpDst.String()+contentPath+"/blob/100", 5*time.Second); err == nil {
+		t.Error("plain HTTP from a device with HTTPS only was answered")
+	}
+	err := untilDNSAnswers(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), waitFor)
+		defer cancel()
+		_, err := s.client.Net.LookupContextHost(ctx, originName)
+		return err
+	})
+	if err != nil {
+		t.Errorf("DNS through the virtual resolver: %v", err)
+	}
+	if n := s.agent.Stats().FlowsTotal; n != 1 {
+		t.Errorf("the agent opened %d flows, want only the DNS flow: the plain TCP flow must not reach it", n)
+	}
+}

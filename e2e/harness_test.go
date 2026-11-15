@@ -111,6 +111,7 @@ type stackOptions struct {
 	shareLater bool
 	peerLater  bool
 	fallback   bool
+	httpsOnly  bool
 	canary     *canaryOptions
 }
 
@@ -156,6 +157,12 @@ func withPeerLater() func(*stackOptions) {
 // over B's peer while A's line is offline, and B's peer moves back once A's
 // line has been online for failbackSeconds. C's agent starts with
 // startFallbackAgent.
+// withHTTPSOnly gives member B's device HTTPS only, as the API does by
+// default. The other tests turn it off: their origin speaks plain HTTP.
+func withHTTPSOnly() func(*stackOptions) {
+	return func(o *stackOptions) { o.httpsOnly = true }
+}
+
 func withFallbackLine() func(*stackOptions) {
 	return func(o *stackOptions) { o.fallback = true }
 }
@@ -195,6 +202,7 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 			IPv4:      peerIP.String(),
 			IPv6:      "fd77:6870::2",
 			LineID:    lineID,
+			HTTPSOnly: o.httpsOnly,
 		}},
 		Lines: []fakeapi.Line{{
 			LineID:           lineID,
