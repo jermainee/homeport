@@ -258,7 +258,7 @@ function httpsOnlySetting(d: Device, v: Ready): string {
       <div class="device-https">
         <div class="setting-text">
           <span class="setting-label" aria-hidden="true">HTTPS only</span>
-          <p id="${id}">${note}</p>
+          <p class="setting-note" id="${id}">${note}</p>
         </div>
         <button class="switch" type="button" role="switch" data-action="use-https-only" data-peer="${esc(d.peerId)}"
           aria-checked="${on}" aria-label="HTTPS only for ${esc(d.name)}" aria-describedby="${id}" ${busyAttrs(busy)}><span class="knob"></span></button>

@@ -793,8 +793,10 @@ input:focus-visible {
   font-size: 12.5px;
 }
 
+/* Above .device p, which would grey it out. */
 .device .field-error {
   margin-top: 6px;
+  color: var(--brick);
 }
 
 /* A device on a backup line: a window lit in another member's house, the
@@ -857,13 +859,13 @@ input:focus-visible {
   line-height: 1.3;
 }
 
-.device .device-https p {
+.device .setting-note {
   max-width: 46ch;
   margin-top: 3px;
   text-wrap: pretty;
 }
 
-.device-https:has([aria-checked="false"]) p {
+.device-https:has([aria-checked="false"]) .setting-note {
   color: var(--ink);
 }
 
@@ -873,6 +875,7 @@ input:focus-visible {
 
 .device-https .field-error {
   grid-column: 1 / -1;
+  margin: 8px 0 0;
 }
 
 /* Where a changed device goes while its line is offline. */
