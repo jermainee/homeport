@@ -381,7 +381,8 @@ func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
 			return wgstack.Admission{Allow: true}
 		}
 		if f.Dst.Port() == 443 {
-			return wgstack.Admission{Allow: true, ServerName: s.cfg.Access.TopUpHost}
+			topUp := func(name string) bool { return name != "" && s.cfg.Access.TopUpHost(name) }
+			return wgstack.Admission{Allow: true, ServerName: topUp}
 		}
 	}
 	return wgstack.Admission{}
@@ -518,6 +519,22 @@ func (s *Server) SetPeerLine(publicKey Key, lineID string) {
 	if p, ok := s.peers[publicKey]; ok {
 		p.LineID = lineID
 		s.peers[publicKey] = p
+	}
+}
+
+// SetPeerHTTPSOnly turns HTTPS only on or off for a peer, keeping its
+// WireGuard session. Its open flows are reset, so no unencrypted flow
+// outlives turning it on. A peer that is not on the gateway is ignored.
+func (s *Server) SetPeerHTTPSOnly(publicKey Key, on bool) {
+	s.mu.Lock()
+	p, ok := s.peers[publicKey]
+	if ok {
+		p.HTTPSOnly = on
+		s.peers[publicKey] = p
+	}
+	s.mu.Unlock()
+	if ok {
+		s.stack.ResetFlows(p.IPv4, p.IPv6)
 	}
 }
 

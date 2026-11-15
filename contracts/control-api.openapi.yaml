@@ -1309,8 +1309,8 @@ components:
             Admit a TCP flow from this peer only if it opens with a TLS
             ClientHello (with any server name or none). DNS to the virtual
             resolver, over UDP or TCP, and other UDP are not affected. A
-            change ends the peer's session, so no unencrypted flow outlives
-            turning it on.
+            change resets the peer's open flows, so no unencrypted flow
+            outlives turning it on.
           type: boolean
     GatewayLine:
       type: object

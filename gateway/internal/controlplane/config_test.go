@@ -201,6 +201,14 @@ func TestTurningHTTPSOnlyOnOrOffAppliesToThePeer(t *testing.T) {
 	if a, _ := f.gw.peer(t, peerAKey); a.HTTPSOnly {
 		t.Error("peer A still has HTTPS only after the config turned it off")
 	}
+	// The setting changes in place: the devices keep their WireGuard
+	// sessions, and their flows are reset.
+	if n := f.gw.removedCount(); n != 0 {
+		t.Errorf("%d peers were removed to change HTTPS only, want none", n)
+	}
+	if f.gw.resetCount(t, peerAKey) == 0 || f.gw.resetCount(t, peerBKey) == 0 {
+		t.Error("the peers' flows were not reset when HTTPS only changed")
+	}
 	if b, _ := f.gw.peer(t, peerBKey); !b.HTTPSOnly {
 		t.Error("peer B has no HTTPS only after the config turned it on")
 	}

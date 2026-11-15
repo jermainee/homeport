@@ -29,6 +29,7 @@ type Gateway interface {
 	AddPeer(gateway.Peer) error
 	RemovePeer(gateway.Key) (gateway.Usage, error)
 	SetPeerLine(key gateway.Key, lineID string)
+	SetPeerHTTPSOnly(key gateway.Key, on bool)
 	AddLine(gateway.Line) error
 	RemoveLine(id string)
 	PeerUsage(addr netip.Addr) gateway.Usage
@@ -206,7 +207,13 @@ func (c *Controller) applyLocked(cfg Config) error {
 		}
 		// The same device on other lines stays on the gateway, WireGuard
 		// session included. Step moves its session if its line is no
-		// longer one of them.
+		// longer one of them. A changed HTTPS only applies in place; the
+		// gateway resets the device's flows, so no unencrypted one
+		// outlives turning it on.
+		if want.HTTPSOnly != ps.cfg.HTTPSOnly {
+			c.gw.SetPeerHTTPSOnly(ps.peer.PublicKey, want.HTTPSOnly)
+			ps.peer.HTTPSOnly = want.HTTPSOnly
+		}
 		ps.cfg, ps.peer.LineID = want, want.LineID
 	}
 	for id, old := range c.lines {

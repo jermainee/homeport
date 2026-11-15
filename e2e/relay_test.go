@@ -534,7 +534,7 @@ func untilDNSAnswers(f func() error) error {
 	}
 }
 
-func TestAnHTTPSOnlyDeviceGetsNoPlainHTTPButStillResolves(t *testing.T) {
+func TestAnHTTPSOnlyDeviceSendsNoPlainHTTPButStillResolves(t *testing.T) {
 	s := newStack(t, withHTTPSOnly())
 
 	if _, err := s.tryGet("http://"+tcpDst.String()+contentPath+"/blob/100", 5*time.Second); err == nil {
@@ -549,7 +549,9 @@ func TestAnHTTPSOnlyDeviceGetsNoPlainHTTPButStillResolves(t *testing.T) {
 	if err != nil {
 		t.Errorf("DNS through the virtual resolver: %v", err)
 	}
-	if n := s.agent.Stats().FlowsTotal; n != 1 {
-		t.Errorf("the agent opened %d flows, want only the DNS flow: the plain TCP flow must not reach it", n)
+	// The gateway dials the destination before it knows the flow is not
+	// TLS, but sends it nothing: the origin never gets the request.
+	if n := s.origin.requests.Load(); n != 0 {
+		t.Errorf("the origin got %d plain HTTP requests from a device with HTTPS only", n)
 	}
 }

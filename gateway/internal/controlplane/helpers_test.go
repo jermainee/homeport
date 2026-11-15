@@ -506,6 +506,18 @@ func (g *fakeGateway) removedCount() int {
 	return len(g.removed)
 }
 
+// SetPeerHTTPSOnly changes the setting and resets the peer's flows, as the
+// gateway does.
+func (g *fakeGateway) SetPeerHTTPSOnly(k gateway.Key, on bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if p, ok := g.peers[k]; ok {
+		p.HTTPSOnly = on
+		g.peers[k] = p
+		g.resets[k]++
+	}
+}
+
 func (g *fakeGateway) ResetPeerFlows(k gateway.Key) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

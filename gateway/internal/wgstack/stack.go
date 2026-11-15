@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -68,8 +69,10 @@ type Admission struct {
 	// flow can no longer be refused with a plain reset during the handshake.
 	ServerName func(name string) bool
 	// TLSOnly admits a TCP flow only if it opens with a TLS ClientHello,
-	// with any server name or none, as ServerName does. UDP flows are not
-	// affected.
+	// with any server name or none. Unlike ServerName, the destination is
+	// dialed first, so an unreachable one is refused at the SYN as usual;
+	// nothing goes upstream until the ClientHello has arrived, and a server
+	// that speaks first is refused at once. UDP flows are not affected.
 	TLSOnly bool
 }
 
@@ -238,10 +241,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		s.handleTLSOnly(r, flow, epoch, adm.ServerName)
 		return
 	}
-	if adm.TLSOnly {
-		s.handleTLSOnly(r, flow, epoch, func(string) bool { return true })
-		return
-	}
 	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 	defer cancel()
 	upstream, err := s.dialer.DialTCP(ctx, flow)
@@ -258,7 +257,51 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
-	s.relayTCP(flow.Peer, epoch, gonet.NewTCPConn(&wq, ep), ep.Abort, upstream, nil)
+	client := gonet.NewTCPConn(&wq, ep)
+	var hello []byte
+	if adm.TLSOnly {
+		if hello, err = awaitClientHello(client, upstream, time.Now().Add(helloTimeout)); err != nil {
+			ep.Abort()
+			_ = client.Close()
+			if rs, ok := upstream.(interface{ Reset() }); ok {
+				rs.Reset()
+			}
+			_ = upstream.Close()
+			return
+		}
+	}
+	s.relayTCP(flow.Peer, epoch, client, ep.Abort, upstream, hello)
+}
+
+// errServerFirst is a server that spoke before the client's ClientHello.
+var errServerFirst = errors.New("wgstack: the server spoke first, so this is not TLS")
+
+// awaitClientHello reads the client's ClientHello for a TLS-only flow and
+// returns its bytes, to be sent upstream first. Meanwhile it watches the
+// upstream: a server that sends anything first is not speaking TLS, which
+// is always client-first, so the flow is refused at once instead of
+// waiting for a ClientHello that never comes. Nothing is sent upstream.
+func awaitClientHello(client, upstream net.Conn, deadline time.Time) ([]byte, error) {
+	var spoke atomic.Bool
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		var b [1]byte
+		if n, _ := upstream.Read(b[:]); n > 0 {
+			spoke.Store(true)
+			_ = client.SetReadDeadline(time.Now()) // end the peek
+		}
+	}()
+	_, hello, err := peekServerName(client, deadline)
+	// Stop the watcher and wait for it, so only the relay reads upstream
+	// from here on. A read woken by the deadline consumes nothing.
+	_ = upstream.SetReadDeadline(time.Now())
+	<-watched
+	_ = upstream.SetReadDeadline(time.Time{})
+	if spoke.Load() {
+		return nil, errServerFirst
+	}
+	return hello, err
 }
 
 // handleTLSOnly completes the client's handshake, reads its ClientHello,
