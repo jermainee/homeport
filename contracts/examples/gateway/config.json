@@ -16,7 +16,8 @@
       "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
       "fallback_line_ids": [
         "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57"
-      ]
+      ],
+      "https_only": true
     },
     {
       "peer_id": "01a1c4af-8896-7060-852d-c68d8a6174fc",
@@ -25,7 +26,8 @@
       "ipv4": "10.77.0.3",
       "ipv6": "fd77:6870::3",
       "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
-      "fallback_line_ids": []
+      "fallback_line_ids": [],
+      "https_only": false
     }
   ],
   "lines": [

@@ -3,6 +3,7 @@
   "name": "iPhone",
   "line_id": "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57",
   "failover": "city",
+  "https_only": true,
   "exit_line": {
     "line_id": "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6",
     "country": "DE",

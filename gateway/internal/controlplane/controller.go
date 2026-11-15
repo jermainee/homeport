@@ -279,7 +279,7 @@ func parsePeer(p ConfigPeer) (gateway.Peer, error) {
 	if err != nil {
 		return gateway.Peer{}, err
 	}
-	peer := gateway.Peer{ID: p.PeerID, PublicKey: key, MemberID: p.MemberID, LineID: p.LineID}
+	peer := gateway.Peer{ID: p.PeerID, PublicKey: key, MemberID: p.MemberID, LineID: p.LineID, HTTPSOnly: p.HTTPSOnly}
 	if peer.IPv4, err = netip.ParseAddr(p.IPv4); err != nil || !peer.IPv4.Is4() {
 		return gateway.Peer{}, fmt.Errorf("invalid IPv4 tunnel address %q", p.IPv4)
 	}

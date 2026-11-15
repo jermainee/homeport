@@ -888,7 +888,7 @@ paths:
     patch:
       tags: [use]
       operationId: updateWireguardPeer
-      summary: Move a WireGuard peer to another line, or change its failover
+      summary: Move a WireGuard peer to another line, or change its failover or HTTPS only
       description: |
         The device keeps its `.conf` file: the file names the gateway, and
         the line a peer exits through is chosen on the gateway. Within about
@@ -1260,7 +1260,7 @@ components:
     GatewayPeer:
       type: object
       additionalProperties: false
-      required: [peer_id, member_id, public_key, ipv4, ipv6, line_id, fallback_line_ids]
+      required: [peer_id, member_id, public_key, ipv4, ipv6, line_id, fallback_line_ids, https_only]
       properties:
         peer_id:
           $ref: "#/components/schemas/Id"
@@ -1304,6 +1304,14 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/Id"
+        https_only:
+          description: |
+            Admit a TCP flow from this peer only if it opens with a TLS
+            ClientHello (with any server name or none). DNS to the virtual
+            resolver, over UDP or TCP, and other UDP are not affected. A
+            change ends the peer's session, so no unencrypted flow outlives
+            turning it on.
+          type: boolean
     GatewayLine:
       type: object
       additionalProperties: false
@@ -1820,6 +1828,16 @@ components:
       additionalProperties: false
       required: [request_id, line_id, name, public_key]
       properties:
+        https_only:
+          description: |
+            HTTPS only: the gateway admits a TCP flow from this device only
+            if it opens with a TLS ClientHello, with any server name or none,
+            so the line's owner and their ISP can neither read nor change it.
+            Plain HTTP, SSH, STARTTLS and other unencrypted TCP is refused.
+            DNS through the virtual resolver, over UDP or TCP, and other UDP,
+            such as QUIC, are not affected.
+          type: boolean
+          default: true
         request_id:
           $ref: "#/components/schemas/UuidV7"
         line_id:
@@ -1853,7 +1871,7 @@ components:
     WireguardPeer:
       type: object
       additionalProperties: false
-      required: [peer_id, name, line_id, failover, exit_line, public_key, ipv4, ipv6, created_at]
+      required: [peer_id, name, line_id, failover, https_only, exit_line, public_key, ipv4, ipv6, created_at]
       properties:
         peer_id:
           $ref: "#/components/schemas/Id"
@@ -1864,6 +1882,15 @@ components:
           $ref: "#/components/schemas/Id"
         failover:
           $ref: "#/components/schemas/Failover"
+        https_only:
+          description: |
+            HTTPS only: the gateway admits a TCP flow from this device only
+            if it opens with a TLS ClientHello, with any server name or none,
+            so the line's owner and their ISP can neither read nor change it.
+            Plain HTTP, SSH, STARTTLS and other unencrypted TCP is refused.
+            DNS through the virtual resolver, over UDP or TCP, and other UDP,
+            such as QUIC, are not affected.
+          type: boolean
         exit_line:
           description: |
             The line the peer's current session exits through, as the
@@ -1921,3 +1948,12 @@ components:
           $ref: "#/components/schemas/Id"
         failover:
           $ref: "#/components/schemas/Failover"
+        https_only:
+          description: |
+            HTTPS only: the gateway admits a TCP flow from this device only
+            if it opens with a TLS ClientHello, with any server name or none,
+            so the line's owner and their ISP can neither read nor change it.
+            Plain HTTP, SSH, STARTTLS and other unencrypted TCP is refused.
+            DNS through the virtual resolver, over UDP or TCP, and other UDP,
+            such as QUIC, are not affected.
+          type: boolean

@@ -24,12 +24,13 @@ func TestConfigSyncAppliesTheContractsExample(t *testing.T) {
 		IPv6:      netip.MustParseAddr("fd77:6870::2"),
 		MemberID:  memberID,
 		LineID:    lineID,
+		HTTPSOnly: true,
 	}
 	if !ok || got != want {
 		t.Errorf("peer A on the gateway is %+v, want %+v", got, want)
 	}
-	if _, ok := f.gw.peer(t, peerBKey); !ok {
-		t.Error("peer B is not on the gateway")
+	if b, ok := f.gw.peer(t, peerBKey); !ok || b.HTTPSOnly {
+		t.Errorf("peer B on the gateway is %+v (present %v); want it, without HTTPS only", b, ok)
 	}
 	line, ok := f.gw.line(lineID)
 	wantLine := gateway.Line{ID: lineID, OwnerMemberID: ownerID, AgentPin: mustPin(t, linePin)}
@@ -179,5 +180,28 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met within 5 s")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTurningHTTPSOnlyOnOrOffAppliesToThePeer(t *testing.T) {
+	f := newBareFixture(t)
+	if err := f.ctl.SyncConfig(t.Context()); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	f.api.setConfig(func(cfg map[string]any) {
+		cfg["etag"] = `"cfg-2"`
+		cfg["peers"].([]any)[0].(map[string]any)["https_only"] = false
+		cfg["peers"].([]any)[1].(map[string]any)["https_only"] = true
+	})
+
+	if err := f.ctl.SyncConfig(t.Context()); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	if a, _ := f.gw.peer(t, peerAKey); a.HTTPSOnly {
+		t.Error("peer A still has HTTPS only after the config turned it off")
+	}
+	if b, _ := f.gw.peer(t, peerBKey); !b.HTTPSOnly {
+		t.Error("peer B has no HTTPS only after the config turned it on")
 	}
 }

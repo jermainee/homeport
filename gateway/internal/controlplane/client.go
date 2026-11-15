@@ -56,6 +56,8 @@ type ConfigPeer struct {
 	LineID    string `json:"line_id"` // the line the member chose
 	// FallbackLineIDs take over while LineID is offline, best first.
 	FallbackLineIDs []string `json:"fallback_line_ids"`
+	// HTTPSOnly admits only TLS on TCP from the device.
+	HTTPSOnly bool `json:"https_only"`
 }
 
 // hasLine reports whether lineID is the peer's own line or one of its
@@ -64,10 +66,14 @@ func (p ConfigPeer) hasLine(lineID string) bool {
 	return lineID == p.LineID || slices.Contains(p.FallbackLineIDs, lineID)
 }
 
-// sameDevice reports whether a and b are the same WireGuard device: the
-// same key, addresses and member. Its lines may differ.
+// sameDevice reports whether a and b are the same WireGuard device with
+// the same HTTPS only setting: the same key, addresses and member. Its
+// lines may differ. A changed setting counts as another device, so the peer
+// is added again: its session ends and its open flows are reset, and no
+// unencrypted flow outlives turning HTTPS only on.
 func sameDevice(a, b ConfigPeer) bool {
-	return a.PeerID == b.PeerID && a.MemberID == b.MemberID && a.PublicKey == b.PublicKey && a.IPv4 == b.IPv4 && a.IPv6 == b.IPv6
+	return a.PeerID == b.PeerID && a.MemberID == b.MemberID && a.PublicKey == b.PublicKey && a.IPv4 == b.IPv4 && a.IPv6 == b.IPv6 &&
+		a.HTTPSOnly == b.HTTPSOnly
 }
 
 // ConfigLine is a shared line whose agent may connect.
