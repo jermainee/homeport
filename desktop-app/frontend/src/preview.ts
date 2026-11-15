@@ -205,7 +205,7 @@ export function previewUse(start: string): UseApi {
     async devices() {
       return devices;
     },
-    async addDevice(country, city, name) {
+    async addDevice(country, city, name, httpsOnly) {
       await sleep(700);
       const device: Device = {
         peerId: `p-${n}`,
@@ -215,7 +215,7 @@ export function previewUse(start: string): UseApi {
         city: city || previewCities[country]?.[0]?.city || "",
         isp: previewIsps[country] ?? "",
         failover: "country",
-        httpsOnly: true,
+        httpsOnly,
         exitLine: null,
         ipv4: `10.77.0.${n}`,
         ipv6: `fd77::${n}`,
@@ -249,6 +249,7 @@ export function previewUse(start: string): UseApi {
               isp: previewIsps[change.country] ?? "",
             };
       if (change.failover) moved.failover = change.failover;
+      if (change.httpsOnly !== undefined) moved.httpsOnly = change.httpsOnly;
       const device: Device = { ...moved, exitLine: exitOf(moved, new Date().toISOString()) };
       devices = devices.map((d) => (d.peerId === peerId ? device : d));
       return device;

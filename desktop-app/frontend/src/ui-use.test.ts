@@ -237,6 +237,28 @@ describe("the Use tab", () => {
     await vi.waitFor(() => expect(document.activeElement).toBe(q('[data-action="use-add"]')));
   });
 
+  it("adds a device with HTTPS only off when the member turns it off", async () => {
+    q('[data-action="use-add"]')!.click();
+    await vi.waitFor(() => expect(q("#device-name")).not.toBeNull());
+    const sw = () => q('[data-form="add-device"] [role="switch"]')!;
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    expect(sw().getAttribute("aria-label")).toBe("HTTPS only");
+    const name = q<HTMLInputElement>("#device-name")!;
+    name.value = "Laptop";
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+
+    sw().focus();
+    sw().click();
+
+    await vi.waitFor(() => expect(sw().getAttribute("aria-checked")).toBe("false"));
+    expect(document.activeElement).toBe(sw());
+    expect(q<HTMLInputElement>("#device-name")?.value).toBe("Laptop");
+    expect(document.getElementById(sw().getAttribute("aria-describedby") ?? "")?.textContent).toContain("can read and change it");
+    q<HTMLFormElement>('[data-form="add-device"]')!.requestSubmit();
+    await vi.waitFor(() => expect(q(".key-card")).not.toBeNull());
+    expect(use.calls).toContain("addDevice DE - Laptop, HTTPS only off");
+  });
+
   it("leaves the form on Escape", async () => {
     q('[data-action="use-add"]')!.click();
     await vi.waitFor(() => expect(q("#device-name")).not.toBeNull());
@@ -384,6 +406,23 @@ describe("changing a device", () => {
     radio.click();
     radio.dispatchEvent(new Event("change", { bubbles: true }));
   };
+
+  it("offers HTTPS only as the device has it, and saves it with the rest", async () => {
+    await openChange();
+    const sw = () => q('[data-form="edit-device"] [role="switch"]')!;
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+
+    sw().focus();
+    sw().click();
+    await vi.waitFor(() => expect(sw().getAttribute("aria-checked")).toBe("false"));
+    expect(document.activeElement).toBe(sw());
+    expect(use.updates).toEqual([]);
+    q<HTMLFormElement>('[data-form="edit-device"]')!.requestSubmit();
+
+    await vi.waitFor(() => expect(announcer.textContent).toBe("Changes saved."));
+    expect(use.updates).toEqual([[laptop.peerId, { httpsOnly: false }]]);
+    expect(q(`.device[data-peer="${laptop.peerId}"] [role="switch"]`)?.getAttribute("aria-checked")).toBe("false");
+  });
 
   it("keeps its line by default, and says where that is", async () => {
     await openChange();

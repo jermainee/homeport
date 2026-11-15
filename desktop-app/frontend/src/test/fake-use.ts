@@ -113,10 +113,11 @@ export class FakeUse implements UseApi {
     this.calls.push("devices");
     return settle(this.devicesAnswer);
   }
-  async addDevice(country: string, city: string, name: string) {
-    this.calls.push(`addDevice ${country} ${city || "-"} ${name}`);
+  async addDevice(country: string, city: string, name: string, httpsOnly: boolean) {
+    this.calls.push(`addDevice ${country} ${city || "-"} ${name}${httpsOnly ? "" : ", HTTPS only off"}`);
     await this.#hold;
-    const a = this.addAnswer ?? newDevice(country, city, name);
+    const made = newDevice(country, city, name);
+    const a = this.addAnswer ?? { ...made, device: { ...made.device, httpsOnly } };
     this.addAnswer = null;
     const dev = settle(a);
     if (Array.isArray(this.devicesAnswer)) this.devicesAnswer = [dev.device, ...this.devicesAnswer];
@@ -149,7 +150,13 @@ export class FakeUse implements UseApi {
       change.country === undefined
         ? {}
         : { lineId: `line-${change.country}-${change.city || "any"}-2`, country: change.country, city: change.city || "Somewhere", isp: "M-net" };
-    return a ? settle(a) : this.#patch(peerId, { ...moved, ...(change.failover ? { failover: change.failover } : {}) });
+    return a
+      ? settle(a)
+      : this.#patch(peerId, {
+          ...moved,
+          ...(change.failover ? { failover: change.failover } : {}),
+          ...(change.httpsOnly !== undefined ? { httpsOnly: change.httpsOnly } : {}),
+        });
   }
 
   async setHttpsOnly(peerId: string, on: boolean) {

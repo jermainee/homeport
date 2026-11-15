@@ -96,6 +96,7 @@ export interface DeviceChange {
   country?: string;
   city?: string;
   failover?: Failover;
+  httpsOnly?: boolean;
 }
 
 /** services.NewDevice in Go: a device just added, with its config's QR code. */
@@ -116,7 +117,7 @@ export interface UseApi {
   cities(country: string, exceptPeer?: string): Promise<City[]>;
   devices(): Promise<Device[]>;
   /** addDevice gets a line in country, and in city unless it is "". */
-  addDevice(country: string, city: string, name: string): Promise<NewDevice>;
+  addDevice(country: string, city: string, name: string, httpsOnly: boolean): Promise<NewDevice>;
   /** saveConfig resolves false when the member cancels the save dialog. */
   saveConfig(peerId: string): Promise<boolean>;
   forgetConfig(peerId: string): Promise<void>;
@@ -156,6 +157,8 @@ export interface RegionPick {
 export interface AddStep extends RegionPick {
   kind: "add";
   name: string;
+  /** HTTPS only for the new device: on unless the member turns it off. */
+  httpsOnly: boolean;
   creating: boolean;
   error?: ErrorCode;
 }
@@ -169,6 +172,7 @@ export interface EditStep extends RegionPick {
   peerId: string;
   move: boolean;
   failover: Failover;
+  httpsOnly: boolean;
   saving: boolean;
   error?: ErrorCode;
 }
@@ -485,7 +489,7 @@ export class Use {
   async startAdding(): Promise<void> {
     const v = this.#ready();
     if (!v || v.step.kind !== "list") return;
-    this.#set({ ...v, step: { kind: "add", ...noRegion, name: "", creating: false } });
+    this.#set({ ...v, step: { kind: "add", ...noRegion, name: "", httpsOnly: true, creating: false } });
     await this.#loadRegions(v.devices[0]?.country, true);
   }
 
@@ -613,7 +617,7 @@ export class Use {
     this.#setStep({ ...step, creating: true, error: undefined });
     let dev: NewDevice;
     try {
-      dev = await this.api.addDevice(step.country, step.city, name);
+      dev = await this.api.addDevice(step.country, step.city, name, step.httpsOnly);
     } catch (err) {
       await this.#createFailed(errorCode(err));
       return;
@@ -704,6 +708,7 @@ export class Use {
         country: d.country || null,
         city: d.city,
         failover: d.failover,
+        httpsOnly: d.httpsOnly,
         saving: false,
       },
     });
@@ -718,6 +723,13 @@ export class Use {
     if (step?.kind !== "edit" || step.saving || step.move === move) return;
     this.#setStep({ ...step, move, error: undefined });
     if (move && step.countries === null) await this.#loadRegions(undefined, true);
+  }
+
+  /** pickHttpsOnly turns HTTPS only on or off for the new or changed device. */
+  pickHttpsOnly(on: boolean): void {
+    const step = this.#picking();
+    if (!step || busy(step)) return;
+    this.#setStep({ ...step, httpsOnly: on, error: undefined });
   }
 
   /** pickFailover picks where the device goes while its line is offline. */
@@ -757,6 +769,7 @@ export class Use {
       change.city = step.city;
     }
     if (step.failover !== d.failover) change.failover = step.failover;
+    if (step.httpsOnly !== d.httpsOnly) change.httpsOnly = step.httpsOnly;
     if (Object.keys(change).length === 0) {
       this.#set({ ...v, step: { kind: "list" } });
       return;

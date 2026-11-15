@@ -516,6 +516,8 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         return use?.cancelEditing();
       case "use-https-only":
         return void use?.toggleHttpsOnly(peer);
+      case "use-form-https-only":
+        return use?.pickHttpsOnly(button.getAttribute("aria-checked") !== "true");
     }
   });
 }

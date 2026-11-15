@@ -246,26 +246,62 @@ function deviceRow(d: Device, v: Ready): string {
     </li>`;
 }
 
-// HTTPS only, per device: what it blocks while on, and what the line's
-// owner can do to the device's traffic while off. The switch shows the
-// position asked for at once; the note says what holds until Homeport
-// answers.
-function httpsOnlySetting(d: Device, v: Ready): string {
-  const { on, busy, error } = httpsOnlyOf(v, d);
-  const note = d.httpsOnly
+/** What HTTPS only blocks while on, and what the line's owner can do while off. */
+function httpsOnlyNote(on: boolean): string {
+  return on
     ? "Plain HTTP, SSH and mail apps that start unencrypted won't work. Turning this off lets the line's owner read and change that traffic."
     : "Unencrypted traffic works, and the line's owner can read and change it.";
-  const id = `https-${esc(d.peerId)}`;
+}
+
+interface HttpsOnlyParts {
+  /** The position the switch shows. */
+  on: boolean;
+  /** The position the note describes: what holds now. */
+  holds: boolean;
+  busy: boolean;
+  id: string;
+  label: string;
+  /** The switch's data-action, and data-peer when it acts on a device. */
+  action: string;
+  peer?: string;
+  error?: ErrorCode;
+}
+
+// The HTTPS only setting: a label and note, the same enamel switch as
+// Share, and why the last turn failed.
+function httpsOnlyBlock(p: HttpsOnlyParts): string {
+  const peer = p.peer === undefined ? "" : `data-peer="${esc(p.peer)}"`;
   return `
-      <div class="device-https" ${d.httpsOnly ? "" : "data-off"}>
-        <div class="setting-text">
-          <span class="setting-label" aria-hidden="true">HTTPS only</span>
-          <p class="setting-note" id="${id}">${note}</p>
-        </div>
-        <button class="switch" type="button" role="switch" data-action="use-https-only" data-peer="${esc(d.peerId)}"
-          aria-checked="${on}" aria-label="HTTPS only for ${esc(d.name)}" aria-describedby="${id}${error ? ` ${id}-error` : ""}" ${busyAttrs(busy)}><span class="knob"></span></button>
-        ${error ? `<p class="field-error panel-error" id="${id}-error" role="alert">${esc(useErrorText(error))}</p>` : ""}
-      </div>`;
+        <div class="https-setting" ${p.holds ? "" : "data-off"}>
+          <div class="setting-text">
+            <span class="setting-label" aria-hidden="true">HTTPS only</span>
+            <p class="setting-note" id="${p.id}">${httpsOnlyNote(p.holds)}</p>
+          </div>
+          <button class="switch" type="button" role="switch" data-action="${p.action}" ${peer}
+            aria-checked="${p.on}" aria-label="${esc(p.label)}" aria-describedby="${p.id}${p.error ? ` ${p.id}-error` : ""}" ${busyAttrs(p.busy)}><span class="knob"></span></button>
+          ${p.error ? `<p class="field-error panel-error" id="${p.id}-error" role="alert">${esc(useErrorText(p.error))}</p>` : ""}
+        </div>`;
+}
+
+// A device's HTTPS only, which turns at once. The switch shows the
+// position asked for; the note says what holds until Homeport answers.
+function httpsOnlySetting(d: Device, v: Ready): string {
+  const { on, busy, error } = httpsOnlyOf(v, d);
+  return httpsOnlyBlock({
+    on,
+    holds: d.httpsOnly,
+    busy,
+    error,
+    id: `https-${esc(d.peerId)}`,
+    label: `HTTPS only for ${d.name}`,
+    action: "use-https-only",
+    peer: d.peerId,
+  });
+}
+
+// HTTPS only in the form for a new or changed device: sent with the rest.
+function httpsOnlyField(on: boolean, busy: boolean): string {
+  return httpsOnlyBlock({ on, holds: on, busy, id: "form-https", label: "HTTPS only", action: "use-form-https-only" });
 }
 
 // While its own line is offline, the gateway runs a device on another
@@ -465,6 +501,7 @@ function addStep(s: AddStep): string {
           placeholder="iPhone" value="${esc(s.name)}"
           ${nameError ? 'aria-invalid="true" aria-describedby="name-error"' : ""} ${s.creating ? "readonly" : ""} />
         ${nameError ? `<p id="name-error" class="field-error" role="alert">${esc(useErrorText("invalid_name"))}</p>` : ""}
+        ${httpsOnlyField(s.httpsOnly, s.creating)}
         <div class="panel-actions">
           <button class="button primary" type="submit" data-focus="use-create" ${busyAttrs(s.creating)}>
             ${s.creating ? "Creating config…" : "Create config"}
@@ -562,6 +599,7 @@ function editStep(v: Ready, s: EditStep): string {
           <div class="group failover-list">${FAILOVERS.map((f) => failoverOption(f, f === s.failover, place)).join("")}</div>
           <p class="panel-hint">It moves back once its own line has been online again for a few minutes.</p>
         </fieldset>
+        ${httpsOnlyField(s.httpsOnly, s.saving)}
         <div class="panel-actions">
           <button class="button primary" type="submit" data-focus="use-save-device" data-peer="${esc(s.peerId)}" ${busyAttrs(s.saving)}>
             ${s.saving ? "Saving…" : "Save changes"}

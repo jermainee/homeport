@@ -834,21 +834,33 @@ input:focus-visible {
   box-shadow: 0 0 6px 1px var(--lamp-glow);
 }
 
-/* HTTPS only, per device: a setting under the device's name, set off by
-   an inset rule, with the same enamel switch as Share. While it's off, the
-   note says what the line's owner can do, in ink rather than slate. */
-.device-https {
+/* HTTPS only: a label and note beside the same enamel switch as Share.
+   While it's off, the note says what the line's owner can do, in ink
+   rather than slate. Under a device's name it is set off by an inset
+   rule; in a form it sits in a recessed box, like the failover choices. */
+.https-setting {
   display: grid;
-  flex-basis: 100%;
   grid-template-columns: 1fr auto;
   align-items: start;
   column-gap: 16px;
+}
+
+.device .https-setting {
+  flex-basis: 100%;
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent);
 }
 
-.device:has(.device-backup) .device-https {
+.device:has(.device-backup) .https-setting {
   margin-top: 4px;
+}
+
+.add-form .https-setting {
+  margin: 16px 0 4px;
+  padding: 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--wall);
 }
 
 .setting-label {
@@ -857,21 +869,23 @@ input:focus-visible {
   line-height: 1.3;
 }
 
-.device .setting-note {
+.https-setting .setting-note {
   max-width: 46ch;
-  margin-top: 3px;
+  margin: 3px 0 0;
+  color: var(--slate);
+  font-size: 12.5px;
   text-wrap: pretty;
 }
 
-.device-https[data-off] .setting-note {
+.https-setting[data-off] .setting-note {
   color: var(--ink);
 }
 
-.device-https .switch {
+.https-setting .switch {
   margin-top: -3px;
 }
 
-.device-https .field-error {
+.https-setting .field-error {
   grid-column: 1 / -1;
   margin: 8px 0 0;
 }

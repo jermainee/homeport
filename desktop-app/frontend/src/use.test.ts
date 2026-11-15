@@ -292,6 +292,7 @@ describe("adding a device", () => {
       city: "",
       query: "",
       name: "",
+      httpsOnly: true,
       creating: false,
     });
   });
@@ -368,6 +369,33 @@ describe("adding a device", () => {
     expect(api.calls).toContain("addDevice DE Munich iPhone");
     expect(ready().step).toEqual({ kind: "config", device: created, saving: false, saved: false });
     expect(ready().devices).toEqual([created.device, laptop]);
+  });
+
+  it("creates the device with HTTPS only off when the member turns it off", async () => {
+    await open();
+    await use.startAdding();
+    use.setName("Laptop");
+
+    use.pickHttpsOnly(false);
+    await use.create();
+
+    expect(api.calls).toContain("addDevice DE - Laptop, HTTPS only off");
+    expect(ready().devices[0]).toMatchObject({ name: "Laptop", httpsOnly: false });
+  });
+
+  it("keeps HTTPS only as it is while the config is created", async () => {
+    await open();
+    await use.startAdding();
+    use.setName("Laptop");
+    api.hold();
+    const creating = use.create();
+
+    use.pickHttpsOnly(false);
+    api.release();
+    await creating;
+
+    expect(api.calls).toContain("addDevice DE - Laptop");
+    expect(ready().devices[0]).toMatchObject({ name: "Laptop", httpsOnly: true });
   });
 
   it("creates the config in any city of the country when no city is picked", async () => {
@@ -692,9 +720,37 @@ describe("changing a device", () => {
       city: "Berlin",
       query: "",
       failover: "city",
+      httpsOnly: true,
       saving: false,
     });
     expect(api.calls).not.toContain("countries");
+  });
+
+  it("turns HTTPS only off together with the failover, in one change", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+
+    use.pickHttpsOnly(false);
+    use.pickFailover("off");
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "off", httpsOnly: false }]]);
+    expect(ready().devices[0]).toMatchObject({ failover: "off", httpsOnly: false });
+    expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it("sends HTTPS only alone when nothing else changed, and nothing once it's back", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickHttpsOnly(false);
+    await use.saveDevice();
+    expect(api.updates).toEqual([[laptop.peerId, { httpsOnly: false }]]);
+
+    use.startEditing(laptop.peerId);
+    use.pickHttpsOnly(true);
+    use.pickHttpsOnly(false);
+    await use.saveDevice();
+    expect(api.updates).toHaveLength(1);
   });
 
   it("loads where lines are free once the member chooses to move it, keeping its city", async () => {
