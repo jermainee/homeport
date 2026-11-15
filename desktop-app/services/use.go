@@ -36,8 +36,8 @@ type UseOptions struct {
 }
 
 // UseService is Use: the member's credits, buying more through Stripe
-// Checkout, the lines they can use, and the devices (WireGuard peers) that
-// use them.
+// Checkout, where they can get a line, and the devices (WireGuard peers)
+// that use one.
 //
 // Locking follows AuthService: no API call holds the lock.
 type UseService struct {
@@ -55,12 +55,13 @@ type UseService struct {
 	held     *heldConfig      // the config the member is looking at, the only copy of its key
 }
 
-// newPeer is what an AddDevice retry repeats: the line, the name, and the
-// device's key pair, whose public key the API may have registered.
+// newPeer is what an AddDevice retry repeats: the region, the name, and
+// the device's key pair, whose public key the API may have registered.
 type newPeer struct {
-	lineID string
-	name   string
-	key    *ecdh.PrivateKey
+	country string
+	city    string
+	name    string
+	key     *ecdh.PrivateKey
 }
 
 // heldConfig is a new device's complete config, private key included. It
@@ -185,38 +186,58 @@ func (s *UseService) PollCheckout(ctx context.Context) (CheckoutCheck, error) {
 	return check, nil
 }
 
-// Line is a line the member can use. City and ISP are empty when the API
-// doesn't know them.
-type Line struct {
-	LineID  string `json:"lineId"`
+// Region is a country with free lines for the member, and how many.
+type Region struct {
 	Country string `json:"country"` // ISO 3166-1 alpha-2
-	City    string `json:"city"`
-	ISP     string `json:"isp"`
-	IPv6    bool   `json:"ipv6"`
-	Online  bool   `json:"online"`
+	Lines   int    `json:"lines"`
 }
 
-// Lines lists the lines the member can use. Never the member's own line,
-// or one linked to them: the API leaves those out.
-func (s *UseService) Lines(ctx context.Context) ([]Line, error) {
+// Countries lists the countries with free lines for the member, by code.
+// Never counting the member's own lines, or ones linked to them: the API
+// leaves those out. With exceptPeer, a device the member moves, its line
+// doesn't count either.
+func (s *UseService) Countries(ctx context.Context, exceptPeer string) ([]Region, error) {
 	sess, err := session(s.profile)
 	if err != nil {
 		return nil, err
 	}
-	lines, err := s.api.AvailableLines(ctx, sess.Token)
+	regions, err := s.api.Regions(ctx, sess.Token, "", exceptPeer)
 	if err != nil {
 		return nil, serviceError(err)
 	}
-	out := make([]Line, 0, len(lines))
-	for _, l := range lines {
-		out = append(out, Line{
-			LineID:  l.ID,
-			Country: l.Country,
-			City:    deref(l.City),
-			ISP:     deref(l.ISP),
-			IPv6:    l.IPv6,
-			Online:  l.Online,
-		})
+	out := make([]Region, 0, len(regions))
+	for _, r := range regions {
+		out = append(out, Region{Country: r.Country, Lines: r.Lines})
+	}
+	return out, nil
+}
+
+// City is a city with free lines for the member, and how many.
+type City struct {
+	City  string `json:"city"`
+	Lines int    `json:"lines"`
+}
+
+// Cities lists the cities of country with free lines for the member, most
+// lines first. Lines whose city the API doesn't know count only in
+// Countries. With exceptPeer, as in Countries.
+func (s *UseService) Cities(ctx context.Context, country, exceptPeer string) ([]City, error) {
+	sess, err := session(s.profile)
+	if err != nil {
+		return nil, err
+	}
+	regions, err := s.api.Regions(ctx, sess.Token, country, exceptPeer)
+	if err != nil {
+		return nil, serviceError(err)
+	}
+	out := []City{}
+	for _, r := range regions {
+		if r.Country != country {
+			continue
+		}
+		for _, c := range r.Cities {
+			out = append(out, City{City: c.City, Lines: c.Lines})
+		}
 	}
 	return out, nil
 }
@@ -228,13 +249,17 @@ func deref(s *string) string {
 	return *s
 }
 
-// Device is a device that uses a line: a WireGuard peer.
+// Device is a device that uses a line: a WireGuard peer. Country, City and
+// ISP say where its line is; each is empty when the API doesn't know it.
 type Device struct {
 	PeerID string `json:"peerId"`
 	Name   string `json:"name"`
-	// LineID is the line the member chose. The device exits through it
-	// whenever it is online.
-	LineID string `json:"lineId"`
+	// LineID is the line the member chose, or the API picked. The device
+	// exits through it whenever it is online.
+	LineID  string `json:"lineId"`
+	Country string `json:"country"` // ISO 3166-1 alpha-2
+	City    string `json:"city"`
+	ISP     string `json:"isp"`
 	// Failover is where the device goes while its line is offline:
 	// FailoverCountry, FailoverCity or FailoverOff.
 	Failover string `json:"failover"`
@@ -270,8 +295,9 @@ type ExitLine struct {
 
 func deviceOf(p apiclient.Peer) Device {
 	d := Device{
-		PeerID: p.ID, Name: p.Name, LineID: p.LineID, Failover: p.Failover,
-		IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		PeerID: p.ID, Name: p.Name, LineID: p.LineID,
+		Country: deref(p.Line.Country), City: deref(p.Line.City), ISP: deref(p.Line.ISP),
+		Failover: p.Failover, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if e := p.ExitLine; e != nil {
 		d.ExitLine = &ExitLine{LineID: e.LineID, Country: deref(e.Country), City: deref(e.City), Since: e.Since}
@@ -288,14 +314,18 @@ type NewDevice struct {
 	FileName string `json:"fileName"`
 }
 
-// AddDevice creates a WireGuard config for a device named name on lineID.
-// The app makes the device's key pair and sends the API only the public
-// key; the private key goes into the config, which the member sees once:
-// it stays in memory until ForgetConfig, and no copy is stored.
-func (s *UseService) AddDevice(ctx context.Context, lineID, name string) (NewDevice, error) {
+// AddDevice creates a WireGuard config for a device named name, on a free
+// line the API picks in country, and in city unless it is empty. The app
+// makes the device's key pair and sends the API only the public key; the
+// private key goes into the config, which the member sees once: it stays
+// in memory until ForgetConfig, and no copy is stored.
+func (s *UseService) AddDevice(ctx context.Context, country, city, name string) (NewDevice, error) {
 	name = strings.TrimSpace(name)
 	if n := utf8.RuneCountInString(name); n < 1 || n > maxDeviceName {
 		return NewDevice{}, &Error{Code: ErrInvalidName}
+	}
+	if country == "" {
+		return NewDevice{}, &Error{Code: ErrNoCountry}
 	}
 	sess, err := session(s.profile)
 	if err != nil {
@@ -307,15 +337,15 @@ func (s *UseService) AddDevice(ctx context.Context, lineID, name string) (NewDev
 	var created apiclient.PeerCreated
 	var key *ecdh.PrivateKey
 	err = s.addPeer.send(sess.MemberID,
-		func(p newPeer) bool { return p.lineID == lineID && p.name == name },
+		func(p newPeer) bool { return p.country == country && p.city == city && p.name == name },
 		func() (newPeer, error) {
 			k, err := newWireGuardKey()
-			return newPeer{lineID: lineID, name: name, key: k}, err
+			return newPeer{country: country, city: city, name: name, key: k}, err
 		},
 		func(requestID string, p newPeer) (err error) {
 			key = p.key
 			public := base64.StdEncoding.EncodeToString(p.key.PublicKey().Bytes())
-			created, err = s.api.CreatePeer(ctx, sess.Token, requestID, lineID, name, public)
+			created, err = s.api.CreatePeer(ctx, sess.Token, requestID, country, city, name, public)
 			return err
 		})
 	if err != nil {
@@ -398,15 +428,8 @@ const maxTunnelName = 15
 func peerError(err error) error {
 	var apiErr *apiclient.Error
 	if errors.As(err, &apiErr) {
-		switch {
-		case apiErr.Status == http.StatusNotFound:
-			return &Error{Code: ErrLineUnavailable, err: err}
-		case apiErr.Code == "line_full":
-			return &Error{Code: ErrLineFull, err: err}
-		case apiErr.Code == "line_not_allowed":
-			return &Error{Code: ErrLineNotAllowed, err: err}
-		case apiErr.Code == "line_on_other_gateway":
-			return &Error{Code: ErrLineOnOtherGateway, err: err}
+		if apiErr.Code == "no_free_line" {
+			return &Error{Code: ErrNoFreeLine, err: err}
 		}
 	}
 	return serviceError(err)
@@ -501,45 +524,30 @@ func (s *UseService) Devices(ctx context.Context) ([]Device, error) {
 	return out, nil
 }
 
-// UpdateDevice moves a device to lineID, or changes its failover
-// (FailoverCountry, FailoverCity or FailoverOff), or both; an empty
-// argument keeps what the device has. The device keeps its config: within
-// about 30 seconds the gateway ends its session on the old line, and its
-// next connection exits through the new one.
-func (s *UseService) UpdateDevice(ctx context.Context, peerID, lineID, failover string) (Device, error) {
-	if (lineID == "" && failover == "") ||
+// UpdateDevice moves a device to a free line the API picks in country,
+// and in city unless it is empty, or changes its failover (FailoverCountry,
+// FailoverCity or FailoverOff), or both; an empty argument keeps what the
+// device has. The new line is on the device's gateway and isn't its current
+// one. The device keeps its config: within about 30 seconds the gateway ends
+// its session on the old line, and its next connection exits through the
+// new one.
+func (s *UseService) UpdateDevice(ctx context.Context, peerID, country, city, failover string) (Device, error) {
+	if (country == "" && failover == "") || (city != "" && country == "") ||
 		(failover != "" && failover != FailoverCountry && failover != FailoverCity && failover != FailoverOff) {
-		return Device{}, &Error{Code: ErrUnexpected, err: errors.New("update a device's line, its failover, or both")}
+		return Device{}, &Error{Code: ErrUnexpected, err: errors.New("update a device's region, its failover, or both")}
 	}
 	sess, err := session(s.profile)
 	if err != nil {
 		return Device{}, err
 	}
-	p, err := s.api.UpdatePeer(ctx, sess.Token, peerID, lineID, failover)
+	p, err := s.api.UpdatePeer(ctx, sess.Token, peerID, country, city, failover)
 	if apiclient.IsStatus(err, http.StatusNotFound) {
-		return Device{}, s.missing(ctx, sess.Token, peerID, lineID, err)
+		return Device{}, &Error{Code: ErrDeviceGone, err: err}
 	}
 	if err != nil {
 		return Device{}, peerError(err)
 	}
 	return deviceOf(p), nil
-}
-
-// missing tells why the API didn't find what UpdateDevice named: it
-// answers 404 both for a device that is gone and for a line that stopped
-// sharing.
-func (s *UseService) missing(ctx context.Context, token, peerID, lineID string, notFound error) error {
-	if lineID == "" {
-		return &Error{Code: ErrDeviceGone, err: notFound}
-	}
-	peers, err := s.api.Peers(ctx, token)
-	if err != nil {
-		return serviceError(err)
-	}
-	if !slices.ContainsFunc(peers, func(p apiclient.Peer) bool { return p.ID == peerID }) {
-		return &Error{Code: ErrDeviceGone, err: notFound}
-	}
-	return &Error{Code: ErrLineUnavailable, err: notFound}
 }
 
 // RemoveDevice deletes a device. Within about 30 seconds the gateway drops

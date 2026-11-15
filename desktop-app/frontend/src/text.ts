@@ -12,14 +12,11 @@ export const errorText: Record<ErrorCode, string> = {
   identity_required: "Verify your identity first.",
   gateway_unavailable: "No Homeport gateway can take your line yet. Try again in a few minutes.",
   signed_out: "You were signed out. Sign in again.",
-  line_unavailable: "That line isn't shared any more. Pick another one.",
-  line_full: "That line has as many members as it can take. Pick another one.",
-  line_not_allowed: "That line is yours, or linked to you, so you can't use it. Pick another one.",
-  line_on_other_gateway:
-    "That line runs through another Homeport gateway than this device's config. Pick another line, or add the device again on that one.",
   device_gone: "This device was removed. Add it again to use it.",
   config_gone: "This config is gone. Remove the device and add it again.",
   invalid_name: "Give the device a name of up to 64 characters.",
+  no_country: "Pick the country its traffic should come from.",
+  no_free_line: "No free line there right now. Pick another city, or any city in the country.",
   unexpected: "Sign-in didn't work. Try again.",
 };
 

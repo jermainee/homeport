@@ -134,11 +134,28 @@ function peerTarget(body: Record<string, unknown>): PeerTarget | string {
  */
 function newPeerLineSql(target: PeerTarget): string {
   if ("lineId" in target) return `SELECT ?3 AS id WHERE ${lineHasRoomSql("?3", "?2")}`;
+  return regionLineSql({ member: "?2", country: "?7", city: target.city === null ? undefined : "?8" });
+}
+
+/**
+ * SQL query of the line the API picks for the member `member` in the
+ * country `country` (and the city `city`), as column `id`: served, online,
+ * not the member's own or linked to them, with room for the member, and
+ * with the fewest other members on it. `gateway` keeps to one gateway's
+ * lines, and `except` leaves out one line. The arguments are SQL
+ * expressions.
+ */
+function regionLineSql(p: { member: string; country: string; city?: string; gateway?: string; except?: string }): string {
+  const where = [
+    p.city === undefined ? "" : ` AND l.city = ${p.city}`,
+    p.gateway === undefined ? "" : ` AND l.gateway_id = ${p.gateway}`,
+    p.except === undefined ? "" : ` AND l.id <> ${p.except}`,
+  ].join("");
   return `SELECT id FROM (
-             SELECT l.id, ${lineUsersSql("l.id", "?2")} AS others
+             SELECT l.id, ${lineUsersSql("l.id", p.member)} AS others
                FROM lines l JOIN members o ON o.id = l.member_id
-              WHERE ${servedLineSql("l", "o")} AND l.online = 1 AND l.country = ?7${target.city === null ? "" : " AND l.city = ?8"}
-                AND NOT ${ownerIsLinkedSql("?2", "l.member_id")})
+              WHERE ${servedLineSql("l", "o")} AND l.online = 1 AND l.country = ${p.country}${where}
+                AND NOT ${ownerIsLinkedSql(p.member, "l.member_id")})
            WHERE others < ${MAX_USERS_PER_LINE}
            ORDER BY others, id
            LIMIT 1`;
@@ -260,15 +277,24 @@ wireguardApi.get("/peers", requireSession, async (c) => {
  * Moves a peer to another line, or changes its failover or HTTPS only. The device keeps
  * its .conf file, which names the peer's address and the gateway: the line
  * a peer exits through is chosen on the gateway. A new line gets the
- * checks of POST, and must be on the gateway the .conf names.
+ * checks of POST, and must be on the gateway the .conf names. With a
+ * country (and city), the API picks the line there as POST does, on that
+ * gateway and other than the peer's line.
  */
 wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
   const body = await readJsonObject(c.req.raw);
-  if (!body || Object.keys(body).length === 0 || !hasOnlyFields(body, ["line_id", "failover", "https_only"])) {
-    return invalidRequest(c, "send line_id, failover, https_only or more of them");
+  if (
+    !body ||
+    Object.keys(body).length === 0 ||
+    !hasOnlyFields(body, ["line_id", "country", "city", "failover", "https_only"])
+  ) {
+    return invalidRequest(c, "send line_id or a country, failover, https_only, or more of them");
   }
-  const { line_id: lineId, failover, https_only: httpsOnly } = body;
-  if (lineId !== undefined && typeof lineId !== "string") return invalidRequest(c, "line_id must be an id");
+  const { failover, https_only: httpsOnly } = body;
+  const moving = body["line_id"] !== undefined || body["country"] !== undefined || body["city"] !== undefined;
+  const target = moving ? peerTarget(body) : null;
+  if (typeof target === "string") return invalidRequest(c, target);
+  const lineId = target !== null && "lineId" in target ? target.lineId : undefined;
   if (failover !== undefined && !isFailover(failover)) return invalidRequest(c, "failover must be country, city or off");
   if (httpsOnly !== undefined && typeof httpsOnly !== "boolean") return invalidRequest(c, "https_only must be true or false");
 
@@ -283,6 +309,40 @@ wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
     .bind(peerId, memberId)
     .first<{ line_id: string; gateway_id: string }>();
   if (!current) return apiError(c, 404, "not_found");
+
+  if (target !== null && !("lineId" in target)) {
+    // A move to a region: the API picks another free line there, on the
+    // gateway the device's config names, in the update itself.
+    const pick = regionLineSql({
+      member: "?4",
+      country: "?5",
+      city: target.city === null ? undefined : "?6",
+      gateway: "?7",
+      except: "?8",
+    });
+    const moved = await db
+      .prepare(
+        `UPDATE wireguard_peers
+            SET line_id = pick.id, failover = COALESCE(?2, failover), https_only = COALESCE(?9, https_only)
+           FROM (${pick}) AS pick
+          WHERE wireguard_peers.id = ?3 AND wireguard_peers.member_id = ?4 AND wireguard_peers.deleted_at IS NULL
+          RETURNING wireguard_peers.id`,
+      )
+      .bind(
+        null,
+        failover ?? null,
+        peerId,
+        memberId,
+        target.country,
+        target.city,
+        current.gateway_id,
+        current.line_id,
+        httpsOnly === undefined ? null : httpsOnly ? 1 : 0,
+      )
+      .first();
+    if (!moved) return apiError(c, 409, "no_free_line", "no other free line there on this device's gateway");
+    return c.json(await updatedPeer(db, peerId));
+  }
 
   const newLine = lineId !== undefined && lineId !== current.line_id ? lineId : null;
   if (newLine !== null) {
@@ -311,13 +371,18 @@ wireguardApi.patch("/peers/:id", requireVerifiedMember, async (c) => {
     return room?.room ? apiError(c, 404, "not_found") : apiError(c, 409, "line_full");
   }
 
+  return c.json(await updatedPeer(db, peerId));
+});
+
+/** The peer as the contract shows it, after an update. */
+async function updatedPeer(db: D1Database, peerId: string) {
   const peer = await db
     .prepare(peersWithExitSql("p.id = ?2"))
     .bind(Date.now() - CURRENT_SESSION_WINDOW_MS, peerId)
     .first<PeerRow>();
   if (!peer) throw new Error("peer missing after update");
-  return c.json(peerBody(peer));
-});
+  return peerBody(peer);
+}
 
 /**
  * Deleting keeps the row (deleted_at), so usage the gateway reports late

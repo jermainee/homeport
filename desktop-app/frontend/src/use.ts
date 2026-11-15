@@ -1,6 +1,6 @@
-// The Use screen as a state machine: the member's credits, buying more, the
-// lines they can use, and the devices that use them with the WireGuard
-// app. It drives the Go UseService through the UseApi seam and knows
+// The Use screen as a state machine: the member's credits, buying more,
+// where they can get a line, and the devices that use one with the
+// WireGuard app. It drives the Go UseService through the UseApi seam and knows
 // nothing about the DOM, so it is tested without a webview.
 
 import { startPolling } from "./poll";
@@ -21,15 +21,17 @@ export interface CheckoutCheck {
   balance: Balance;
 }
 
-/** services.Line in Go. */
-export interface Line {
-  lineId: string;
+/** services.Region in Go: a country with free lines for the member. */
+export interface Region {
   /** ISO 3166-1 alpha-2. */
   country: string;
+  lines: number;
+}
+
+/** services.City in Go: a city with free lines for the member. */
+export interface City {
   city: string;
-  isp: string;
-  ipv6: boolean;
-  online: boolean;
+  lines: number;
 }
 
 /**
@@ -59,8 +61,12 @@ export interface ExitLine {
 export interface Device {
   peerId: string;
   name: string;
-  /** The line the member chose. */
+  /** The device's line, which the API picked in the region the member chose. */
   lineId: string;
+  /** Where its line is, and who provides it; "" when unknown. ISO 3166-1 alpha-2. */
+  country: string;
+  city: string;
+  isp: string;
   failover: Failover;
   /** The line its session exits through; null without a session. */
   exitLine: ExitLine | null;
@@ -77,9 +83,13 @@ export function backupLine(d: Device): ExitLine | undefined {
   return d.exitLine && d.exitLine.lineId !== d.lineId ? d.exitLine : undefined;
 }
 
-/** What UpdateDevice changes; what is left out stays. */
+/**
+ * What UpdateDevice changes; what is left out stays. A country moves the
+ * device to another free line there, in the city unless it is "".
+ */
 export interface DeviceChange {
-  lineId?: string;
+  country?: string;
+  city?: string;
   failover?: Failover;
 }
 
@@ -96,14 +106,17 @@ export interface UseApi {
   balance(): Promise<Balance>;
   buyCredits(): Promise<Balance>;
   pollCheckout(): Promise<CheckoutCheck>;
-  lines(): Promise<Line[]>;
+  /** countries and cities leave out the line of exceptPeer, a device being moved. */
+  countries(exceptPeer?: string): Promise<Region[]>;
+  cities(country: string, exceptPeer?: string): Promise<City[]>;
   devices(): Promise<Device[]>;
-  addDevice(lineId: string, name: string): Promise<NewDevice>;
+  /** addDevice gets a line in country, and in city unless it is "". */
+  addDevice(country: string, city: string, name: string): Promise<NewDevice>;
   /** saveConfig resolves false when the member cancels the save dialog. */
   saveConfig(peerId: string): Promise<boolean>;
   forgetConfig(peerId: string): Promise<void>;
   removeDevice(peerId: string): Promise<void>;
-  /** updateDevice moves a device to another line, or changes its failover. */
+  /** updateDevice moves a device to another line in a region, or changes its failover. */
   updateDevice(peerId: string, change: DeviceChange): Promise<Device>;
 }
 
@@ -117,18 +130,52 @@ export type Checkout =
   // Polling gave up; "Check again" asks once more.
   | { phase: "stalled" };
 
+/** Where a device's line should be: a country, then any city in it or one city. */
+export interface RegionPick {
+  /** The countries with free lines, by code; null while they load. */
+  countries: Region[] | null;
+  country: string | null;
+  /** The picked country's cities, most lines first; null while they load or without a country. */
+  cities: City[] | null;
+  /** Why the cities didn't load; they can be loaded again. */
+  citiesError?: ErrorCode;
+  /** The picked city, or "" for any city in the country. */
+  city: string;
+  /** What the member typed to find a city. */
+  query: string;
+}
+
+/** Adding a device: where its line should be, and its name. */
+export interface AddStep extends RegionPick {
+  kind: "add";
+  name: string;
+  creating: boolean;
+  error?: ErrorCode;
+}
+
+/**
+ * Changing a device: whether it moves to another line, and where, and its
+ * failover. It keeps its config.
+ */
+export interface EditStep extends RegionPick {
+  kind: "edit";
+  peerId: string;
+  move: boolean;
+  failover: Failover;
+  saving: boolean;
+  error?: ErrorCode;
+}
+
 export type Step =
   | { kind: "list" }
-  | { kind: "add"; lineId: string | null; name: string; creating: boolean; error?: ErrorCode }
+  | AddStep
   // The new device's config, shown once.
   | { kind: "config"; device: NewDevice; saving: boolean; saved: boolean; error?: ErrorCode }
-  // A device's line and failover, being changed. It keeps its config.
-  | { kind: "edit"; peerId: string; lineId: string; failover: Failover; saving: boolean; error?: ErrorCode };
+  | EditStep;
 
 export interface Ready {
   kind: "ready";
   balance: Balance;
-  lines: Line[];
   devices: Device[];
   checkout: Checkout;
   step: Step;
@@ -159,6 +206,15 @@ export const DEVICES_REFRESH_MS = 30_000;
 /** The contract's limit on a device name. */
 export const MAX_DEVICE_NAME = 64;
 
+/** A step's region before the countries load. */
+const noRegion: RegionPick = { countries: null, country: null, cities: null, city: "", query: "" };
+
+/** The device a step moves, whose own line doesn't count as free. */
+const moving = (step: AddStep | EditStep | undefined) => (step?.kind === "edit" ? step.peerId : undefined);
+
+/** Whether a step is sending what the member picked, so the pick is fixed. */
+const busy = (step: AddStep | EditStep) => (step.kind === "add" ? step.creating : step.saving);
+
 export class Use {
   #view: UseView = { kind: "loading" };
   #listeners = new Set<(v: UseView) => void>();
@@ -171,6 +227,10 @@ export class Use {
   // API reports the old session there until the gateway moves the device.
   #movedFrom = new Map<string, string>();
   #balanceVersion = 0;
+  // Bumped by each load of the countries or cities, so only the newest
+  // answer is shown.
+  #regionsVersion = 0;
+  #citiesVersion = 0;
 
   constructor(
     private readonly api: UseApi,
@@ -207,24 +267,23 @@ export class Use {
     if (this.#view.kind === "failed") await this.#load();
   }
 
-  /** refresh reloads the balance, lines and devices without a loading state. */
+  /** refresh reloads the balance and devices without a loading state. */
   async refresh(): Promise<void> {
     if (this.#view.kind !== "ready") return;
     const devicesVersion = this.#devicesVersion;
     const balanceVersion = this.#balanceVersion;
-    let data: [Balance, Line[], Device[]];
+    let data: [Balance, Device[]];
     try {
-      data = await Promise.all([this.api.balance(), this.api.lines(), this.api.devices()]);
+      data = await Promise.all([this.api.balance(), this.api.devices()]);
     } catch (err) {
       this.#lost(errorCode(err));
       return;
     }
     const v = this.#ready();
     if (!v) return;
-    const [balance, lines, devices] = data;
+    const [balance, devices] = data;
     this.#set({
       ...v,
-      lines,
       balance: balanceVersion === this.#balanceVersion ? balance : v.balance,
       devices: devicesVersion === this.#devicesVersion ? this.#followMoves(devices) : v.devices,
     });
@@ -266,9 +325,9 @@ export class Use {
 
   async #load(): Promise<void> {
     this.#set({ kind: "loading" });
-    let data: [Balance, Line[], Device[]];
+    let data: [Balance, Device[]];
     try {
-      data = await Promise.all([this.api.balance(), this.api.lines(), this.api.devices()]);
+      data = await Promise.all([this.api.balance(), this.api.devices()]);
     } catch (err) {
       if (this.#disposed) return;
       const code = errorCode(err);
@@ -276,8 +335,8 @@ export class Use {
       return;
     }
     if (this.#disposed) return;
-    const [balance, lines, devices] = data;
-    this.#set({ kind: "ready", balance, lines, devices, checkout: { phase: "idle" }, step: { kind: "list" } });
+    const [balance, devices] = data;
+    this.#set({ kind: "ready", balance, devices, checkout: { phase: "idle" }, step: { kind: "list" } });
   }
 
   // #lost handles the errors that take Use away: a gone session, or an
@@ -374,22 +433,108 @@ export class Use {
     return check.arrived;
   }
 
-  /** startAdding opens the form for a new device, with an online line picked. */
-  startAdding(): void {
+  /**
+   * startAdding opens the form for a new device at once, then loads the
+   * countries with free lines. It picks the country of the newest device,
+   * or the only country there is, and loads that country's cities.
+   */
+  async startAdding(): Promise<void> {
     const v = this.#ready();
     if (!v || v.step.kind !== "list") return;
-    const line = v.lines.find((l) => l.online) ?? v.lines[0];
-    this.#set({ ...v, step: { kind: "add", lineId: line?.lineId ?? null, name: "", creating: false } });
+    this.#set({ ...v, step: { kind: "add", ...noRegion, name: "", creating: false } });
+    await this.#loadRegions(v.devices[0]?.country, true);
   }
 
-  /** pickLine picks the line the new or changed device will use. */
-  pickLine(lineId: string): void {
-    const v = this.#ready();
-    if (v?.step.kind === "add" && !v.step.creating) {
-      this.#set({ ...v, step: { ...v.step, lineId, error: undefined } });
-    } else if (v?.step.kind === "edit" && !v.step.saving) {
-      this.#set({ ...v, step: { ...v.step, lineId, error: undefined } });
+  /** reloadRegions loads the countries again, after they failed to load. */
+  async reloadRegions(): Promise<void> {
+    const step = this.#picking();
+    if (!step || busy(step)) return;
+    this.#setStep({ ...step, countries: null, error: undefined });
+    await this.#loadRegions(step.kind === "add" ? this.#ready()?.devices[0]?.country : undefined, true);
+  }
+
+  // #loadRegions loads the countries and keeps or makes a pick: the country
+  // the step has by the time they arrive, else `prefer`, if it has free
+  // lines; else, with `onlyOne`, the only country there is. It loads the
+  // picked country's cities.
+  async #loadRegions(prefer: string | undefined, onlyOne: boolean, error?: ErrorCode): Promise<void> {
+    const version = ++this.#regionsVersion;
+    let countries: Region[];
+    try {
+      countries = await this.api.countries(moving(this.#picking()));
+    } catch (err) {
+      const code = errorCode(err);
+      const step = this.#picking();
+      if (this.#lost(code) || !step || version !== this.#regionsVersion) return;
+      this.#setStep({ ...step, countries: [], error: code });
+      return;
     }
+    const step = this.#picking();
+    if (!step || version !== this.#regionsVersion) return;
+    const has = (code: string | null | undefined) => !!code && countries.some((c) => c.country === code);
+    const want = step.country ?? prefer;
+    const country = has(want) ? want! : onlyOne && countries.length === 1 ? countries[0]!.country : null;
+    const sameCountry = country === step.country;
+    this.#setStep({
+      ...step,
+      countries,
+      country,
+      cities: sameCountry ? step.cities : null,
+      city: sameCountry ? step.city : "",
+      query: sameCountry ? step.query : "",
+      error,
+    });
+    if (country !== null) await this.#loadCities(country, error);
+  }
+
+  // #loadCities loads country's cities, unless the member picked another
+  // country meanwhile. A picked city that has no free line any more falls
+  // back to any city.
+  async #loadCities(country: string, error?: ErrorCode): Promise<void> {
+    const version = ++this.#citiesVersion;
+    let cities: City[];
+    let failed: ErrorCode | undefined;
+    try {
+      cities = await this.api.cities(country, moving(this.#picking()));
+    } catch (err) {
+      failed = errorCode(err);
+      if (this.#lost(failed)) return;
+      cities = [];
+    }
+    const step = this.#picking();
+    if (!step || step.country !== country || version !== this.#citiesVersion) return;
+    const city = cities.some((c) => c.city === step.city) ? step.city : "";
+    this.#setStep({ ...step, cities, city, citiesError: failed, error: error ?? step.error });
+  }
+
+  /** reloadCities loads the picked country's cities again, after they failed to load. */
+  async reloadCities(): Promise<void> {
+    const step = this.#picking();
+    if (!step || busy(step) || step.country === null) return;
+    this.#setStep({ ...step, cities: null, citiesError: undefined });
+    await this.#loadCities(step.country);
+  }
+
+  /** pickCountry picks the country the device's line is in, and loads its cities. */
+  async pickCountry(country: string): Promise<void> {
+    const step = this.#picking();
+    if (!step || busy(step) || step.country === country) return;
+    this.#setStep({ ...step, country, cities: null, citiesError: undefined, city: "", query: "", error: undefined });
+    await this.#loadCities(country);
+  }
+
+  /** pickCity picks a city of the country, or "" for any city in it. */
+  pickCity(city: string): void {
+    const step = this.#picking();
+    if (!step || busy(step)) return;
+    this.#setStep({ ...step, city, error: undefined });
+  }
+
+  /** setQuery keeps what the member types to find a city, so the list follows it. */
+  setQuery(query: string): void {
+    const step = this.#picking();
+    if (!step) return;
+    this.#setStep({ ...step, query });
   }
 
   /**
@@ -410,30 +555,29 @@ export class Use {
 
   /** create makes the new device's config and shows it, once. */
   async create(): Promise<void> {
-    const v = this.#ready();
-    if (!v || v.step.kind !== "add" || v.step.creating) return;
-    const step = v.step;
+    const step = this.#picking();
+    if (step?.kind !== "add" || step.creating) return;
     const name = step.name.trim();
     if (name.length === 0 || [...name].length > MAX_DEVICE_NAME) {
-      this.#set({ ...v, step: { ...step, error: "invalid_name" } });
+      this.#setStep({ ...step, error: "invalid_name" });
       return;
     }
-    if (step.lineId === null) {
-      this.#set({ ...v, step: { ...step, error: "line_unavailable" } });
+    if (step.country === null) {
+      this.#setStep({ ...step, error: "no_country" });
       return;
     }
-    this.#set({ ...v, step: { ...step, creating: true, error: undefined } });
+    this.#setStep({ ...step, creating: true, error: undefined });
     let dev: NewDevice;
     try {
-      dev = await this.api.addDevice(step.lineId, name);
+      dev = await this.api.addDevice(step.country, step.city, name);
     } catch (err) {
-      await this.#createFailed(step, errorCode(err));
+      await this.#createFailed(errorCode(err));
       return;
     }
     const now = this.#ready();
     if (!now) {
       // Use closed meanwhile; nobody will see the config.
-      this.#forget(dev.device.peerId);
+      void this.#forget(dev.device.peerId);
       return;
     }
     this.#devicesVersion++;
@@ -444,22 +588,13 @@ export class Use {
     });
   }
 
-  async #createFailed(step: Extract<Step, { kind: "add" }>, code: ErrorCode): Promise<void> {
+  async #createFailed(code: ErrorCode): Promise<void> {
     if (this.#lost(code)) return;
-    let lineId = step.lineId;
-    let lines: Line[] | undefined;
-    if (code === "line_unavailable") {
-      // The line stopped sharing: show the lines there are now.
-      try {
-        lines = await this.api.lines();
-      } catch {
-        // The old list stays; the error already says what happened.
-      }
-      if (lines && !lines.some((l) => l.lineId === lineId)) lineId = null;
-    }
-    const v = this.#ready();
-    if (!v) return;
-    this.#set({ ...v, lines: lines ?? v.lines, step: { ...step, lineId, creating: false, error: code } });
+    const step = this.#picking();
+    if (step?.kind !== "add") return;
+    this.#setStep({ ...step, creating: false, error: code });
+    // The region filled up meanwhile: show where lines are free now.
+    if (code === "no_free_line") await this.#loadRegions(undefined, false, code);
   }
 
   /** save asks where to save the config file and saves it there. */
@@ -504,7 +639,11 @@ export class Use {
     }
   }
 
-  /** startEditing opens a device's line and failover, to change them. */
+  /**
+   * startEditing opens a device's failover, and the choice to move it to
+   * another line, to change them. A move's region starts at the device's
+   * country and city.
+   */
   startEditing(peerId: string): void {
     const v = this.#ready();
     if (!v || v.step.kind !== "list") return;
@@ -513,15 +652,35 @@ export class Use {
     this.#set({
       ...v,
       removing: undefined,
-      step: { kind: "edit", peerId, lineId: d.lineId, failover: d.failover, saving: false },
+      step: {
+        kind: "edit",
+        peerId,
+        move: false,
+        ...noRegion,
+        country: d.country || null,
+        city: d.city,
+        failover: d.failover,
+        saving: false,
+      },
     });
+  }
+
+  /**
+   * setMove says whether the device moves to another line. Moving loads the
+   * countries with free lines, the first time.
+   */
+  async setMove(move: boolean): Promise<void> {
+    const step = this.#picking();
+    if (step?.kind !== "edit" || step.saving || step.move === move) return;
+    this.#setStep({ ...step, move, error: undefined });
+    if (move && step.countries === null) await this.#loadRegions(undefined, true);
   }
 
   /** pickFailover picks where the device goes while its line is offline. */
   pickFailover(failover: Failover): void {
-    const v = this.#ready();
-    if (!v || v.step.kind !== "edit" || v.step.saving) return;
-    this.#set({ ...v, step: { ...v.step, failover, error: undefined } });
+    const step = this.#picking();
+    if (step?.kind !== "edit" || step.saving) return;
+    this.#setStep({ ...step, failover, error: undefined });
   }
 
   cancelEditing(): void {
@@ -539,29 +698,36 @@ export class Use {
     if (!v || v.step.kind !== "edit" || v.step.saving) return;
     const step = v.step;
     const d = v.devices.find((d) => d.peerId === step.peerId);
-    const change: DeviceChange = {};
     if (!d) {
       // Removed elsewhere while the form was open.
-      this.#set({ ...v, step: { ...step, error: "device_gone" } });
+      this.#setStep({ ...step, error: "device_gone" });
       return;
     }
-    if (step.lineId !== d.lineId) change.lineId = step.lineId;
+    const change: DeviceChange = {};
+    if (step.move) {
+      if (step.country === null) {
+        this.#setStep({ ...step, error: "no_country" });
+        return;
+      }
+      change.country = step.country;
+      change.city = step.city;
+    }
     if (step.failover !== d.failover) change.failover = step.failover;
     if (Object.keys(change).length === 0) {
       this.#set({ ...v, step: { kind: "list" } });
       return;
     }
-    this.#set({ ...v, step: { ...step, saving: true, error: undefined } });
+    this.#setStep({ ...step, saving: true, error: undefined });
     let dev: Device;
     try {
       dev = await this.api.updateDevice(step.peerId, change);
     } catch (err) {
-      await this.#saveFailed(step, d, errorCode(err));
+      await this.#saveFailed(step.peerId, errorCode(err));
       return;
     }
     const now = this.#ready();
     if (!now) return;
-    if (change.lineId !== undefined) this.#movedFrom.set(dev.peerId, d.lineId);
+    if (dev.lineId !== d.lineId) this.#movedFrom.set(dev.peerId, d.lineId);
     this.#devicesVersion++;
     this.#set({
       ...now,
@@ -570,31 +736,19 @@ export class Use {
     });
   }
 
-  async #saveFailed(step: Extract<Step, { kind: "edit" }>, d: Device, code: ErrorCode): Promise<void> {
+  async #saveFailed(peerId: string, code: ErrorCode): Promise<void> {
     if (this.#lost(code)) return;
+    const v = this.#ready();
+    if (v?.step.kind !== "edit") return;
     if (code === "device_gone") {
       // Removed elsewhere: there is nothing left to change.
-      const v = this.#ready();
-      if (!v) return;
       this.#devicesVersion++;
-      this.#set({ ...v, devices: v.devices.filter((x) => x.peerId !== step.peerId), step: { kind: "list" } });
+      this.#set({ ...v, devices: v.devices.filter((x) => x.peerId !== peerId), step: { kind: "list" } });
       return;
     }
-    let lines: Line[] | undefined;
-    let lineId = step.lineId;
-    if (code === "line_unavailable") {
-      // The picked line stopped sharing: show the lines there are now,
-      // with the device's own line picked again.
-      try {
-        lines = await this.api.lines();
-      } catch {
-        // The old list stays; the error already says what happened.
-      }
-      lineId = d.lineId;
-    }
-    const v = this.#ready();
-    if (!v) return;
-    this.#set({ ...v, lines: lines ?? v.lines, step: { ...step, lineId, saving: false, error: code } });
+    this.#set({ ...v, step: { ...v.step, saving: false, error: code } });
+    // The region has no other free line: show where lines are free now.
+    if (code === "no_free_line") await this.#loadRegions(undefined, false, code);
   }
 
   askRemove(peerId: string): void {
@@ -639,6 +793,17 @@ export class Use {
 
   #ready(): Ready | undefined {
     return !this.#disposed && this.#view.kind === "ready" ? this.#view : undefined;
+  }
+
+  // The step that picks a region: adding a device, or changing one.
+  #picking(): AddStep | EditStep | undefined {
+    const step = this.#ready()?.step;
+    return step?.kind === "add" || step?.kind === "edit" ? step : undefined;
+  }
+
+  #setStep(step: AddStep | EditStep): void {
+    const v = this.#ready();
+    if (v) this.#set({ ...v, step });
   }
 
   #stop(): void {

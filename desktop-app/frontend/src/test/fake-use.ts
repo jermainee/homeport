@@ -1,10 +1,14 @@
 // A stand-in for the Go UseService behind the Wails bindings, for tests.
 
-import type { Balance, CheckoutCheck, Device, DeviceChange, Line, NewDevice, UseApi } from "../use";
+import type { Balance, CheckoutCheck, City, Device, DeviceChange, NewDevice, Region, UseApi } from "../use";
 
-export const berlin: Line = { lineId: "line-berlin", country: "DE", city: "Berlin", isp: "", ipv6: true, online: true };
-export const lyon: Line = { lineId: "line-lyon", country: "FR", city: "Lyon", isp: "Orange", ipv6: false, online: false };
-export const porto: Line = { lineId: "line-porto", country: "PT", city: "", isp: "", ipv6: false, online: true };
+export const germany: Region = { country: "DE", lines: 4 };
+export const france: Region = { country: "FR", lines: 1 };
+export const portugal: Region = { country: "PT", lines: 2 };
+
+export const berlin: City = { city: "Berlin", lines: 2 };
+export const munich: City = { city: "Munich", lines: 1 };
+export const lyon: City = { city: "Lyon", lines: 1 };
 
 export const balance: Balance = { purchased: 25_000, earned: 5_000, total: 30_000, bytes: 3_000_000_000 };
 
@@ -12,6 +16,9 @@ export const laptop: Device = {
   peerId: "peer-laptop",
   name: "Laptop",
   lineId: "line-berlin",
+  country: "DE",
+  city: "Berlin",
+  isp: "Deutsche Telekom",
   failover: "country",
   exitLine: null,
   ipv4: "10.77.0.2",
@@ -19,9 +26,22 @@ export const laptop: Device = {
   createdAt: "2026-11-12T09:00:00Z",
 };
 
-export function newDevice(lineId: string, name: string, n = 3): NewDevice {
+/** The device the fake adds in country and city ("" for any city). */
+export function newDevice(country: string, city: string, name: string, n = 3): NewDevice {
   return {
-    device: { peerId: `peer-${n}`, name, lineId, failover: "country", exitLine: null, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: "2026-11-14T09:00:00Z" },
+    device: {
+      peerId: `peer-${n}`,
+      name,
+      lineId: `line-${country}-${city || "any"}`,
+      country,
+      city: city || "Somewhere",
+      isp: "Vodafone",
+      failover: "country",
+      exitLine: null,
+      ipv4: `10.77.0.${n}`,
+      ipv6: `fd77::${n}`,
+      createdAt: "2026-11-14T09:00:00Z",
+    },
     qrCode: "data:image/png;base64,iVBORw0KGgo=",
     fileName: `Homeport-${name}.conf`,
   };
@@ -36,7 +56,8 @@ const settle = <T>(a: Answer<T>): T => {
 
 export class FakeUse implements UseApi {
   balanceAnswer: Answer<Balance> = balance;
-  linesAnswer: Answer<Line[]> = [berlin, lyon];
+  countriesAnswer: Answer<Region[]> = [germany, france];
+  citiesAnswers: Record<string, Answer<City[]>> = { DE: [berlin, munich], FR: [lyon] };
   devicesAnswer: Answer<Device[]> = [laptop];
   buyAnswer: Answer<Balance> | null = null;
   /** What the next checkout polls answer, in order; then not arrived. */
@@ -53,6 +74,8 @@ export class FakeUse implements UseApi {
   removed: string[] = [];
   #hold: Promise<void> | null = null;
   #release: (() => void) | null = null;
+  #holdRegions: Promise<void> | null = null;
+  #releaseRegions: (() => void) | null = null;
 
   count(call: string): number {
     return this.calls.filter((c) => c === call).length;
@@ -71,18 +94,24 @@ export class FakeUse implements UseApi {
     this.calls.push("pollCheckout");
     return settle(this.checkoutPolls.shift() ?? { arrived: false, balance: this.balanceAnswer as Balance });
   }
-  async lines() {
-    this.calls.push("lines");
-    return settle(this.linesAnswer);
+  async countries(exceptPeer?: string) {
+    this.calls.push(exceptPeer ? `countries ${exceptPeer}` : "countries");
+    await this.#holdRegions;
+    return settle(this.countriesAnswer);
+  }
+  async cities(country: string, exceptPeer?: string) {
+    this.calls.push(exceptPeer ? `cities ${country} ${exceptPeer}` : `cities ${country}`);
+    await this.#holdRegions;
+    return settle(this.citiesAnswers[country] ?? []);
   }
   async devices() {
     this.calls.push("devices");
     return settle(this.devicesAnswer);
   }
-  async addDevice(lineId: string, name: string) {
-    this.calls.push(`addDevice ${lineId} ${name}`);
+  async addDevice(country: string, city: string, name: string) {
+    this.calls.push(`addDevice ${country} ${city || "-"} ${name}`);
     await this.#hold;
-    const a = this.addAnswer ?? newDevice(lineId, name);
+    const a = this.addAnswer ?? newDevice(country, city, name);
     this.addAnswer = null;
     const dev = settle(a);
     if (Array.isArray(this.devicesAnswer)) this.devicesAnswer = [dev.device, ...this.devicesAnswer];
@@ -114,7 +143,12 @@ export class FakeUse implements UseApi {
     const devices = settle(this.devicesAnswer);
     const old = devices.find((d) => d.peerId === peerId);
     if (!old) throw new Error(`no device ${peerId}`);
-    const dev: Device = { ...old, ...change };
+    // A move lands on another line in the region, as the API picks it.
+    const moved =
+      change.country === undefined
+        ? {}
+        : { lineId: `line-${change.country}-${change.city || "any"}-2`, country: change.country, city: change.city || "Somewhere", isp: "M-net" };
+    const dev: Device = { ...old, ...moved, ...(change.failover ? { failover: change.failover } : {}) };
     this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
     return dev;
   }
@@ -126,5 +160,14 @@ export class FakeUse implements UseApi {
   release() {
     this.#release?.();
     this.#hold = null;
+  }
+
+  /** holdRegions keeps the next countries and cities answers waiting until releaseRegions. */
+  holdRegions() {
+    this.#holdRegions = new Promise((r) => (this.#releaseRegions = r));
+  }
+  releaseRegions() {
+    this.#releaseRegions?.();
+    this.#holdRegions = null;
   }
 }

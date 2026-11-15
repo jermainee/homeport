@@ -237,61 +237,132 @@ func (s *saver) Choose(suggested string) (string, error) {
 	return path, nil
 }
 
-func TestLinesListsTheLinesTheMemberCanUse(t *testing.T) {
+func TestCountriesSaysWhereFreeLinesAre(t *testing.T) {
 	f := newUse(t)
-	berlin, isp := "Berlin", "Deutsche Telekom"
-	de := f.api.OfferLine(fakeapi.AvailableLine{Country: "DE", City: &berlin, ISP: &isp, IPv6: true, Online: true})
-	fr := f.api.OfferLine(fakeapi.AvailableLine{Country: "FR"})
+	f.offer("DE", "Berlin", "Deutsche Telekom")
+	f.offer("DE", "Munich", "")
+	f.offer("PT", "", "")
+	f.offer("", "", "") // where the API doesn't know: never listed
 
-	got, err := f.use.Lines(t.Context())
+	got, err := f.use.Countries(t.Context(), "")
 	if err != nil {
-		t.Fatalf("Lines: %v", err)
+		t.Fatalf("Countries: %v", err)
 	}
 
-	want := []services.Line{
-		{LineID: de, Country: "DE", City: "Berlin", ISP: "Deutsche Telekom", IPv6: true, Online: true},
-		{LineID: fr, Country: "FR"},
-	}
+	want := []services.Region{{Country: "DE", Lines: 2}, {Country: "PT", Lines: 1}}
 	if !slices.Equal(got, want) {
-		t.Errorf("lines = %+v, want %+v", got, want)
+		t.Errorf("countries = %+v, want %+v", got, want)
 	}
 }
 
 // The webview gets [], not null, when nobody shares a line.
-func TestLinesWhenNoneAreSharedIsEmpty(t *testing.T) {
+func TestCountriesWhenNoneAreSharedIsEmpty(t *testing.T) {
 	f := newUse(t)
 
-	got, err := f.use.Lines(t.Context())
+	got, err := f.use.Countries(t.Context(), "")
 	if err != nil {
-		t.Fatalf("Lines: %v", err)
+		t.Fatalf("Countries: %v", err)
 	}
 	if got == nil || len(got) != 0 {
-		t.Errorf("lines = %#v, want an empty list", got)
+		t.Errorf("countries = %#v, want an empty list", got)
 	}
 }
 
-func TestLinesNeedAVerifiedIdentity(t *testing.T) {
+func TestCountriesNeedAVerifiedIdentity(t *testing.T) {
 	f := newUse(t)
 	f.api.SetIdentityStatus(t, email, "processing")
 
-	_, err := f.use.Lines(t.Context())
+	_, err := f.use.Countries(t.Context(), "")
 
 	if code := errCode(err); code != services.ErrIdentityRequired {
 		t.Errorf("error = %v, want code %q", err, services.ErrIdentityRequired)
 	}
 }
 
-// offerBerlin offers a line in Berlin and returns its id.
-func (f *useFixture) offerBerlin() string {
-	city := "Berlin"
-	return f.api.OfferLine(fakeapi.AvailableLine{Country: "DE", City: &city, Online: true})
+func TestCitiesListsACountrysCitiesMostLinesFirst(t *testing.T) {
+	f := newUse(t)
+	f.offer("DE", "Berlin", "")
+	f.offer("DE", "Munich", "")
+	f.offer("DE", "Munich", "")
+	f.offer("DE", "", "")
+	f.offer("PT", "Porto", "")
+
+	got, err := f.use.Cities(t.Context(), "DE", "")
+	if err != nil {
+		t.Fatalf("Cities: %v", err)
+	}
+
+	want := []services.City{{City: "Munich", Lines: 2}, {City: "Berlin", Lines: 1}}
+	if !slices.Equal(got, want) {
+		t.Errorf("cities = %+v, want %+v", got, want)
+	}
 }
 
-// addDevice adds a device on line and returns it with the config its QR
-// code holds.
-func (f *useFixture) addDevice(t *testing.T, line, name string) (services.NewDevice, string) {
+// The webview gets [], not null, for a country without free lines.
+func TestCitiesOfACountryWithoutLinesIsEmpty(t *testing.T) {
+	f := newUse(t)
+
+	got, err := f.use.Cities(t.Context(), "DE", "")
+	if err != nil {
+		t.Fatalf("Cities: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("cities = %#v, want an empty list", got)
+	}
+}
+
+// Moving a device, the member's choice leaves out the line it is on.
+func TestRegionsLeaveOutTheLineOfTheDeviceBeingMoved(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	f.offer("DE", "Munich", "")
+
+	countries, err := f.use.Countries(t.Context(), dev.Device.PeerID)
+	if err != nil {
+		t.Fatalf("Countries: %v", err)
+	}
+	cities, err := f.use.Cities(t.Context(), "DE", dev.Device.PeerID)
+	if err != nil {
+		t.Fatalf("Cities: %v", err)
+	}
+
+	if want := []services.Region{{Country: "DE", Lines: 1}}; !slices.Equal(countries, want) {
+		t.Errorf("countries = %+v, want %+v", countries, want)
+	}
+	if want := []services.City{{City: "Munich", Lines: 1}}; !slices.Equal(cities, want) {
+		t.Errorf("cities = %+v, want %+v", cities, want)
+	}
+}
+
+// offer offers an online line in country and city (both may be empty) with
+// isp, and returns its id.
+func (f *useFixture) offer(country, city, isp string) string {
+	line := fakeapi.AvailableLine{Country: country, Online: true}
+	if city != "" {
+		line.City = &city
+	}
+	if isp != "" {
+		line.ISP = &isp
+	}
+	return f.api.OfferLine(line)
+}
+
+// offerBerlin offers a line in Berlin and returns its id.
+func (f *useFixture) offerBerlin() string {
+	return f.offer("DE", "Berlin", "")
+}
+
+// offerBerlinCity offers a line in Berlin and returns the city, for addDevice.
+func (f *useFixture) offerBerlinCity() string {
+	f.offerBerlin()
+	return "Berlin"
+}
+
+// addDevice adds a device in Germany, in city unless it is empty, and
+// returns it with the config its QR code holds.
+func (f *useFixture) addDevice(t *testing.T, city, name string) (services.NewDevice, string) {
 	t.Helper()
-	got, err := f.use.AddDevice(t.Context(), line, name)
+	got, err := f.use.AddDevice(t.Context(), "DE", city, name)
 	if err != nil {
 		t.Fatalf("AddDevice: %v", err)
 	}
@@ -350,23 +421,24 @@ func publicKeyOf(t *testing.T, private string) string {
 	return base64.StdEncoding.EncodeToString(k.PublicKey().Bytes())
 }
 
-func TestAddDeviceCreatesAPeerOnTheLine(t *testing.T) {
+func TestAddDeviceGetsAFreeLineInTheCity(t *testing.T) {
 	f := newUse(t)
-	line := f.offerBerlin()
+	f.offer("DE", "Berlin", "")
+	munich := f.offer("DE", "Munich", "M-net")
 
-	got, config := f.addDevice(t, line, "iPhone")
+	got, config := f.addDevice(t, "Munich", "iPhone")
 
 	peers := f.api.Peers(t, email)
 	if len(peers) != 1 {
 		t.Fatalf("peers = %d, want 1", len(peers))
 	}
 	p := peers[0]
-	if p.Name != "iPhone" || p.LineID != line {
-		t.Errorf("peer = %q on %s, want iPhone on %s", p.Name, p.LineID, line)
+	if p.Name != "iPhone" || p.LineID != munich {
+		t.Errorf("peer = %q on %s, want iPhone on %s", p.Name, p.LineID, munich)
 	}
 	want := services.Device{
-		PeerID: p.PeerID, Name: "iPhone", LineID: line, Failover: services.FailoverCountry,
-		IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		PeerID: p.PeerID, Name: "iPhone", LineID: munich, Country: "DE", City: "Munich", ISP: "M-net",
+		Failover: services.FailoverCountry, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if got.Device != want {
 		t.Errorf("device = %+v, want %+v", got.Device, want)
@@ -382,12 +454,50 @@ func TestAddDeviceCreatesAPeerOnTheLine(t *testing.T) {
 	}
 }
 
+func TestAddDeviceInAnyCityOfTheCountry(t *testing.T) {
+	f := newUse(t)
+	f.offer("PT", "Porto", "")
+	berlin := f.offerBerlin()
+
+	got, _ := f.addDevice(t, "", "Laptop")
+
+	if got.Device.LineID != berlin || got.Device.Country != "DE" {
+		t.Errorf("device on %s in %q, want %s in DE", got.Device.LineID, got.Device.Country, berlin)
+	}
+}
+
+func TestAddDeviceWhenTheRegionHasNoFreeLine(t *testing.T) {
+	f := newUse(t)
+	f.offerBerlin()
+
+	_, err := f.use.AddDevice(t.Context(), "DE", "Hamburg", "iPhone")
+
+	if code := errCode(err); code != services.ErrNoFreeLine {
+		t.Errorf("error = %v, want code %q", err, services.ErrNoFreeLine)
+	}
+}
+
+func TestAddDeviceNeedsACountry(t *testing.T) {
+	f := newUse(t)
+	f.offerBerlin()
+
+	_, err := f.use.AddDevice(t.Context(), "", "", "iPhone")
+
+	if code := errCode(err); code != services.ErrNoCountry {
+		t.Errorf("error = %v, want code %q", err, services.ErrNoCountry)
+	}
+	if peers := f.api.Peers(t, email); len(peers) != 0 {
+		t.Errorf("peers = %d, want none", len(peers))
+	}
+}
+
 // The app makes the device's key pair and sends the API only the public
 // key; the private key goes into the config, and nowhere else.
 func TestAddDeviceKeepsThePrivateKeyOutOfTheAPIAndTheProfile(t *testing.T) {
 	f := newUse(t)
 
-	_, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	_, config := f.addDevice(t, "Berlin", "iPhone")
 
 	if strings.Contains(config, "{{PRIVATE_KEY}}") {
 		t.Fatalf("config still has the placeholder:\n%s", config)
@@ -413,13 +523,13 @@ func TestAddDeviceKeepsThePrivateKeyOutOfTheAPIAndTheProfile(t *testing.T) {
 
 func TestAddDeviceRetriesWithTheSameKeyAndRequest(t *testing.T) {
 	f := newUse(t)
-	line := f.offerBerlin()
+	f.offerBerlin()
 	f.api.LoseNextResponse("POST /v1/wireguard/peers")
 
-	if _, err := f.use.AddDevice(t.Context(), line, "iPhone"); err == nil {
+	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone"); err == nil {
 		t.Fatal("AddDevice succeeded although the answer was lost")
 	}
-	_, config := f.addDevice(t, line, "iPhone")
+	_, config := f.addDevice(t, "Berlin", "iPhone")
 
 	peers := f.api.Peers(t, email)
 	if len(peers) != 1 {
@@ -432,14 +542,14 @@ func TestAddDeviceRetriesWithTheSameKeyAndRequest(t *testing.T) {
 
 func TestAddDeviceStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
 	f := newUse(t)
-	line := f.offerBerlin()
+	f.offerBerlin()
 	f.api.LoseNextResponse("POST /v1/wireguard/peers")
-	if _, err := f.use.AddDevice(t.Context(), line, "iPhone"); err == nil {
+	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone"); err == nil {
 		t.Fatal("AddDevice succeeded although the answer was lost")
 	}
 	f.api.FailNext("POST /v1/wireguard/peers", http.StatusBadRequest, "request_id_expired")
 
-	got, config := f.addDevice(t, line, "iPhone")
+	got, config := f.addDevice(t, "Berlin", "iPhone")
 
 	// The lost peer's key is gone with the expired request, so the new
 	// config has a peer and key of its own.
@@ -452,23 +562,23 @@ func TestAddDeviceStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
 	}
 }
 
-func TestAddDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
+func TestAddDeviceExplainsWhyItGotNoLine(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
 		code   string
 		want   services.ErrorCode
 	}{
-		{"full", http.StatusConflict, "line_full", services.ErrLineFull},
-		{"own or linked", http.StatusForbidden, "line_not_allowed", services.ErrLineNotAllowed},
+		{"no free line", http.StatusConflict, "no_free_line", services.ErrNoFreeLine},
 		{"unverified", http.StatusForbidden, "identity_required", services.ErrIdentityRequired},
 		{"too many devices", http.StatusTooManyRequests, "rate_limited", services.ErrRateLimited},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newUse(t)
+			f.offerBerlin()
 			f.api.FailNext("POST /v1/wireguard/peers", tc.status, tc.code)
 
-			_, err := f.use.AddDevice(t.Context(), f.offerBerlin(), "iPhone")
+			_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone")
 
 			if code := errCode(err); code != tc.want {
 				t.Errorf("error = %v, want code %q", err, tc.want)
@@ -477,23 +587,12 @@ func TestAddDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
 	}
 }
 
-func TestAddDeviceOnALineThatStoppedSharing(t *testing.T) {
-	f := newUse(t)
-	line := f.offerBerlin()
-	f.api.WithdrawLine(line)
-
-	_, err := f.use.AddDevice(t.Context(), line, "iPhone")
-
-	if code := errCode(err); code != services.ErrLineUnavailable {
-		t.Errorf("error = %v, want code %q", err, services.ErrLineUnavailable)
-	}
-}
-
 func TestAddDeviceNeedsAName(t *testing.T) {
 	f := newUse(t)
 
+	f.offerBerlin()
 	for _, name := range []string{"", "   ", strings.Repeat("x", 65)} {
-		_, err := f.use.AddDevice(t.Context(), f.offerBerlin(), name)
+		_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", name)
 		if code := errCode(err); code != services.ErrInvalidName {
 			t.Errorf("name %q: error = %v, want code %q", name, err, services.ErrInvalidName)
 		}
@@ -505,7 +604,7 @@ func TestAddDeviceNeedsAName(t *testing.T) {
 
 func TestSaveConfigWritesTheConfFileOnlyTheUserCanRead(t *testing.T) {
 	f := newUse(t)
-	dev, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+	dev, config := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	f.saver.path = filepath.Join(t.TempDir(), "chosen.conf")
 
 	saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
@@ -535,7 +634,7 @@ func TestSaveConfigWritesTheConfFileOnlyTheUserCanRead(t *testing.T) {
 // looser permissions don't survive.
 func TestSaveConfigOverAnExistingFile(t *testing.T) {
 	f := newUse(t)
-	dev, config := f.addDevice(t, f.offerBerlin(), "iPhone")
+	dev, config := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	f.saver.path = filepath.Join(t.TempDir(), "old.conf")
 	if err := os.WriteFile(f.saver.path, []byte(strings.Repeat("old config\n", 100)), 0o644); err != nil {
 		t.Fatal(err)
@@ -559,7 +658,7 @@ func TestSaveConfigSuggestsAFileNameWireGuardAccepts(t *testing.T) {
 	tunnel := regexp.MustCompile(`^[A-Za-z0-9_=+.-]{1,15}\.conf$`)
 
 	for _, name := range []string{"Anna's travel router", "Büro-Mac", "📱"} {
-		dev, _ := f.addDevice(t, f.offerBerlin(), name)
+		dev, _ := f.addDevice(t, f.offerBerlinCity(), name)
 		if !tunnel.MatchString(dev.FileName) || !strings.HasPrefix(dev.FileName, "Homeport") {
 			t.Errorf("%q: file name %q, want Homeport… with at most 15 characters WireGuard allows", name, dev.FileName)
 		}
@@ -570,7 +669,8 @@ func TestSaveConfigSuggestsAFileNameWireGuardAccepts(t *testing.T) {
 // ends; then nothing is saved, rather than an empty file.
 func TestSaveConfigAfterTheConfigWentDuringTheDialog(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 	f.saver.path = filepath.Join(t.TempDir(), "late.conf")
 	f.saver.during = func() { f.use.SignOut(t.Context()) }
 
@@ -586,7 +686,8 @@ func TestSaveConfigAfterTheConfigWentDuringTheDialog(t *testing.T) {
 
 func TestSaveConfigCancelledWritesNothing(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 	f.saver.path = "" // the member pressed Cancel
 
 	saved, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
@@ -605,7 +706,8 @@ func TestSaveConfigCancelledWritesNothing(t *testing.T) {
 // afterwards, nothing can show or save it again.
 func TestTheConfigIsShownOnce(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 	f.saver.path = filepath.Join(t.TempDir(), "late.conf")
 
 	f.use.ForgetConfig(dev.Device.PeerID)
@@ -621,7 +723,8 @@ func TestTheConfigIsShownOnce(t *testing.T) {
 
 func TestTheConfigIsGoneAfterARestart(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 	p, err := profile.Open(f.dir)
 	if err != nil {
 		t.Fatal(err)
@@ -640,7 +743,8 @@ func TestTheConfigIsGoneAfterARestart(t *testing.T) {
 
 func TestSignOutForgetsTheConfig(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 
 	f.use.SignOut(t.Context())
 	_, err := f.use.SaveConfig(t.Context(), dev.Device.PeerID)
@@ -652,9 +756,9 @@ func TestSignOutForgetsTheConfig(t *testing.T) {
 
 func TestDevicesListsTheMembersDevicesNewestFirst(t *testing.T) {
 	f := newUse(t)
-	line := f.offerBerlin()
-	phone, _ := f.addDevice(t, line, "iPhone")
-	router, _ := f.addDevice(t, line, "Travel router")
+	f.offerBerlin()
+	phone, _ := f.addDevice(t, "Berlin", "iPhone")
+	router, _ := f.addDevice(t, "Berlin", "Travel router")
 
 	got, err := f.use.Devices(t.Context())
 	if err != nil {
@@ -670,7 +774,7 @@ func TestDevicesListsTheMembersDevicesNewestFirst(t *testing.T) {
 // and the API reports where its session exits.
 func TestDevicesShowTheLineEachDeviceExitsThrough(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	since := time.Date(2026, 11, 14, 13, 2, 10, 0, time.UTC)
 	city, country := "Potsdam", "DE"
 	f.api.SetExitLine(t, dev.Device.PeerID, &fakeapi.ExitLine{LineID: "line-potsdam", Country: &country, City: &city, Since: since})
@@ -690,7 +794,7 @@ func TestDevicesShowTheLineEachDeviceExitsThrough(t *testing.T) {
 // a session has no exit line.
 func TestDevicesExitLineWhereTheAPIKnowsLittle(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	f.api.SetExitLine(t, dev.Device.PeerID, &fakeapi.ExitLine{LineID: "line-x"})
 
 	got, err := f.use.Devices(t.Context())
@@ -713,18 +817,17 @@ func TestDevicesExitLineWhereTheAPIKnowsLittle(t *testing.T) {
 
 // offerLyon offers a line in Lyon and returns its id.
 func (f *useFixture) offerLyon() string {
-	city := "Lyon"
-	return f.api.OfferLine(fakeapi.AvailableLine{Country: "FR", City: &city, Online: true})
+	return f.offer("FR", "Lyon", "Orange")
 }
 
-// A device moves to another line and keeps its config: nothing to scan
-// again.
-func TestUpdateDeviceMovesItToAnotherLine(t *testing.T) {
+// A device moves to another free line in a region and keeps its config:
+// nothing to scan again.
+func TestUpdateDeviceMovesItToAnotherLineInTheRegion(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
-	lyon := f.offerLyon()
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	second := f.offer("DE", "Berlin", "M-net")
 
-	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, lyon, "")
+	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "")
 	if err != nil {
 		t.Fatalf("UpdateDevice: %v", err)
 	}
@@ -733,23 +836,38 @@ func TestUpdateDeviceMovesItToAnotherLine(t *testing.T) {
 	if len(peers) != 1 || peers[0].PeerID != dev.Device.PeerID {
 		t.Fatalf("peers = %+v, want only %s", peers, dev.Device.PeerID)
 	}
-	if p := peers[0]; p.LineID != lyon || p.Failover != services.FailoverCountry {
-		t.Errorf("peer on %s with failover %q, want %s and %q", p.LineID, p.Failover, lyon, services.FailoverCountry)
+	if p := peers[0]; p.LineID != second || p.Failover != services.FailoverCountry {
+		t.Errorf("peer on %s with failover %q, want %s and %q", p.LineID, p.Failover, second, services.FailoverCountry)
 	}
 	want := dev.Device
-	want.LineID = lyon
+	want.LineID, want.ISP = second, "M-net"
 	if got != want {
 		t.Errorf("device = %+v, want %+v", got, want)
+	}
+}
+
+func TestUpdateDeviceMovesItToAnotherCountry(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	lyon := f.offerLyon()
+
+	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "", services.FailoverCity)
+	if err != nil {
+		t.Fatalf("UpdateDevice: %v", err)
+	}
+
+	if got.LineID != lyon || got.Country != "FR" || got.City != "Lyon" || got.Failover != services.FailoverCity {
+		t.Errorf("device = %+v, want on %s in Lyon, FR, failover city", got, lyon)
 	}
 }
 
 func TestUpdateDeviceChangesOnlyItsFailover(t *testing.T) {
 	f := newUse(t)
 	berlin := f.offerBerlin()
-	dev, _ := f.addDevice(t, berlin, "iPhone")
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 
 	for _, failover := range []string{services.FailoverCity, services.FailoverOff, services.FailoverCountry} {
-		got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "", failover)
+		got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "", "", failover)
 		if err != nil {
 			t.Fatalf("UpdateDevice %s: %v", failover, err)
 		}
@@ -765,12 +883,12 @@ func TestUpdateDeviceChangesOnlyItsFailover(t *testing.T) {
 
 func TestUpdateDeviceNeedsAChange(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 
-	for _, tc := range []struct{ line, failover string }{{"", ""}, {"", "everywhere"}} {
-		_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.line, tc.failover)
+	for _, tc := range []struct{ country, city, failover string }{{"", "", ""}, {"", "", "everywhere"}, {"", "Berlin", ""}} {
+		_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, tc.city, tc.failover)
 		if code := errCode(err); code != services.ErrUnexpected {
-			t.Errorf("line %q, failover %q: error = %v, want code %q", tc.line, tc.failover, err, services.ErrUnexpected)
+			t.Errorf("%+v: error = %v, want code %q", tc, err, services.ErrUnexpected)
 		}
 	}
 	if slices.ContainsFunc(f.api.Requests(), func(r string) bool { return strings.HasPrefix(r, "PATCH ") }) {
@@ -778,26 +896,37 @@ func TestUpdateDeviceNeedsAChange(t *testing.T) {
 	}
 }
 
-func TestUpdateDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
+// Its own line doesn't count: a move needs another free line.
+func TestUpdateDeviceWhenTheRegionHasNoOtherFreeLine(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+
+	_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "")
+
+	if code := errCode(err); code != services.ErrNoFreeLine {
+		t.Errorf("error = %v, want code %q", err, services.ErrNoFreeLine)
+	}
+}
+
+func TestUpdateDeviceExplainsWhyItGotNoLine(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
 		code   string
 		want   services.ErrorCode
 	}{
-		{"full", http.StatusConflict, "line_full", services.ErrLineFull},
-		{"on another gateway", http.StatusConflict, "line_on_other_gateway", services.ErrLineOnOtherGateway},
-		{"own or linked", http.StatusForbidden, "line_not_allowed", services.ErrLineNotAllowed},
+		{"no free line", http.StatusConflict, "no_free_line", services.ErrNoFreeLine},
 		{"unverified", http.StatusForbidden, "identity_required", services.ErrIdentityRequired},
 		{"signed out", http.StatusUnauthorized, "unauthorized", services.ErrSignedOut},
 		{"rate limited", http.StatusTooManyRequests, "rate_limited", services.ErrRateLimited},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newUse(t)
-			dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+			dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+			f.offerLyon()
 			f.api.FailNext("PATCH /v1/wireguard/peers/", tc.status, tc.code)
 
-			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, f.offerLyon(), "")
+			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "Lyon", "")
 
 			if code := errCode(err); code != tc.want {
 				t.Errorf("error = %v, want code %q", err, tc.want)
@@ -806,42 +935,24 @@ func TestUpdateDeviceExplainsWhyALineCantBeUsed(t *testing.T) {
 	}
 }
 
-// The API answers 404 both for a line that stopped sharing and for a
-// device that is gone; the app tells them apart.
-func TestUpdateDeviceOnALineThatStoppedSharing(t *testing.T) {
-	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
-	lyon := f.offerLyon()
-	f.api.WithdrawLine(lyon)
-
-	_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, lyon, services.FailoverCity)
-
-	if code := errCode(err); code != services.ErrLineUnavailable {
-		t.Errorf("error = %v, want code %q", err, services.ErrLineUnavailable)
-	}
-}
-
 func TestUpdateDeviceThatWasRemoved(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		line     bool
+		country  string
 		failover string
 	}{
-		{"new line", true, ""},
-		{"new failover", false, services.FailoverOff},
+		{"new line", "FR", ""},
+		{"new failover", "", services.FailoverOff},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newUse(t)
-			dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
-			line := ""
-			if tc.line {
-				line = f.offerLyon()
-			}
+			dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+			f.offerLyon()
 			if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
 				t.Fatal(err)
 			}
 
-			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, line, tc.failover)
+			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, "", tc.failover)
 
 			if code := errCode(err); code != services.ErrDeviceGone {
 				t.Errorf("error = %v, want code %q", err, services.ErrDeviceGone)
@@ -864,7 +975,8 @@ func TestDevicesWhenThereAreNoneIsEmpty(t *testing.T) {
 
 func TestRemoveDeviceDeletesItsPeer(t *testing.T) {
 	f := newUse(t)
-	dev, _ := f.addDevice(t, f.offerBerlin(), "iPhone")
+	f.offerBerlin()
+	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 
 	if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
 		t.Fatalf("RemoveDevice: %v", err)

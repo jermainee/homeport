@@ -83,7 +83,7 @@ Every member has one account, one identity check and one credit balance. In this
 3. Buy credits (100 GB for €40 net) or use earned credits, then get a WireGuard config per device (file or QR code) plus SOCKS5 credentials.
 4. Connect with the official WireGuard app, or load the config into a travel router (GL.iNet, OpenWrt) so every device behind it goes through home. Usage is metered on the gateway, so the router needs no Homeport software.
 5. Run the built-in Home Check: it shows exactly what websites see (IP, ISP, DNS resolver, IPv6, WebRTC, timezone mismatch).
-6. Track usage per device and the credit balance; get alerts at low balance, when the line drops or when its IP changes. While the line is down, devices move on their own to a backup line in the same city, else the same country, and come back once the line has been up for 5 minutes. The WireGuard config never changes, and a device can be moved to another line with one click.
+6. Track usage per device and the credit balance; get alerts at low balance, when the line drops or when its IP changes. While the line is down, devices move on their own to a backup line in the same city, else the same country, and come back once the line has been up for 5 minutes. The WireGuard config never changes, and a device can be moved to another free line in a city or country the member picks.
 
 **Share flow**
 

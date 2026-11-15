@@ -22,14 +22,15 @@ export {
 export type {
     Balance,
     CheckoutCheck,
+    City,
     Credits,
     Device,
     ExitLine,
     IdentityCheck,
-    Line,
     LoginStart,
     Member,
     NewDevice,
     PollResult,
+    Region,
     ShareStatus
 } from "./models.js";

@@ -19,7 +19,9 @@ beforeAll(async () => {
   gateway = await announcedGateway();
 });
 
-const freshCountry = countryPool(["XD", "XE", "XF", "XG", "XH", "XI", "XJ", "XK", "XL", "XM", "XN", "XO", "XP", "XQ", "XR"]);
+const freshCountry = countryPool([
+  "XD", "XE", "XF", "XG", "XH", "XI", "XJ", "XK", "XL", "XM", "XN", "XO", "XP", "XQ", "XR", "XS", "XT", "XU", "XV", "XW", "XY", "XZ", "ZZ", "AA",
+]);
 
 function lineAt(place: Place, owner?: Member): Promise<string> {
   return onlineLine(gateway, place, owner);
@@ -149,5 +151,103 @@ describe("a peer's line", () => {
     const { peers } = await expectContract<{ peers: Peer[] }>("GET", "/v1/wireguard/peers", response);
 
     expect(peers.map((p) => p.line)).toEqual([{ country: here, city: "Alpha", isp: "Vodafone GmbH" }]);
+  });
+});
+
+describe("PATCH /v1/wireguard/peers/{peer_id} with a country", () => {
+  function move(sessionToken: string, peerId: string, body: Record<string, unknown>) {
+    return send("PATCH", `/v1/wireguard/peers/${peerId}`, sessionToken, body);
+  }
+
+  it("moves a peer to another free line in the city, on its own gateway", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    const first = await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here, city: "Alpha" });
+    expect(peer.line_id).toBe(first);
+    const second = await lineAt({ country: here, city: "Alpha", isp: "M-net" });
+    await lineAt({ country: here, city: "Beta" });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here, city: "Alpha" });
+
+    expect(response.status).toBe(200);
+    const moved = await expectContract<Peer & { failover: string }>("PATCH", "/v1/wireguard/peers/{peer_id}", response);
+    expect(moved.line_id).toBe(second);
+    expect(moved.line).toEqual({ country: here, city: "Alpha", isp: "M-net" });
+    expect(moved.failover).toBe("country");
+  });
+
+  it("moves anywhere in the country without a city, and changes the failover in the same request", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+    const beta = await lineAt({ country: here, city: "Beta" });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here, failover: "city" });
+
+    const moved = await expectContract<Peer & { failover: string }>("PATCH", "/v1/wireguard/peers/{peer_id}", response);
+    expect(moved.line_id).toBe(beta);
+    expect(moved.failover).toBe("city");
+  });
+
+  it("turns https_only off in the same request as the move", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+    const beta = await lineAt({ country: here, city: "Beta" });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here, city: "Beta", https_only: false });
+
+    const moved = await expectContract<Peer & { https_only: boolean }>("PATCH", "/v1/wireguard/peers/{peer_id}", response);
+    expect(moved.line_id).toBe(beta);
+    expect(moved.https_only).toBe(false);
+  });
+
+  it("never moves a peer to a line on another gateway, which its config doesn't name", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+    const elsewhere = await announcedGateway();
+    await onlineLine(elsewhere, { country: here, city: "Alpha" });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here });
+
+    expect(response.status).toBe(409);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toMatchObject({ error: "no_free_line" });
+    expect((await (await send("GET", "/v1/wireguard/peers", member.sessionToken)).json<{ peers: Peer[] }>()).peers[0]?.line_id).toBe(peer.line_id);
+  });
+
+  it("answers 409 no_free_line, and keeps the failover unchanged, when the region has no other free line", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here, failover: "off" });
+
+    expect(response.status).toBe(409);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toMatchObject({ error: "no_free_line" });
+    const listed = (await (await send("GET", "/v1/wireguard/peers", member.sessionToken)).json<{ peers: { failover: string }[] }>()).peers;
+    expect(listed[0]?.failover).toBe("country");
+  });
+
+  it.each<{ why: string; body: Record<string, unknown> }>([
+    { why: "line_id and country together", body: { line_id: crypto.randomUUID(), country: "DE" } },
+    { why: "a city without a country", body: { city: "Berlin" } },
+    { why: "a lowercase country", body: { country: "de" } },
+    { why: "an empty city", body: { country: "DE", city: "" } },
+  ])("rejects $why with 400", async ({ body }) => {
+    const member = await verifiedMember();
+    const here = freshCountry();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+
+    const response = await move(member.sessionToken, peer.peer_id, body);
+
+    expect(response.status).toBe(400);
+    expect(await expectContract("PATCH", "/v1/wireguard/peers/{peer_id}", response)).toMatchObject({ error: "invalid_request" });
   });
 });

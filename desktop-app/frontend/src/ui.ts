@@ -101,22 +101,31 @@ function morph(app: HTMLElement, html: string, selector: string): boolean {
 
 // The control that had focus, so it gets focus back after a redraw: its
 // action (data-action, or data-focus on a form's submit button), and the
-// device or tab it acts on.
+// device or tab it acts on; or, for a field, radio or heading without an
+// action, its id and where the caret was.
 interface FocusKey {
-  attr: "data-action" | "data-focus";
+  attr: "data-action" | "data-focus" | "id";
   action: string;
   peer?: string;
   tab?: string;
+  caret?: [number, number];
 }
 
 function focusKey(el: Element | null): FocusKey | undefined {
-  const d = (el as HTMLElement | null)?.dataset;
+  const h = el as HTMLElement | null;
+  const d = h?.dataset;
   if (d?.action) return { attr: "data-action", action: d.action, peer: d.peer, tab: d.tab };
   if (d?.focus) return { attr: "data-focus", action: d.focus, peer: d.peer, tab: d.tab };
-  return undefined;
+  if (!h?.id) return undefined;
+  const caret =
+    h instanceof HTMLInputElement && h.selectionStart !== null && h.selectionEnd !== null
+      ? ([h.selectionStart, h.selectionEnd] as [number, number])
+      : undefined;
+  return { attr: "id", action: h.id, caret };
 }
 
 function selectorFor(k: FocusKey): string {
+  if (k.attr === "id") return `#${CSS.escape(k.action)}`;
   let sel = `[${k.attr}="${k.action}"]`;
   if (k.peer) sel += `[data-peer="${CSS.escape(k.peer)}"]`;
   if (k.tab) sel += `[data-tab="${k.tab}"]`;
@@ -241,6 +250,8 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
       app.querySelector<HTMLElement>("[data-panel] [data-action]");
     if (target?.tabIndex === -1 && target.matches("h1, h2")) focusHeading(target);
     else target?.focus();
+    // A field the member was typing in keeps its caret.
+    if (key.caret && target instanceof HTMLInputElement) target.setSelectionRange(...key.caret);
   };
 
   // redraw shows a change of one home part, in place when it can.
@@ -385,8 +396,8 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         // Focus stays with the button the member pressed, which the
         // config replaces; see fallbackFor.
         form.querySelector<HTMLElement>('[type="submit"]')?.focus();
-        const line = data.get("line")?.toString();
-        if (line) use?.pickLine(line);
+        const city = data.get("city");
+        if (city !== null) use?.pickCity(city.toString());
         use?.setName(data.get("name")?.toString() ?? "");
         return void use?.create();
       }
@@ -394,8 +405,8 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         // Focus stays with Save changes; back at the list it goes to the
         // device's Change button.
         form.querySelector<HTMLElement>('[type="submit"]')?.focus();
-        const line = data.get("line")?.toString();
-        if (line) use?.pickLine(line);
+        const city = data.get("city");
+        if (city !== null) use?.pickCity(city.toString());
         const failover = data.get("failover")?.toString();
         if (failover) use?.pickFailover(asFailover(failover));
         return void use?.saveDevice();
@@ -406,18 +417,28 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
   app.addEventListener("input", (e) => {
     const input = e.target as HTMLInputElement;
     if (input.id === "device-name") use?.setName(input.value);
+    else if (input.id === "city-query") use?.setQuery(input.value);
   });
 
   app.addEventListener("change", (e) => {
     const input = e.target as HTMLInputElement;
-    if (input.name === "line" && input.checked) use?.pickLine(input.value);
-    if (input.name === "failover" && input.checked) use?.pickFailover(asFailover(input.value));
+    if (input.name === "city" && input.checked) use?.pickCity(input.value);
+    else if (input.id === "device-country" && input.value) void use?.pickCountry(input.value);
+    else if (input.name === "move" && input.checked) void use?.setMove(input.value === "move");
+    else if (input.name === "failover" && input.checked) use?.pickFailover(asFailover(input.value));
   });
 
-  // Escape leaves the form for a new or changed device, as Cancel does.
+  // Escape leaves the form for a new or changed device, as Cancel does. In
+  // the city search it clears what was typed first, as search fields do.
   app.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    const form = (e.target as HTMLElement).closest<HTMLElement>("[data-form]")?.dataset.form;
+    const target = e.target as HTMLElement;
+    if (target instanceof HTMLInputElement && target.id === "city-query" && target.value) {
+      e.preventDefault();
+      target.value = "";
+      return use?.setQuery("");
+    }
+    const form = target.closest<HTMLElement>("[data-form]")?.dataset.form;
     if (form === "add-device") use?.cancelAdding();
     if (form === "edit-device") use?.cancelEditing();
   });
@@ -470,7 +491,11 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
       case "use-check-payment":
         return void use?.checkPayment();
       case "use-add":
-        return use?.startAdding();
+        return void use?.startAdding();
+      case "use-reload-regions":
+        return void use?.reloadRegions();
+      case "use-reload-cities":
+        return void use?.reloadCities();
       case "use-cancel-add":
         return use?.cancelAdding();
       case "use-save":

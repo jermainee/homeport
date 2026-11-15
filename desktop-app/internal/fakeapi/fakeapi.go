@@ -152,7 +152,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("PATCH /v1/lines/{id}", s.updateLine)
 	mux.HandleFunc("POST /v1/identity/sessions", s.createIdentitySession)
 	mux.HandleFunc("POST /v1/checkout/sessions", s.createCheckoutSession)
-	mux.HandleFunc("GET /v1/lines/available", s.listAvailableLines)
+	mux.HandleFunc("GET /v1/lines/regions", s.listRegions)
 	mux.HandleFunc("POST /v1/wireguard/peers", s.createPeer)
 	mux.HandleFunc("GET /v1/wireguard/peers", s.listPeers)
 	mux.HandleFunc("PATCH /v1/wireguard/peers/{id}", s.updatePeer)
