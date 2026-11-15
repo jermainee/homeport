@@ -412,6 +412,7 @@ describe("changing a device", () => {
       `Munich, ${countryName("DE")}`,
       "M-net line",
     ]);
+    expect(q(`.device[data-peer="${laptop.peerId}"] .device-backup`)).toBeNull();
   });
 
   it("names the backup choices after the region it moves to", async () => {
@@ -486,6 +487,8 @@ describe("HTTPS only", () => {
 
     expect(httpsSwitch().getAttribute("aria-checked")).toBe("false");
     expect(httpsSwitch().getAttribute("aria-busy")).toBe("true");
+    // Until Homeport answers, the note says what still holds.
+    expect(note()).toContain("won't work");
     await vi.waitFor(() => expect(httpsSwitch().hasAttribute("aria-busy")).toBe(false));
     expect(httpsSwitch().getAttribute("aria-checked")).toBe("false");
     expect(use.httpsOnly).toEqual([[laptop.peerId, false]]);
@@ -503,6 +506,17 @@ describe("HTTPS only", () => {
     );
     expect(httpsSwitch().getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(httpsSwitch());
+    const described = (httpsSwitch().getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent ?? "");
+    expect(described.join(" ")).toContain("can't be reached");
+  });
+
+  it("sends focus to Add a device when the device was removed elsewhere", async () => {
+    use.httpsOnlyAnswer = serviceError("device_gone");
+    httpsSwitch().focus();
+    httpsSwitch().click();
+
+    await vi.waitFor(() => expect(q(`.device[data-peer="${laptop.peerId}"]`)).toBeNull());
+    expect(document.activeElement).toBe(q('[data-action="use-add"]'));
   });
 });
 

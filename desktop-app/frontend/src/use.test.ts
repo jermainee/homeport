@@ -630,6 +630,25 @@ describe("changing a device", () => {
     expect(backupLine(ready().devices[0]!)).toBeUndefined();
   });
 
+  it("keeps a move that landed while HTTPS only was turning", async () => {
+    await open();
+    let answer!: (d: typeof laptop) => void;
+    api.setHttpsOnly = () => new Promise((r) => (answer = r));
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+    await moving();
+    api.updateAnswer = { ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) };
+    await use.saveDevice();
+    // The server turned HTTPS only before the move, so its late answer
+    // still has the old line.
+    answer({ ...laptop, httpsOnly: false });
+    await turning;
+
+    expect(ready().devices[0]).toMatchObject({ lineId: movedLine, httpsOnly: false });
+    api.devicesAnswer = [{ ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) }];
+    await use.refreshDevices();
+    expect(backupLine(ready().devices[0]!)).toBeUndefined();
+  });
+
   it("shows a backup line again once the device has left its old line", async () => {
     await open();
     await moving();
@@ -930,6 +949,29 @@ describe("HTTPS only", () => {
 
     await use.toggleHttpsOnly(laptop.peerId);
     expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+  });
+
+  it("drops the error once the devices load again", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("offline");
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    await use.refreshDevices();
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false });
+    expect(ready().httpsOnly).toEqual({});
+  });
+
+  it("keeps a turn on its way when the devices load again", async () => {
+    await open();
+    api.hold();
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+
+    await use.refresh();
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    api.release();
+    await turning;
   });
 
   it("drops a device that was removed meanwhile", async () => {

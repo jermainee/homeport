@@ -144,18 +144,12 @@ export class FakeUse implements UseApi {
     await this.#hold;
     const a = this.updateAnswer;
     this.updateAnswer = null;
-    if (a) return settle(a);
-    const devices = settle(this.devicesAnswer);
-    const old = devices.find((d) => d.peerId === peerId);
-    if (!old) throw new Error(`no device ${peerId}`);
     // A move lands on another line in the region, as the API picks it.
     const moved =
       change.country === undefined
         ? {}
         : { lineId: `line-${change.country}-${change.city || "any"}-2`, country: change.country, city: change.city || "Somewhere", isp: "M-net" };
-    const dev: Device = { ...old, ...moved, ...(change.failover ? { failover: change.failover } : {}) };
-    this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
-    return dev;
+    return a ? settle(a) : this.#patch(peerId, { ...moved, ...(change.failover ? { failover: change.failover } : {}) });
   }
 
   async setHttpsOnly(peerId: string, on: boolean) {
@@ -164,11 +158,15 @@ export class FakeUse implements UseApi {
     await this.#hold;
     const a = this.httpsOnlyAnswer;
     this.httpsOnlyAnswer = null;
-    if (a) return settle(a);
+    return a ? settle(a) : this.#patch(peerId, { httpsOnly: on });
+  }
+
+  // #patch changes one of the devices, as the API answers a PATCH.
+  #patch(peerId: string, change: Partial<Device>): Device {
     const devices = settle(this.devicesAnswer);
     const old = devices.find((d) => d.peerId === peerId);
     if (!old) throw new Error(`no device ${peerId}`);
-    const dev: Device = { ...old, httpsOnly: on };
+    const dev: Device = { ...old, ...change };
     this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
     return dev;
   }

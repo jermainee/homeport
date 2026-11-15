@@ -247,22 +247,24 @@ function deviceRow(d: Device, v: Ready): string {
 }
 
 // HTTPS only, per device: what it blocks while on, and what the line's
-// owner can do to the device's traffic while off.
+// owner can do to the device's traffic while off. The switch shows the
+// position asked for at once; the note says what holds until Homeport
+// answers.
 function httpsOnlySetting(d: Device, v: Ready): string {
   const { on, busy, error } = httpsOnlyOf(v, d);
-  const note = on
+  const note = d.httpsOnly
     ? "Plain HTTP, SSH and mail apps that start unencrypted won't work. Turning this off lets the line's owner read and change that traffic."
     : "Unencrypted traffic works, and the line's owner can read and change it.";
   const id = `https-${esc(d.peerId)}`;
   return `
-      <div class="device-https">
+      <div class="device-https" ${d.httpsOnly ? "" : "data-off"}>
         <div class="setting-text">
           <span class="setting-label" aria-hidden="true">HTTPS only</span>
           <p class="setting-note" id="${id}">${note}</p>
         </div>
         <button class="switch" type="button" role="switch" data-action="use-https-only" data-peer="${esc(d.peerId)}"
-          aria-checked="${on}" aria-label="HTTPS only for ${esc(d.name)}" aria-describedby="${id}" ${busyAttrs(busy)}><span class="knob"></span></button>
-        ${alert(error)}
+          aria-checked="${on}" aria-label="HTTPS only for ${esc(d.name)}" aria-describedby="${id}${error ? ` ${id}-error` : ""}" ${busyAttrs(busy)}><span class="knob"></span></button>
+        ${error ? `<p class="field-error panel-error" id="${id}-error" role="alert">${esc(useErrorText(error))}</p>` : ""}
       </div>`;
 }
 

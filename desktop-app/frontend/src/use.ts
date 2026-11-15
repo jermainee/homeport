@@ -245,6 +245,16 @@ function without(turns: Ready["httpsOnly"], peerId: string): Ready["httpsOnly"] 
   return rest;
 }
 
+// inFlight keeps the turns still on their way, for devices still listed.
+// Once the devices load again, an error is old news: the switch shows
+// where the device is.
+function inFlight(turns: Ready["httpsOnly"], devices: Device[]): Ready["httpsOnly"] {
+  if (!turns) return undefined;
+  return Object.fromEntries(
+    Object.entries(turns).filter(([peerId, t]) => t.busy && devices.some((d) => d.peerId === peerId)),
+  );
+}
+
 export class Use {
   #view: UseView = { kind: "loading" };
   #listeners = new Set<(v: UseView) => void>();
@@ -312,10 +322,12 @@ export class Use {
     const v = this.#ready();
     if (!v) return;
     const [balance, devices] = data;
+    const now = devicesVersion === this.#devicesVersion ? this.#followMoves(devices) : v.devices;
     this.#set({
       ...v,
       balance: balanceVersion === this.#balanceVersion ? balance : v.balance,
-      devices: devicesVersion === this.#devicesVersion ? this.#followMoves(devices) : v.devices,
+      devices: now,
+      httpsOnly: inFlight(v.httpsOnly, now),
     });
   }
 
@@ -350,7 +362,9 @@ export class Use {
       return;
     }
     const v = this.#ready();
-    if (v && version === this.#devicesVersion) this.#set({ ...v, devices: this.#followMoves(devices) });
+    if (!v) return;
+    const now = version === this.#devicesVersion ? this.#followMoves(devices) : v.devices;
+    this.#set({ ...v, devices: now, httpsOnly: inFlight(v.httpsOnly, now) });
   }
 
   async #load(): Promise<void> {
@@ -810,10 +824,12 @@ export class Use {
     }
     const now = this.#ready();
     if (!now) return;
+    // Only HTTPS only comes from the answer: a move saved while it was on
+    // its way is newer than the rest of it.
     this.#devicesVersion++;
     this.#set({
       ...now,
-      devices: this.#followMoves(now.devices.map((x) => (x.peerId === peerId ? dev : x))),
+      devices: now.devices.map((x) => (x.peerId === peerId ? { ...x, httpsOnly: dev.httpsOnly } : x)),
       httpsOnly: without(now.httpsOnly, peerId),
     });
   }

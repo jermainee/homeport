@@ -144,6 +144,8 @@ function fallbackFor(k: FocusKey): string | undefined {
     case "use-cancel-add":
     case "use-done":
     case "use-confirm-remove":
+    // The device was removed elsewhere, so its switch is gone.
+    case "use-https-only":
       return '[data-action="use-add"]';
     case "use-remove":
       return `[data-action="use-cancel-remove"]${peer}`;

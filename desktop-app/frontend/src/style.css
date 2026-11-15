@@ -777,7 +777,10 @@ input:focus-visible {
 
 /* Devices */
 
+/* Rows wrap for the backup notice and HTTPS only, under the name. */
 .devices .row {
+  flex-wrap: wrap;
+  row-gap: 10px;
   padding-block: 12px;
 }
 
@@ -834,11 +837,6 @@ input:focus-visible {
 /* HTTPS only, per device: a setting under the device's name, set off by
    an inset rule, with the same enamel switch as Share. While it's off, the
    note says what the line's owner can do, in ink rather than slate. */
-.device {
-  flex-wrap: wrap;
-  row-gap: 10px;
-}
-
 .device-https {
   display: grid;
   flex-basis: 100%;
@@ -865,7 +863,7 @@ input:focus-visible {
   text-wrap: pretty;
 }
 
-.device-https:has([aria-checked="false"]) .setting-note {
+.device-https[data-off] .setting-note {
   color: var(--ink);
 }
 
