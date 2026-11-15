@@ -373,7 +373,7 @@ function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string
         <fieldset class="failover">
           <legend class="label">If its line goes offline</legend>
           <div class="group failover-list">${FAILOVERS.map((f) => failoverOption(f, f === s.failover, picked)).join("")}</div>
-          <p class="panel-hint">It moves back once its own line has been online for 5 minutes.</p>
+          <p class="panel-hint">It moves back once its own line has been online again for a few minutes.</p>
         </fieldset>
         <div class="panel-actions">
           <button class="button primary" type="submit" data-focus="use-save-device" data-peer="${esc(s.peerId)}" ${busyAttrs(s.saving)}>
