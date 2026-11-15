@@ -1,6 +1,7 @@
 package controlplane_test
 
 import (
+	"net/http"
 	"net/netip"
 	"testing"
 	"time"
@@ -293,5 +294,84 @@ func TestAFallbackLineOfThePeersOwnMemberIsNeverUsed(t *testing.T) {
 
 	if got := f.access(t); got != gateway.AccessNone {
 		t.Errorf("access %v; a member never exits through their own line", got)
+	}
+}
+
+// withSecondFallback gives peer A a second fallback line after the first,
+// with its own owner and pin.
+func (f *fixture) withSecondFallback(t *testing.T) string {
+	t.Helper()
+	const second = "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a58"
+	f.api.setConfig(func(cfg map[string]any) {
+		cfg["etag"] = `"cfg-2"`
+		cfg["lines"] = append(cfg["lines"].([]any), map[string]any{
+			"line_id": second, "owner_member_id": "01a1c4af-8d52-7b10-8e6f-2a4c7b9d3e19",
+			"device_spki_sha256": "5f1d2c8e7a6b5c3d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+		})
+		cfg["peers"].([]any)[0].(map[string]any)["fallback_line_ids"] = []any{fallbackLineID, second}
+	})
+	if err := f.ctl.SyncConfig(t.Context()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	return second
+}
+
+func TestASessionOnAFallbackLineStaysWhenAnEarlierFallbackComesBack(t *testing.T) {
+	f := newFixture(t)
+	second := f.withSecondFallback(t)
+	f.lineOffline(lineID, ownLineIP)
+	f.lineOnline(second, netip.MustParseAddr("198.51.100.30"))
+	f.access(t)
+	f.busyStep(t, time.Second)
+
+	f.lineOnline(fallbackLineID, fallbackIP)
+	for range 7 {
+		f.busyStep(t, time.Minute)
+	}
+
+	if finals := f.finalEvents(t); len(finals) != 0 {
+		t.Errorf("final events %+v; only the peer's own line takes a session back, not another fallback", finals)
+	}
+}
+
+func TestAReplacedAgentConnectionKeepsTheFailbackTime(t *testing.T) {
+	f := newFixture(t)
+	f.lineOffline(lineID, ownLineIP)
+	f.lineOnline(fallbackLineID, fallbackIP)
+	f.access(t)
+	f.lineOnline(lineID, ownLineIP)
+	for range 4 {
+		f.busyStep(t, time.Minute)
+	}
+
+	// The agent's new connection replaces the old one: online again, with
+	// no offline in between. The line never went offline.
+	f.lineOnline(lineID, ownLineIP)
+	f.busyStep(t, 61*time.Second)
+
+	if finals := f.finalEvents(t); len(finals) != 1 || finals[0].LineID != fallbackLineID {
+		t.Errorf("final events %+v; the line has been online for 5 minutes, so the peer moves back", finals)
+	}
+}
+
+func TestASessionInGraceMovesOffALineThatWentOffline(t *testing.T) {
+	f := newFixture(t)
+	f.api.setLeaseFn(func(leaseRequest) (int, any) { return http.StatusPaymentRequired, example(t, "lease-denied.json") })
+	f.lineOnline(fallbackLineID, fallbackIP)
+	if got := f.access(t); got != gateway.AccessTopUp {
+		t.Fatalf("access %v, want top-up only without credits", got)
+	}
+
+	f.lineOffline(lineID, ownLineIP)
+	f.busyStep(t, 11*time.Second)
+
+	if finals := f.finalEvents(t); len(finals) != 0 {
+		t.Errorf("final events %+v; a session without a lease reports none", finals)
+	}
+	if f.gw.isSuspended(t, peerAKey) {
+		t.Fatal("the peer was cut off; moving must not suspend it")
+	}
+	if got := f.access(t); got != gateway.AccessTopUp || f.lastLeaseLine(t) != fallbackLineID {
+		t.Errorf("next flow: access %v on line %s, want top-up on the fallback line, so the member can still buy credits", got, f.lastLeaseLine(t))
 	}
 }

@@ -60,12 +60,22 @@ export interface FailoverLine {
   online: number;
 }
 
+/**
+ * How recent the gateway's last report of an open session must be for its
+ * line to count as the line the peer exits through now. The gateway reports
+ * a session that moves bytes at least every 30 seconds, and ends one after 2
+ * idle minutes; an older one was left open by a gateway that stopped.
+ */
+export const CURRENT_SESSION_WINDOW_MS = 3 * 60 * 1000;
+
 /** What fallbackLines needs to know beyond the peers and lines. */
 export interface FailoverFacts {
   /** The members with an active peer on each line (its users). */
   users: Map<string, Set<string>>;
   /** Whether two members are linked (see ownerIsLinkedSql). */
   linked: (memberId: string, otherId: string) => boolean;
+  /** The line each peer's current session runs on, as the gateway reported it. */
+  current?: Map<string, string>;
 }
 
 /**
@@ -77,6 +87,11 @@ export interface FailoverFacts {
  * that the order differs from member to member, so the users of one offline
  * line spread over its fallbacks instead of all landing on one. It is the
  * same for all of a member's devices, so they keep sharing one exit.
+ *
+ * The line a peer's session runs on now stays in its list while the peer's
+ * failover still allows it, even if it has filled up or better lines came
+ * online since: the gateway ends a session whose line leaves the list, and
+ * that would change the member's IP for nothing.
  *
  * It runs in memory over facts loaded once per gateway, rather than as one
  * SQL condition per peer and line, which grows with peers × lines.
@@ -93,10 +108,11 @@ export function fallbackLines(peers: FailoverPeer[], lines: FailoverLine[], fact
   const result = new Map<string, string[]>();
   const memo = new Map<string, string[]>();
   for (const peer of peers) {
-    const key = `${peer.member_id}\n${peer.line_id}\n${peer.failover}`;
+    const current = facts.current?.get(peer.peer_id);
+    const key = `${peer.member_id}\n${peer.line_id}\n${peer.failover}\n${current ?? ""}`;
     let chosen = memo.get(key);
     if (!chosen) {
-      chosen = choose(peer, peer.country === null ? [] : (byCountry.get(peer.country) ?? []), facts);
+      chosen = choose(peer, peer.country === null ? [] : (byCountry.get(peer.country) ?? []), facts, current);
       memo.set(key, chosen);
     }
     result.set(peer.peer_id, chosen);
@@ -111,18 +127,28 @@ interface Ranked {
   spread: number;
 }
 
-function choose(peer: FailoverPeer, candidates: { line: FailoverLine; hash: number }[], facts: FailoverFacts): string[] {
+function choose(
+  peer: FailoverPeer,
+  candidates: { line: FailoverLine; hash: number }[],
+  facts: FailoverFacts,
+  current: string | undefined,
+): string[] {
   if (peer.failover === "off") return [];
   const memberHash = fnv1a(peer.member_id);
   const best: Ranked[] = [];
+  let kept = false;
   for (const { line, hash } of candidates) {
     const sameCity = peer.city !== null && line.city === peer.city;
     if (line.line_id === peer.line_id || (peer.failover === "city" && !sameCity)) continue;
     if (line.owner_member_id === peer.member_id || facts.linked(peer.member_id, line.owner_member_id)) continue;
-    if (!hasRoom(facts.users.get(line.line_id), peer.member_id)) continue;
+    const isCurrent = line.line_id === current;
+    if (!isCurrent && !hasRoom(facts.users.get(line.line_id), peer.member_id)) continue;
+    kept ||= isCurrent;
     insertRanked(best, { lineId: line.line_id, sameCity, online: line.online === 1, spread: mix(memberHash, hash) });
   }
-  return best.map((ranked) => ranked.lineId);
+  const chosen = best.map((ranked) => ranked.lineId);
+  if (kept && current && !chosen.includes(current)) chosen.splice(MAX_FALLBACK_LINES - 1, 1, current);
+  return chosen;
 }
 
 /** Keeps `best` sorted and at most MAX_FALLBACK_LINES long. */

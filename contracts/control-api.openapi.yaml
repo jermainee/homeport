@@ -1223,9 +1223,9 @@ components:
           $ref: "#/components/schemas/ETag"
         failback_seconds:
           description: |
-            How long a line must be online without a break before a peer's
-            session on a later line of its order moves back to it (see
-            `fallback_line_ids`).
+            How long a peer's `line_id` must be online without a break
+            before the peer's session on a fallback line moves back to it
+            (see `fallback_line_ids`).
           type: integer
           minimum: 0
         topup_hostnames:
@@ -1285,9 +1285,10 @@ components:
             for 10 seconds, the gateway ends the session, and the peer's next
             flow starts one on the next online line; an agent that reconnects
             sooner keeps its sessions. A session on a fallback line ends once
-            a line earlier in that order has been online for
-            `failback_seconds` without a break, so the peer moves back to its
-            chosen line. Ending a session resets the peer's open flows.
+            `line_id` has been online for `failback_seconds` without a break,
+            so the peer moves back to its chosen line; it never moves from
+            one fallback line to another while its line works. Ending a
+            session resets the peer's open flows.
           type: array
           uniqueItems: true
           items:

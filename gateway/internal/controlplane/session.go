@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"slices"
 	"time"
 
 	"github.com/jermainee/homeport/gateway"
@@ -112,7 +111,11 @@ func (c *Controller) Access(ctx context.Context, p gateway.Peer) gateway.Access 
 func (c *Controller) startSessionLocked(ps *peerState, now time.Time) bool {
 	c.lineMu.Lock()
 	lineID, ip := "", netip.Addr{}
-	for _, id := range ps.cfg.lines() {
+	for i := -1; i < len(ps.cfg.FallbackLineIDs); i++ {
+		id := ps.cfg.LineID
+		if i >= 0 {
+			id = ps.cfg.FallbackLineIDs[i]
+		}
 		if addr, online := c.lineIPs[id]; online && c.usableLocked(ps, id) {
 			lineID, ip = id, addr
 			break
@@ -178,18 +181,19 @@ func (c *Controller) usableLocked(ps *peerState, lineID string) bool {
 	return ok && line.OwnerMemberID != ps.peer.MemberID
 }
 
-// moveReasonLocked says why an active session should end so that the peer's
-// next flow starts one on another line, or "" when it stays: its line is no
-// longer one of the peer's, has been offline for OfflineHold, or a line
-// earlier in the peer's order has been online for the config's failback
-// time. Sessions in grace stay where they are until grace ends.
+// moveReasonLocked says why a session should end so that the peer's next
+// flow starts one on another line, or "" when it stays: its line is no
+// longer one of the peer's or has been offline for OfflineHold, or (for a
+// session with a lease, on a fallback line) the peer's own line has been
+// online for the config's failback time. A session moves back only to the
+// member's own line, never from one fallback line to another: that would
+// change its IP for nothing. A session in grace moves only off a line it
+// cannot use, so a member without credits still reaches the top-up hosts.
 func (c *Controller) moveReasonLocked(ps *peerState, s *session, now time.Time) string {
-	if s.state != stateActive {
+	if s.state == statePending {
 		return ""
 	}
-	order := ps.cfg.lines()
-	at := slices.Index(order, s.lineID)
-	if at < 0 || !c.usableLocked(ps, s.lineID) {
+	if !ps.cfg.hasLine(s.lineID) || !c.usableLocked(ps, s.lineID) {
 		return "line no longer the peer's"
 	}
 	c.lineMu.Lock()
@@ -197,9 +201,10 @@ func (c *Controller) moveReasonLocked(ps *peerState, s *session, now time.Time) 
 	if down, ok := c.lineDown[s.lineID]; ok && now.Sub(down) >= OfflineHold {
 		return "line offline"
 	}
-	for _, id := range order[:at] {
-		if up, ok := c.lineUp[id]; ok && c.usableLocked(ps, id) && now.Sub(up) >= c.failback {
-			return "earlier line back online"
+	own := ps.cfg.LineID
+	if s.state == stateActive && s.lineID != own && c.usableLocked(ps, own) {
+		if up, ok := c.lineUp[own]; ok && now.Sub(up) >= c.failback {
+			return "own line back online"
 		}
 	}
 	return ""

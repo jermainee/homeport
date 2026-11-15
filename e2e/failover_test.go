@@ -43,9 +43,11 @@ func TestAPeerMovesToAnotherLineWhileItsLineIsOfflineAndBack(t *testing.T) {
 
 	// A's line comes back. Once it has been online for failback_seconds,
 	// B's peer moves back to it.
+	// The gateway's failback time starts when it sees A's line online,
+	// which is after this.
+	back := time.Now()
 	s.startAgent(quickReconnect)
 	s.waitLineOnline()
-	back := time.Now()
 	deadline := back.Add(failbackSeconds*time.Second + waitFor)
 	for s.agent.Stats().FlowsTotal == 0 {
 		if time.Now().After(deadline) {

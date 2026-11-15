@@ -215,6 +215,32 @@ func TestSetPeerLineSendsTheNextFlowsToThatLinesAgent(t *testing.T) {
 	}
 }
 
+func TestSetPeerLineNeverSendsAMembersFlowsThroughTheirOwnLine(t *testing.T) {
+	gw := relayGateway(t)
+	cert, pin := newAgentCert(t)
+	if err := gw.AddLine(gateway.Line{ID: "own-line", OwnerMemberID: "member-user", AgentPin: pin}); err != nil {
+		t.Fatalf("add line: %v", err)
+	}
+	agent, err := startAgent(t, gw, cert, answer(relayprotocol.StatusOK))
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	key := newKey(t)
+	peerIP := netip.MustParseAddr("10.77.0.2")
+	if err := gw.AddPeer(gateway.Peer{PublicKey: key.PublicKey(), IPv4: peerIP, LineID: "line-1", MemberID: "member-user"}); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	gw.SetPeerLine(key.PublicKey(), "own-line")
+
+	assertResetQuickly(t, newClient(t, gw, key, peerIP))
+	select {
+	case open := <-agent.opens:
+		t.Fatalf("the member's flow reached their own line's agent: %+v", open)
+	default:
+	}
+}
+
 // answer makes the agent answer every flow with status and end it.
 func answer(status relayprotocol.Status) flowHandler {
 	return func(_ relayprotocol.FlowOpen, s *quic.Stream) {

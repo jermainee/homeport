@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -38,8 +39,8 @@ type GatewaySelf struct {
 type Config struct {
 	ETag           string   `json:"etag"`
 	TopUpHostnames []string `json:"topup_hostnames"`
-	// FailbackSeconds is how long a line must be online without a break
-	// before a session on a later line of a peer's order moves back to it.
+	// FailbackSeconds is how long a peer's own line must be online without
+	// a break before its session on a fallback line moves back to it.
 	FailbackSeconds int          `json:"failback_seconds"`
 	Peers           []ConfigPeer `json:"peers"`
 	Lines           []ConfigLine `json:"lines"`
@@ -57,10 +58,10 @@ type ConfigPeer struct {
 	FallbackLineIDs []string `json:"fallback_line_ids"`
 }
 
-// lines is the order in which the peer's sessions pick a line: its own
-// line, then its fallback lines.
-func (p ConfigPeer) lines() []string {
-	return append([]string{p.LineID}, p.FallbackLineIDs...)
+// hasLine reports whether lineID is the peer's own line or one of its
+// fallback lines.
+func (p ConfigPeer) hasLine(lineID string) bool {
+	return lineID == p.LineID || slices.Contains(p.FallbackLineIDs, lineID)
 }
 
 // sameDevice reports whether a and b are the same WireGuard device: the
