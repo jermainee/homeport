@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -744,12 +745,13 @@ func (r *fakeResolver) LookupNetIP(_ context.Context, network, host string) ([]n
 	r.mu.Lock()
 	r.lookups = append(r.lookups, key)
 	r.mu.Unlock()
+	// Copies, as a real resolver returns: callers may own what they get.
 	if addrs, ok := r.answers[key]; ok {
-		return addrs, nil
+		return slices.Clone(addrs), nil
 	}
 	for zone, addrs := range r.zones {
 		if network == "ip4" && strings.HasSuffix(host, "."+zone) {
-			return addrs, nil
+			return slices.Clone(addrs), nil
 		}
 	}
 	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
