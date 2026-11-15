@@ -869,6 +869,15 @@ paths:
           description: Only this country, with its cities.
           schema:
             $ref: "#/components/schemas/CountryCode"
+        - name: peer_id
+          in: query
+          required: false
+          description: |
+            One of the member's peers: its line doesn't count, as when the
+            member moves the peer to another line. Another member's peer
+            changes nothing.
+          schema:
+            $ref: "#/components/schemas/Id"
       responses:
         "200":
           description: Regions with free lines. Empty when there are none.

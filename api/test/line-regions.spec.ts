@@ -40,8 +40,9 @@ async function recount(scheduledTime = Date.now()): Promise<void> {
   await waitOnExecutionContext(ctx);
 }
 
-async function regions(sessionToken: string, country?: string): Promise<CountryRegion[]> {
-  const response = await send("GET", `/v1/lines/regions${country ? `?country=${country}` : ""}`, sessionToken);
+async function regions(sessionToken: string, country?: string, peerId?: string): Promise<CountryRegion[]> {
+  const query = new URLSearchParams({ ...(country ? { country } : {}), ...(peerId ? { peer_id: peerId } : {}) });
+  const response = await send("GET", `/v1/lines/regions${query.size ? `?${query.toString()}` : ""}`, sessionToken);
   expect(response.status).toBe(200);
   return (await expectContract<{ countries: CountryRegion[] }>("GET", "/v1/lines/regions", response)).countries;
 }
@@ -190,8 +191,28 @@ describe("GET /v1/lines/regions", () => {
     expect(await regions(member.sessionToken, here)).toEqual([]);
   });
 
-  it.each(["de", "DEU", "D1", ""])("rejects country=%j with 400", async (country) => {
-    const response = await send("GET", `/v1/lines/regions?country=${country}`, (await verifiedMember()).sessionToken);
+  it("leaves out the line of the member's own device named by peer_id, as when moving it", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    const line = await onlineLine(here, "Alpha");
+    const { peer } = await peerOn(line, member);
+    const other = await verifiedMember();
+    const { peer: theirs } = await peerOn(await onlineLine(here, "Beta"), other);
+    await recount();
+
+    const mine = await regions(member.sessionToken, here, peer.peer_id);
+    const notMine = await regions(member.sessionToken, here, theirs.peer_id);
+    const countries = await regions(member.sessionToken, undefined, peer.peer_id);
+
+    expect(mine).toEqual([{ country: here, lines: 1, cities: [{ city: "Beta", lines: 1 }] }]);
+    expect(notMine).toEqual([
+      { country: here, lines: 2, cities: [{ city: "Alpha", lines: 1 }, { city: "Beta", lines: 1 }] },
+    ]);
+    expect(countries).toContainEqual({ country: here, lines: 1 });
+  });
+
+  it.each(["country=de", "country=DEU", "country=D1", "country=", "peer_id=nope"])("rejects %s with 400", async (query) => {
+    const response = await send("GET", `/v1/lines/regions?${query}`, (await verifiedMember()).sessionToken);
 
     expect(response.status).toBe(400);
     expect(await expectContract("GET", "/v1/lines/regions", response)).toMatchObject({ error: "invalid_request" });

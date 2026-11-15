@@ -77,28 +77,37 @@ async function claimStaleRecount(db: D1Database, now: number): Promise<boolean> 
 /**
  * The countries with free lines for `memberId`, and how many each has
  * (contract operation listLineRegions). With `country`, that country alone
- * and its cities, most lines first.
+ * and its cities, most lines first. With `exceptPeer`, one of the member's
+ * peers, that peer's line doesn't count, as when the member moves it.
  *
  * The counts come from the last recount, at most about a minute old, and
  * are corrected for the member at once: lines of the member and of members
  * linked to them are taken off, and full lines the member already uses are
  * added back, since a line has room for those who use it.
  */
-export async function lineRegions(db: D1Database, memberId: string, country?: string): Promise<CountryRegion[]> {
+export async function lineRegions(
+  db: D1Database,
+  memberId: string,
+  country?: string,
+  exceptPeer?: string,
+): Promise<CountryRegion[]> {
   const now = Date.now();
   if (await claimStaleRecount(db, now)) await recountLineRegions(db, now);
 
+  // ?1 the member, ?2 the country, ?3 the peer; bound up to the last one used.
+  const binds = exceptPeer !== undefined ? [memberId, country ?? null, exceptPeer] : country !== undefined ? [memberId, country] : [memberId];
+  const regions = memberRegionsSql(country !== undefined, exceptPeer !== undefined);
   if (country === undefined) {
     const { results } = await db
-      .prepare(`SELECT country, SUM(lines) AS lines FROM (${memberRegionsSql(false)}) GROUP BY country ORDER BY country`)
-      .bind(memberId)
+      .prepare(`SELECT country, SUM(lines) AS lines FROM (${regions}) GROUP BY country ORDER BY country`)
+      .bind(...binds)
       .all<CountryRegion>();
     return results;
   }
 
   const { results } = await db
-    .prepare(`${memberRegionsSql(true)} ORDER BY lines DESC, city`)
-    .bind(memberId, country)
+    .prepare(`${regions} ORDER BY lines DESC, city`)
+    .bind(...binds)
     .all<{ city: string; lines: number }>();
   if (results.length === 0) return [];
   return [
@@ -113,10 +122,19 @@ export async function lineRegions(db: D1Database, memberId: string, country?: st
 /**
  * SQL query: the free lines per country and city for the member ?1, as
  * columns country, city ('' when not known) and lines. With `inCountry`,
- * only the regions in the country ?2.
+ * only the regions in the country ?2. With `exceptPeer`, the line of the
+ * member's peer ?3 doesn't count.
  */
-function memberRegionsSql(inCountry: boolean): string {
+function memberRegionsSql(inCountry: boolean, exceptPeer: boolean): string {
   const where = (column: string) => (inCountry ? ` AND ${column} = ?2` : "");
+  // The peer's line counts for its member exactly when the corrections
+  // below leave it counted: online, served, not linked, room for them.
+  const peerLine = exceptPeer
+    ? `UNION ALL
+       SELECT l.country, COALESCE(l.city, ''), -1 FROM ${ONLINE_LINES}${where("l.country")}
+          AND l.id = (SELECT line_id FROM wireguard_peers WHERE id = ?3 AND member_id = ?1 AND deleted_at IS NULL)
+          AND NOT ${ownerIsLinkedSql("?1", "l.member_id")} AND ${lineHasRoomSql("l.id", "?1")}`
+    : "";
   return `SELECT country, city, SUM(n) AS lines FROM (
        SELECT country, city, lines AS n FROM line_region_counts WHERE 1${where("country")}
        UNION ALL
@@ -127,5 +145,6 @@ function memberRegionsSql(inCountry: boolean): string {
           AND l.id IN (SELECT line_id FROM wireguard_peers WHERE member_id = ?1 AND deleted_at IS NULL)
           AND NOT ${ownerIsLinkedSql("?1", "l.member_id")}
           AND ${lineHasRoomSql("l.id", "?1")} AND NOT ${lineHasRoomSql("l.id")}
+       ${peerLine}
      ) GROUP BY country, city HAVING SUM(n) > 0`;
 }

@@ -482,6 +482,17 @@ describe("adding a device", () => {
     expect(adding().citiesError).toBeUndefined();
   });
 
+  it("picks the newest device's country again when the countries load on a second try", async () => {
+    api.countriesAnswer = serviceError("offline");
+    await open();
+    await use.startAdding();
+
+    api.countriesAnswer = [germany, france];
+    await use.reloadRegions();
+
+    expect(adding()).toMatchObject({ country: "DE", cities: [berlin, munich] });
+  });
+
   it("says why the countries didn't load, and loads them again on request", async () => {
     await open();
     api.countriesAnswer = serviceError("offline");
@@ -661,6 +672,15 @@ describe("changing a device", () => {
     await use.setMove(true);
 
     expect(editing()).toMatchObject({ move: true, countries: [germany, france], country: "DE", cities: [berlin, munich], city: "Berlin" });
+  });
+
+  it("counts where lines are free without the device's own line", async () => {
+    await open();
+
+    await moving();
+
+    expect(api.calls).toContain(`countries ${laptop.peerId}`);
+    expect(api.calls).toContain(`cities DE ${laptop.peerId}`);
   });
 
   it("moves the device to another free line in the region, and keeps its failover", async () => {

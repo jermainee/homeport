@@ -41,12 +41,20 @@ type Region struct {
 }
 
 // Regions lists the countries with free lines for the member, or with
-// country, that country and its cities, most lines first. It needs a
-// verified identity (403 identity_required).
-func (c *Client) Regions(ctx context.Context, sessionToken, country string) ([]Region, error) {
-	path := "/v1/lines/regions"
+// country, that country and its cities, most lines first. With exceptPeer,
+// one of the member's peers, that peer's line doesn't count, as when the
+// member moves it. It needs a verified identity (403 identity_required).
+func (c *Client) Regions(ctx context.Context, sessionToken, country, exceptPeer string) ([]Region, error) {
+	q := url.Values{}
 	if country != "" {
-		path += "?country=" + url.QueryEscape(country)
+		q.Set("country", country)
+	}
+	if exceptPeer != "" {
+		q.Set("peer_id", exceptPeer)
+	}
+	path := "/v1/lines/regions"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	var out struct {
 		Countries []Region `json:"countries"`

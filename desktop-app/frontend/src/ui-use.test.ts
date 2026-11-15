@@ -436,6 +436,21 @@ describe("changing a device", () => {
     expect(use.updates).toEqual([]);
   });
 
+  it("keeps focus on a failover the member picks with the keyboard, also when an error goes away", async () => {
+    await openChange();
+    use.updateAnswer = serviceError("no_free_line");
+    choose("move", "move");
+    await vi.waitFor(() => expect(q('input[name="city"][value="Munich"]')).not.toBeNull());
+    q<HTMLFormElement>('[data-form="edit-device"]')!.requestSubmit();
+    await vi.waitFor(() => expect(q('.use-step [role="alert"]')).not.toBeNull());
+
+    q<HTMLInputElement>('input[name="failover"][value="off"]')!.focus();
+    choose("failover", "off");
+
+    await vi.waitFor(() => expect(q('.use-step [role="alert"]')).toBeNull());
+    expect(document.activeElement).toBe(q('input[name="failover"][value="off"]'));
+  });
+
   it("says when the region has no other free line", async () => {
     await openChange();
     use.updateAnswer = serviceError("no_free_line");

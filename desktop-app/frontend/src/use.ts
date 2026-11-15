@@ -106,8 +106,9 @@ export interface UseApi {
   balance(): Promise<Balance>;
   buyCredits(): Promise<Balance>;
   pollCheckout(): Promise<CheckoutCheck>;
-  countries(): Promise<Region[]>;
-  cities(country: string): Promise<City[]>;
+  /** countries and cities leave out the line of exceptPeer, a device being moved. */
+  countries(exceptPeer?: string): Promise<Region[]>;
+  cities(country: string, exceptPeer?: string): Promise<City[]>;
   devices(): Promise<Device[]>;
   /** addDevice gets a line in country, and in city unless it is "". */
   addDevice(country: string, city: string, name: string): Promise<NewDevice>;
@@ -207,6 +208,9 @@ export const MAX_DEVICE_NAME = 64;
 
 /** A step's region before the countries load. */
 const noRegion: RegionPick = { countries: null, country: null, cities: null, city: "", query: "" };
+
+/** The device a step moves, whose own line doesn't count as free. */
+const moving = (step: AddStep | EditStep | undefined) => (step?.kind === "edit" ? step.peerId : undefined);
 
 /** Whether a step is sending what the member picked, so the pick is fixed. */
 const busy = (step: AddStep | EditStep) => (step.kind === "add" ? step.creating : step.saving);
@@ -446,7 +450,7 @@ export class Use {
     const step = this.#picking();
     if (!step || busy(step)) return;
     this.#setStep({ ...step, countries: null, error: undefined });
-    await this.#loadRegions(undefined, true);
+    await this.#loadRegions(step.kind === "add" ? this.#ready()?.devices[0]?.country : undefined, true);
   }
 
   // #loadRegions loads the countries and keeps or makes a pick: the country
@@ -457,7 +461,7 @@ export class Use {
     const version = ++this.#regionsVersion;
     let countries: Region[];
     try {
-      countries = await this.api.countries();
+      countries = await this.api.countries(moving(this.#picking()));
     } catch (err) {
       const code = errorCode(err);
       const step = this.#picking();
@@ -491,7 +495,7 @@ export class Use {
     let cities: City[];
     let failed: ErrorCode | undefined;
     try {
-      cities = await this.api.cities(country);
+      cities = await this.api.cities(country, moving(this.#picking()));
     } catch (err) {
       failed = errorCode(err);
       if (this.#lost(failed)) return;

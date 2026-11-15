@@ -244,7 +244,7 @@ func TestCountriesSaysWhereFreeLinesAre(t *testing.T) {
 	f.offer("PT", "", "")
 	f.offer("", "", "") // where the API doesn't know: never listed
 
-	got, err := f.use.Countries(t.Context())
+	got, err := f.use.Countries(t.Context(), "")
 	if err != nil {
 		t.Fatalf("Countries: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestCountriesSaysWhereFreeLinesAre(t *testing.T) {
 func TestCountriesWhenNoneAreSharedIsEmpty(t *testing.T) {
 	f := newUse(t)
 
-	got, err := f.use.Countries(t.Context())
+	got, err := f.use.Countries(t.Context(), "")
 	if err != nil {
 		t.Fatalf("Countries: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestCountriesNeedAVerifiedIdentity(t *testing.T) {
 	f := newUse(t)
 	f.api.SetIdentityStatus(t, email, "processing")
 
-	_, err := f.use.Countries(t.Context())
+	_, err := f.use.Countries(t.Context(), "")
 
 	if code := errCode(err); code != services.ErrIdentityRequired {
 		t.Errorf("error = %v, want code %q", err, services.ErrIdentityRequired)
@@ -287,7 +287,7 @@ func TestCitiesListsACountrysCitiesMostLinesFirst(t *testing.T) {
 	f.offer("DE", "", "")
 	f.offer("PT", "Porto", "")
 
-	got, err := f.use.Cities(t.Context(), "DE")
+	got, err := f.use.Cities(t.Context(), "DE", "")
 	if err != nil {
 		t.Fatalf("Cities: %v", err)
 	}
@@ -302,12 +302,35 @@ func TestCitiesListsACountrysCitiesMostLinesFirst(t *testing.T) {
 func TestCitiesOfACountryWithoutLinesIsEmpty(t *testing.T) {
 	f := newUse(t)
 
-	got, err := f.use.Cities(t.Context(), "DE")
+	got, err := f.use.Cities(t.Context(), "DE", "")
 	if err != nil {
 		t.Fatalf("Cities: %v", err)
 	}
 	if got == nil || len(got) != 0 {
 		t.Errorf("cities = %#v, want an empty list", got)
+	}
+}
+
+// Moving a device, the member's choice leaves out the line it is on.
+func TestRegionsLeaveOutTheLineOfTheDeviceBeingMoved(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	f.offer("DE", "Munich", "")
+
+	countries, err := f.use.Countries(t.Context(), dev.Device.PeerID)
+	if err != nil {
+		t.Fatalf("Countries: %v", err)
+	}
+	cities, err := f.use.Cities(t.Context(), "DE", dev.Device.PeerID)
+	if err != nil {
+		t.Fatalf("Cities: %v", err)
+	}
+
+	if want := []services.Region{{Country: "DE", Lines: 1}}; !slices.Equal(countries, want) {
+		t.Errorf("countries = %+v, want %+v", countries, want)
+	}
+	if want := []services.City{{City: "Munich", Lines: 1}}; !slices.Equal(cities, want) {
+		t.Errorf("cities = %+v, want %+v", cities, want)
 	}
 }
 

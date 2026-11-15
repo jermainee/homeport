@@ -194,13 +194,14 @@ type Region struct {
 
 // Countries lists the countries with free lines for the member, by code.
 // Never counting the member's own lines, or ones linked to them: the API
-// leaves those out.
-func (s *UseService) Countries(ctx context.Context) ([]Region, error) {
+// leaves those out. With exceptPeer, a device the member moves, its line
+// doesn't count either.
+func (s *UseService) Countries(ctx context.Context, exceptPeer string) ([]Region, error) {
 	sess, err := session(s.profile)
 	if err != nil {
 		return nil, err
 	}
-	regions, err := s.api.Regions(ctx, sess.Token, "")
+	regions, err := s.api.Regions(ctx, sess.Token, "", exceptPeer)
 	if err != nil {
 		return nil, serviceError(err)
 	}
@@ -219,13 +220,13 @@ type City struct {
 
 // Cities lists the cities of country with free lines for the member, most
 // lines first. Lines whose city the API doesn't know count only in
-// Countries.
-func (s *UseService) Cities(ctx context.Context, country string) ([]City, error) {
+// Countries. With exceptPeer, as in Countries.
+func (s *UseService) Cities(ctx context.Context, country, exceptPeer string) ([]City, error) {
 	sess, err := session(s.profile)
 	if err != nil {
 		return nil, err
 	}
-	regions, err := s.api.Regions(ctx, sess.Token, country)
+	regions, err := s.api.Regions(ctx, sess.Token, country, exceptPeer)
 	if err != nil {
 		return nil, serviceError(err)
 	}

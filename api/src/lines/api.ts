@@ -136,11 +136,12 @@ linesApi.get("/available", requireVerifiedMember, async (c) => {
 });
 
 linesApi.get("/regions", requireVerifiedMember, async (c) => {
-  const country = c.req.query("country");
+  const { country, peer_id: peerId } = c.req.query();
   if (country !== undefined && !COUNTRY.test(country)) {
     return invalidRequest(c, "country must be an ISO 3166-1 alpha-2 code");
   }
-  return c.json({ countries: await lineRegions(c.env.DB, c.get("member").id, country) });
+  if (peerId !== undefined && !ID.test(peerId)) return invalidRequest(c, "peer_id must be an id");
+  return c.json({ countries: await lineRegions(c.env.DB, c.get("member").id, country, peerId) });
 });
 
 linesApi.patch("/:id", requireVerifiedMember, async (c) => {

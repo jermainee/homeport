@@ -473,7 +473,7 @@ export function failoverLabel(f: Failover, line: { city: string; country: string
 function failoverOption(f: Failover, picked: boolean, line: { city: string; country: string } | undefined): string {
   return `
     <label class="failover-option">
-      <input type="radio" name="failover" value="${f}" ${picked ? "checked" : ""} />
+      <input id="failover-${f}" type="radio" name="failover" value="${f}" ${picked ? "checked" : ""} />
       <span class="failover-text">${esc(failoverLabel(f, line))}${
         f === "off" ? `<span class="failover-meta">It has no connection meanwhile.</span>` : ""
       }</span>

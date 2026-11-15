@@ -94,13 +94,13 @@ export class FakeUse implements UseApi {
     this.calls.push("pollCheckout");
     return settle(this.checkoutPolls.shift() ?? { arrived: false, balance: this.balanceAnswer as Balance });
   }
-  async countries() {
-    this.calls.push("countries");
+  async countries(exceptPeer?: string) {
+    this.calls.push(exceptPeer ? `countries ${exceptPeer}` : "countries");
     await this.#holdRegions;
     return settle(this.countriesAnswer);
   }
-  async cities(country: string) {
-    this.calls.push(`cities ${country}`);
+  async cities(country: string, exceptPeer?: string) {
+    this.calls.push(exceptPeer ? `cities ${country} ${exceptPeer}` : `cities ${country}`);
     await this.#holdRegions;
     return settle(this.citiesAnswers[country] ?? []);
   }

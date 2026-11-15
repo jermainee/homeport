@@ -48,19 +48,20 @@ export function BuyCredits(): $CancellablePromise<$models.Balance> {
 /**
  * Cities lists the cities of country with free lines for the member, most
  * lines first. Lines whose city the API doesn't know count only in
- * Countries.
+ * Countries. With exceptPeer, as in Countries.
  */
-export function Cities(country: string): $CancellablePromise<$models.City[] | null> {
-    return $Call.ByID(3919116428, country);
+export function Cities(country: string, exceptPeer: string): $CancellablePromise<$models.City[] | null> {
+    return $Call.ByID(3919116428, country, exceptPeer);
 }
 
 /**
  * Countries lists the countries with free lines for the member, by code.
  * Never counting the member's own lines, or ones linked to them: the API
- * leaves those out.
+ * leaves those out. With exceptPeer, a device the member moves, its line
+ * doesn't count either.
  */
-export function Countries(): $CancellablePromise<$models.Region[] | null> {
-    return $Call.ByID(1517911199);
+export function Countries(exceptPeer: string): $CancellablePromise<$models.Region[] | null> {
+    return $Call.ByID(1517911199, exceptPeer);
 }
 
 /**

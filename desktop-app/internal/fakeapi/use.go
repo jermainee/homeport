@@ -257,8 +257,18 @@ func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
 	country := r.URL.Query().Get("country")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The line of the member's own peer peer_id doesn't count.
+	except := ""
+	for _, p := range s.peers {
+		if p.PeerID == r.URL.Query().Get("peer_id") && p.memberID == m.MemberID && !p.deleted {
+			except = p.LineID
+		}
+	}
 	countries := map[string]*region{}
 	for _, l := range s.offered {
+		if l.LineID == except {
+			continue
+		}
 		// The API lists no line whose country it doesn't know.
 		if !l.Online || l.Country == "" || (country != "" && l.Country != country) {
 			continue
