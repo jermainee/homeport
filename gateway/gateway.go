@@ -92,6 +92,10 @@ type Peer struct {
 	IPv4, IPv6 netip.Addr // tunnel addresses; at least one is required
 	MemberID   string     // the member who owns the device
 	LineID     string     // the line its traffic exits through
+	// HTTPSOnly admits a TCP flow only if it opens with TLS, so the line's
+	// owner and their ISP can neither read nor change it. DNS through the
+	// virtual resolver and UDP are not affected.
+	HTTPSOnly bool
 }
 
 // Access is what a peer may reach with a new flow.
@@ -358,20 +362,22 @@ func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
 	if !destinationAllowed(s.cfg.DNS, f.Dst) {
 		return wgstack.Admission{}
 	}
-	if s.cfg.Access == nil {
-		return wgstack.Admission{Allow: true}
-	}
+	dns := f.Dst == netip.AddrPortFrom(s.cfg.DNS, 53)
 	s.mu.Lock()
 	peer, ok := s.peers[s.byAddr[f.Peer]]
 	s.mu.Unlock()
+	full := wgstack.Admission{Allow: true, TLSOnly: ok && peer.HTTPSOnly && !dns}
+	if s.cfg.Access == nil {
+		return full // an unknown peer has no line, so the dialer refuses it
+	}
 	if !ok {
 		return wgstack.Admission{}
 	}
 	switch s.cfg.Access.Access(ctx, peer) {
 	case AccessFull:
-		return wgstack.Admission{Allow: true}
+		return full
 	case AccessTopUp:
-		if f.Dst == netip.AddrPortFrom(s.cfg.DNS, 53) {
+		if dns {
 			return wgstack.Admission{Allow: true}
 		}
 		if f.Dst.Port() == 443 {

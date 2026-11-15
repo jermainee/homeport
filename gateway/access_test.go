@@ -137,6 +137,9 @@ func TestTopUpAccessAllowsOnlyDNSAndTLSToTheTopUpHosts(t *testing.T) {
 	if err := f.client.getTLS("other.example", 3*time.Second); err == nil {
 		t.Error("TLS to another host was allowed")
 	}
+	if err := f.client.getTLS("", 3*time.Second); err == nil {
+		t.Error("TLS without a server name was allowed")
+	}
 	if err := f.client.tryGet("http://11.22.33.44/", 3*time.Second); err == nil {
 		t.Error("plain HTTP was allowed")
 	}

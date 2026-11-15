@@ -67,6 +67,10 @@ type Admission struct {
 	// refused. The client's handshake completes before the dial, so such a
 	// flow can no longer be refused with a plain reset during the handshake.
 	ServerName func(name string) bool
+	// TLSOnly admits a TCP flow only if it opens with a TLS ClientHello,
+	// with any server name or none, as ServerName does. UDP flows are not
+	// affected.
+	TLSOnly bool
 }
 
 // Stack is a tun.Device backed by a gVisor stack in promiscuous mode.
@@ -234,6 +238,10 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		s.handleTLSOnly(r, flow, epoch, adm.ServerName)
 		return
 	}
+	if adm.TLSOnly {
+		s.handleTLSOnly(r, flow, epoch, func(string) bool { return true })
+		return
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
 	defer cancel()
 	upstream, err := s.dialer.DialTCP(ctx, flow)
@@ -254,8 +262,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 }
 
 // handleTLSOnly completes the client's handshake, reads its ClientHello,
-// and dials only if the server name it names is accepted. The ClientHello
-// is then passed on unchanged.
+// and dials only if accept takes the server name it names ("" for none).
+// The ClientHello is then passed on unchanged.
 func (s *Stack) handleTLSOnly(r *tcp.ForwarderRequest, flow Flow, epoch uint64, accept func(string) bool) {
 	var wq waiter.Queue
 	ep, tcpErr := r.CreateEndpoint(&wq)
