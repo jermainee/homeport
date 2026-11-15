@@ -354,10 +354,18 @@ paths:
     post:
       tags: [gateway]
       operationId: reportLineEvents
-      summary: Report lines going online or offline
+      summary: Report lines going online or offline, or caught tampering
       description: |
         Sent when a sharing agent connects to or disconnects from the
         gateway. Each event is applied exactly once, like usage events.
+
+        `tampered` is sent when a canary check caught the line changing a
+        response: the gateway fetched its own canary page over plain HTTP,
+        or looked up a random name in a Homeport zone, through the line, and
+        got something other than the known answer. The gateway has already
+        disconnected the line's agent and refuses it from then on. The API
+        pauses the line: no gateway config lists it and nobody can pick it,
+        whatever events follow, until someone reviews it.
       security:
         - gatewayToken: []
       requestBody:
@@ -370,6 +378,9 @@ paths:
               events:
                 summary: A line reconnecting
                 externalValue: examples/gateway/line-events.json
+              tampered:
+                summary: A line caught changing the canary page
+                externalValue: examples/gateway/line-events-tampered.json
         x-max-body-bytes: 131072
       responses:
         "200":
@@ -1540,7 +1551,14 @@ components:
           $ref: "#/components/schemas/Id"
         type:
           type: string
-          enum: [online, offline]
+          enum: [online, offline, tampered]
+        check:
+          description: |
+            For `tampered` only: the canary check that caught the line,
+            `http` (the canary page came back changed) or `dns` (a name in
+            the canary zone resolved to other addresses, or to none).
+          type: string
+          enum: [http, dns]
         observed_ip:
           description: The agent's public IP as the gateway sees it. For `offline`, the last one seen.
           $ref: "#/components/schemas/IpAddress"
@@ -1548,6 +1566,20 @@ components:
           $ref: "#/components/schemas/Version"
         at:
           $ref: "#/components/schemas/Timestamp"
+      if:
+        required: [type]
+        properties:
+          type:
+            const: tampered
+      then:
+        required: [check]
+        properties:
+          check: true
+      else:
+        not:
+          required: [check]
+          properties:
+            check: true
     LineEventResults:
       type: object
       additionalProperties: false

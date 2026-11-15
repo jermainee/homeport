@@ -10,27 +10,32 @@ type GatewayContext = Context<{ Bindings: Env; Variables: GatewayVariables }>;
 interface LineEvent {
   event_id: string;
   line_id: string;
-  type: "online" | "offline";
+  type: "online" | "offline" | "tampered";
+  /** For a tampered event: the canary check that caught the line. */
+  check: "http" | "dns" | null;
   observed_ip: string;
   agent_version: string;
   at: number;
 }
 
-const FIELDS = ["event_id", "line_id", "type", "observed_ip", "agent_version", "at"];
+const FIELDS = ["event_id", "line_id", "type", "check", "observed_ip", "agent_version", "at"];
 
 function parseLineEvent(value: unknown): LineEvent | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "not an object";
   const event = value as Record<string, unknown>;
   if (!hasOnlyFields(event, FIELDS)) return "unknown field";
-  const { event_id, line_id, type, observed_ip, agent_version } = event;
+  const { event_id, line_id, type, check, observed_ip, agent_version } = event;
   if (typeof event_id !== "string" || !UUID_V7.test(event_id)) return "event_id must be a UUIDv7";
   if (typeof line_id !== "string" || !ID.test(line_id)) return "line_id must be an id";
-  if (type !== "online" && type !== "offline") return "type must be online or offline";
+  if (type !== "online" && type !== "offline" && type !== "tampered") return "type must be online, offline or tampered";
+  if (type === "tampered" ? check !== "http" && check !== "dns" : "check" in event) {
+    return "check must be http or dns for a tampered event, and absent for the others";
+  }
   if (!isIpAddress(observed_ip)) return "observed_ip must be an IP address";
   if (typeof agent_version !== "string" || !SEMVER.test(agent_version)) return "agent_version must be a semantic version";
   const at = parseDateTime(event["at"]);
   if (at === null) return "at must be a timestamp";
-  return { event_id, line_id, type, observed_ip, agent_version, at };
+  return { event_id, line_id, type, check: type === "tampered" ? (check as "http" | "dns") : null, observed_ip, agent_version, at };
 }
 
 type Result =
@@ -41,8 +46,10 @@ type Result =
  * POST /v1/gateway/line-events (contract reportLineEvents). Marks this
  * gateway's lines online or offline, each event once. An event older than
  * the line's newest applied one is recorded but changes nothing, since
- * events can arrive out of order. The agent's IP (observed_ip) is checked
- * but not stored: nothing needs it yet.
+ * events can arrive out of order. A tampered event also pauses the line, for
+ * good: servedLineSql leaves it out of every gateway's config, and nobody
+ * can pick it, until someone reviews it. The agent's IP (observed_ip) is
+ * checked but not stored: nothing needs it yet.
  */
 export async function reportLineEvents(c: GatewayContext): Promise<Response> {
   const batch = await readEventBatch(c.req.raw, parseLineEvent);
@@ -78,10 +85,10 @@ export async function reportLineEvents(c: GatewayContext): Promise<Response> {
       statements.push(
         db
           .prepare(
-            `INSERT INTO line_events (event_id, gateway_id, line_id, type, agent_version, at, received_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO line_events (event_id, gateway_id, line_id, type, tamper_check, agent_version, at, received_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .bind(event.event_id, gatewayId, event.line_id, event.type, event.agent_version, event.at, now),
+          .bind(event.event_id, gatewayId, event.line_id, event.type, event.check, event.agent_version, event.at, now),
         db
           .prepare(
             `UPDATE lines SET online = ?, online_changed_at = ?
@@ -89,6 +96,13 @@ export async function reportLineEvents(c: GatewayContext): Promise<Response> {
           )
           .bind(event.type === "online" ? 1 : 0, event.at, event.line_id, event.at),
       );
+      if (event.type === "tampered") {
+        statements.push(
+          db
+            .prepare(`UPDATE lines SET paused_at = ?, paused_reason = ?, updated_at = ? WHERE id = ? AND paused_at IS NULL`)
+            .bind(event.at, `tampered_${event.check}`, now, event.line_id),
+        );
+      }
     }
   }
   // All or nothing: a failure answers 500 and the gateway sends the batch again.
