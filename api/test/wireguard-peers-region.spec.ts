@@ -191,6 +191,20 @@ describe("PATCH /v1/wireguard/peers/{peer_id} with a country", () => {
     expect(moved.failover).toBe("city");
   });
 
+  it("turns https_only off in the same request as the move", async () => {
+    const here = freshCountry();
+    const member = await verifiedMember();
+    await lineAt({ country: here, city: "Alpha" });
+    const { peer } = await createdIn(member.sessionToken, { country: here });
+    const beta = await lineAt({ country: here, city: "Beta" });
+
+    const response = await move(member.sessionToken, peer.peer_id, { country: here, city: "Beta", https_only: false });
+
+    const moved = await expectContract<Peer & { https_only: boolean }>("PATCH", "/v1/wireguard/peers/{peer_id}", response);
+    expect(moved.line_id).toBe(beta);
+    expect(moved.https_only).toBe(false);
+  });
+
   it("never moves a peer to a line on another gateway, which its config doesn't name", async () => {
     const here = freshCountry();
     const member = await verifiedMember();
