@@ -167,6 +167,9 @@ export class Use {
   // Bumped whenever the devices or the balance change other than by a
   // refresh, so a refresh that started earlier doesn't undo the change.
   #devicesVersion = 0;
+  // Devices the member moved to another line, and the line each left: the
+  // API reports the old session there until the gateway moves the device.
+  #movedFrom = new Map<string, string>();
   #balanceVersion = 0;
 
   constructor(
@@ -223,7 +226,22 @@ export class Use {
       ...v,
       lines,
       balance: balanceVersion === this.#balanceVersion ? balance : v.balance,
-      devices: devicesVersion === this.#devicesVersion ? devices : v.devices,
+      devices: devicesVersion === this.#devicesVersion ? this.#followMoves(devices) : v.devices,
+    });
+  }
+
+  /**
+   * followMoves hides the exit line of a device still on the line it was
+   * moved away from: that is its old session, not a backup line. Once the
+   * device has left that line, its exit line shows again.
+   */
+  #followMoves(devices: Device[]): Device[] {
+    return devices.map((d) => {
+      const from = this.#movedFrom.get(d.peerId);
+      if (from === undefined) return d;
+      if (d.exitLine?.lineId === from && d.lineId !== from) return { ...d, exitLine: null };
+      this.#movedFrom.delete(d.peerId);
+      return d;
     });
   }
 
@@ -243,7 +261,7 @@ export class Use {
       return;
     }
     const v = this.#ready();
-    if (v && version === this.#devicesVersion) this.#set({ ...v, devices });
+    if (v && version === this.#devicesVersion) this.#set({ ...v, devices: this.#followMoves(devices) });
   }
 
   async #load(): Promise<void> {
@@ -522,9 +540,14 @@ export class Use {
     const step = v.step;
     const d = v.devices.find((d) => d.peerId === step.peerId);
     const change: DeviceChange = {};
-    if (d && step.lineId !== d.lineId) change.lineId = step.lineId;
-    if (d && step.failover !== d.failover) change.failover = step.failover;
-    if (!d || Object.keys(change).length === 0) {
+    if (!d) {
+      // Removed elsewhere while the form was open.
+      this.#set({ ...v, step: { ...step, error: "device_gone" } });
+      return;
+    }
+    if (step.lineId !== d.lineId) change.lineId = step.lineId;
+    if (step.failover !== d.failover) change.failover = step.failover;
+    if (Object.keys(change).length === 0) {
       this.#set({ ...v, step: { kind: "list" } });
       return;
     }
@@ -538,10 +561,11 @@ export class Use {
     }
     const now = this.#ready();
     if (!now) return;
+    if (change.lineId !== undefined) this.#movedFrom.set(dev.peerId, d.lineId);
     this.#devicesVersion++;
     this.#set({
       ...now,
-      devices: now.devices.map((d) => (d.peerId === dev.peerId ? dev : d)),
+      devices: this.#followMoves(now.devices.map((x) => (x.peerId === dev.peerId ? dev : x))),
       step: { kind: "list" },
     });
   }

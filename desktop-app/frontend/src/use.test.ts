@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, Use, type UseView } from "./use";
+import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, Use, type UseView } from "./use";
 import { serviceError } from "./test/fake-auth";
 import { FakeUse, balance, berlin, laptop, lyon, newDevice, porto } from "./test/fake-use";
 
@@ -423,6 +423,54 @@ describe("the new device's config", () => {
 });
 
 describe("changing a device", () => {
+  const exitOn = (lineId: string) => ({ lineId, country: "DE", city: "Berlin", since: "2026-11-14T13:02:10Z" });
+
+  it("does not call the old line a backup line while the device moves to its new one", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+    // The gateway moves the device at its next config fetch; until then the
+    // API reports the session on the old line.
+    api.updateAnswer = { ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) };
+
+    await use.saveDevice();
+    const saved = backupLine(ready().devices[0]!);
+    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) }];
+    await use.refreshDevices();
+    const refreshed = backupLine(ready().devices[0]!);
+
+    expect(saved).toBeUndefined();
+    expect(refreshed).toBeUndefined();
+  });
+
+  it("shows a backup line again once the device has left its old line", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+    api.updateAnswer = { ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) };
+    await use.saveDevice();
+
+    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: null }];
+    await use.refreshDevices();
+    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) }];
+    await use.refreshDevices();
+
+    expect(backupLine(ready().devices[0]!)?.lineId).toBe(berlin.lineId);
+  });
+
+  it("says so when the device was removed while its form was open", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickFailover("off");
+    api.devicesAnswer = [];
+    await use.refresh();
+
+    await use.saveDevice();
+
+    expect(ready().step).toMatchObject({ kind: "edit", peerId: laptop.peerId, error: "device_gone" });
+    expect(api.updates).toEqual([]);
+  });
+
   it("starts from the device's line and failover", async () => {
     api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, failover: "city" }];
     await open();

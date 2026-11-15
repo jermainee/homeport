@@ -361,6 +361,11 @@ function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string
   const lines = v.lines.length
     ? linePicker(v.lines, s.lineId)
     : `<p class="panel-line empty">Nobody shares another line you can use right now.</p>`;
+  // Its own line is missing from the list once it stopped sharing.
+  const gone =
+    d && !v.lines.some((l) => l.lineId === d.lineId)
+      ? `<p class="panel-line edit-line-gone">Its line isn't shared right now. Pick another one.</p>`
+      : "";
   return `
     <section class="panel use-step" aria-labelledby="edit-title">
       <div class="step-head">
@@ -368,6 +373,7 @@ function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string
         <p class="panel-line">It keeps its config, so there's nothing to scan or import again.</p>
       </div>
       <form class="add-form" data-form="edit-device" novalidate>
+        ${gone}
         ${lines}
         ${alert(s.error)}
         <fieldset class="failover">

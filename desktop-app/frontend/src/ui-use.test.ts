@@ -246,6 +246,22 @@ describe("a device on a backup line", () => {
   });
 });
 
+describe("changing a device whose line stopped sharing", () => {
+  it("says so, since no line in the list is picked", async () => {
+    await openHome();
+    // Opening the tab loads the lines again.
+    use.linesAnswer = [lyon];
+    await openUse();
+    await vi.waitFor(() => expect(use.count("lines")).toBeGreaterThan(1));
+
+    q(`[data-action="use-edit"][data-peer="${laptop.peerId}"]`)!.click();
+
+    await vi.waitFor(() => expect(q("#edit-title")).not.toBeNull());
+    expect(q(".edit-line-gone")?.textContent).toBe("Its line isn't shared right now. Pick another one.");
+    expect(app.querySelector('input[name="line"]:checked')).toBeNull();
+  });
+});
+
 describe("changing a device", () => {
   beforeEach(async () => {
     await openHome();
