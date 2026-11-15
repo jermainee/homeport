@@ -30,7 +30,7 @@ export async function onlineLine(gateway: { gatewayId: string; token: string }, 
   const member = owner ?? (await verifiedMember());
   const cf = {
     country: place.country,
-    ...(place.city ? { city: place.city } : {}),
+    ...(place.city !== undefined ? { city: place.city } : {}),
     ...(place.isp ? { asOrganization: place.isp } : {}),
   } as Partial<IncomingRequestCfProperties>;
   const lineId = await sharingLine(member.sessionToken, cf);

@@ -1,13 +1,13 @@
 import { Hono } from "hono";
 import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
-import { COUNTRY, timestamp } from "../formats";
+import { COUNTRY, isCity, timestamp } from "../formats";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { requireVerifiedMember } from "../identity/require-verified";
 import { servedLineSql } from "../gateway/served";
 import { KEY32, isName } from "../keys";
 import { lineHasRoomSql, lineUsersSql, ownerIsLinkedSql } from "../lines/rules";
-import { MAX_PEERS_PER_MEMBER } from "../pricing";
+import { MAX_PEERS_PER_MEMBER, MAX_USERS_PER_LINE } from "../pricing";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
 import { CURRENT_SESSION_WINDOW_MS, type Failover, isFailover } from "./failover";
 
@@ -121,24 +121,26 @@ function peerTarget(body: Record<string, unknown>): PeerTarget | string {
   if (country === undefined) return "country or line_id is required";
   if (typeof country !== "string" || !COUNTRY.test(country)) return "country must be an ISO 3166-1 alpha-2 code";
   if (city === undefined) return { country, city: null };
-  if (typeof city !== "string" || city.length === 0 || city.length > 200) return "city must have 1 to 200 characters";
+  if (!isCity(city)) return "city must have 1 to 200 characters";
   return { country, city };
 }
 
 /**
  * SQL query of the one line a new peer of the member ?2 goes on, as column
- * `id`. With `line`, the line ?3 if it has room for the member. Otherwise
- * the API picks a line in the country ?7 (and the city ?8, with `inCity`):
- * served, online, not the member's own or linked to them, with room for the
- * member, and with the fewest other members on it.
+ * `id`. For one line, the line ?3 if it has room for the member. For a
+ * region, the API picks a line in the country ?7, and in the city ?8 when
+ * the target names one: served, online, not the member's own or linked to
+ * them, with room for the member, and with the fewest other members on it.
  */
 function newPeerLineSql(target: PeerTarget): string {
   if ("lineId" in target) return `SELECT ?3 AS id WHERE ${lineHasRoomSql("?3", "?2")}`;
-  return `SELECT l.id FROM lines l JOIN members o ON o.id = l.member_id
-           WHERE ${servedLineSql("l", "o")} AND l.online = 1 AND l.country = ?7${target.city === null ? "" : " AND l.city = ?8"}
-             AND NOT ${ownerIsLinkedSql("?2", "l.member_id")}
-             AND ${lineHasRoomSql("l.id", "?2")}
-           ORDER BY ${lineUsersSql("l.id", "?2")}, l.id
+  return `SELECT id FROM (
+             SELECT l.id, ${lineUsersSql("l.id", "?2")} AS others
+               FROM lines l JOIN members o ON o.id = l.member_id
+              WHERE ${servedLineSql("l", "o")} AND l.online = 1 AND l.country = ?7${target.city === null ? "" : " AND l.city = ?8"}
+                AND NOT ${ownerIsLinkedSql("?2", "l.member_id")})
+           WHERE others < ${MAX_USERS_PER_LINE}
+           ORDER BY others, id
            LIMIT 1`;
 }
 
@@ -209,17 +211,19 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
     throw error;
   }
   if (!created) {
-    const peers = await db
-      .prepare(`SELECT COUNT(*) AS n FROM wireguard_peers WHERE member_id = ? AND deleted_at IS NULL`)
+    const counts = await db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM wireguard_peers WHERE member_id = ? AND deleted_at IS NULL) AS mine,
+                (SELECT COUNT(*) FROM wireguard_peers WHERE deleted_at IS NULL) AS everyone`,
+      )
       .bind(memberId)
-      .first<{ n: number }>();
-    if ((peers?.n ?? 0) >= MAX_PEERS_PER_MEMBER) {
+      .first<{ mine: number; everyone: number }>();
+    if ((counts?.mine ?? 0) >= MAX_PEERS_PER_MEMBER) {
       return apiError(c, 429, "rate_limited", `at most ${MAX_PEERS_PER_MEMBER} peers; delete one first`);
     }
+    if ((counts?.everyone ?? 0) > LAST_PEER_HOST - FIRST_PEER_HOST) throw new Error("no free tunnel address");
     if (!("lineId" in target)) return apiError(c, 409, "no_free_line", "no free line there right now");
-    const room = await db.prepare(`SELECT ${lineHasRoomSql("?1", "?2")} AS room`).bind(target.lineId, memberId).first<{ room: number }>();
-    if (!room?.room) return apiError(c, 409, "line_full");
-    throw new Error("no free tunnel address");
+    return apiError(c, 409, "line_full");
   }
 
   const [peerResult, gatewayResult] = await db.batch([

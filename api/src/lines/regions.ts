@@ -32,16 +32,18 @@ const ONLINE_LINES = `lines l JOIN members o ON o.id = l.member_id
 
 /**
  * Recounts line_region_counts: per country and city, the online lines with
- * room for one more member. The cron trigger runs it every minute; it reads
- * every online line, which takes about a second at 300,000 lines.
+ * room for one more member, and returns how many regions it counted. The
+ * cron trigger runs it every minute; it reads every online line, which
+ * takes about a second at 300,000 lines.
  */
-export async function recountLineRegions(db: D1Database, now: number): Promise<void> {
-  await db.batch([
+export async function recountLineRegions(db: D1Database, now: number): Promise<number> {
+  // An unknown city (NULL) and an empty one are both stored as ''.
+  const [, counted] = await db.batch([
     db.prepare(`DELETE FROM line_region_counts`),
     db.prepare(
       `INSERT INTO line_region_counts (country, city, lines)
        SELECT l.country, COALESCE(l.city, ''), COUNT(*) FROM ${ONLINE_LINES} AND ${lineHasRoomSql("l.id")}
-        GROUP BY l.country, l.city`,
+        GROUP BY l.country, COALESCE(l.city, '')`,
     ),
     db
       .prepare(
@@ -50,6 +52,26 @@ export async function recountLineRegions(db: D1Database, now: number): Promise<v
       )
       .bind(now),
   ]);
+  return counted?.meta.changes ?? 0;
+}
+
+/**
+ * Claims the recount when the last one is older than RECOUNT_STALE_MS, so
+ * that of the requests that find the counts stale, only one recounts. The
+ * others, and the claimant when its recount fails, go on with the old
+ * counts until the next spell.
+ */
+async function claimStaleRecount(db: D1Database, now: number): Promise<boolean> {
+  const claimed = await db
+    .prepare(
+      `INSERT INTO line_region_recounts (id, counted_at) VALUES (1, ?1)
+       ON CONFLICT (id) DO UPDATE SET counted_at = excluded.counted_at
+        WHERE line_region_recounts.counted_at < ?1 - ${RECOUNT_STALE_MS}
+       RETURNING counted_at`,
+    )
+    .bind(now)
+    .first();
+  return claimed !== null;
 }
 
 /**
@@ -64,8 +86,7 @@ export async function recountLineRegions(db: D1Database, now: number): Promise<v
  */
 export async function lineRegions(db: D1Database, memberId: string, country?: string): Promise<CountryRegion[]> {
   const now = Date.now();
-  const recount = await db.prepare(`SELECT counted_at FROM line_region_recounts`).first<{ counted_at: number }>();
-  if (!recount || now - recount.counted_at > RECOUNT_STALE_MS) await recountLineRegions(db, now);
+  if (await claimStaleRecount(db, now)) await recountLineRegions(db, now);
 
   if (country === undefined) {
     const { results } = await db

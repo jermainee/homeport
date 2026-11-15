@@ -13,7 +13,11 @@ export default {
    */
   scheduled(controller, env, ctx) {
     if (controller.cron === RECOUNT_CRON) {
-      ctx.waitUntil(recountLineRegions(env.DB, controller.scheduledTime));
+      ctx.waitUntil(
+        recountLineRegions(env.DB, controller.scheduledTime).then((regions) => {
+          console.log(JSON.stringify({ event: "line_regions_recount", regions }));
+        }),
+      );
       return;
     }
     ctx.waitUntil(

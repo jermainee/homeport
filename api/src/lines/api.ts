@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { SessionVariables } from "../auth/middleware";
-import { COUNTRY, ID } from "../formats";
+import { COUNTRY, ID, isCity } from "../formats";
 import { SERVED_LINE_SQL } from "../gateway/served";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
@@ -86,14 +86,14 @@ linesApi.post("/", verifiedMemberIdempotent, async (c) => {
   );
 });
 
-/** Lines per page of GET /v1/lines/available, unless the request asks for fewer. */
+/** Lines per page of GET /v1/lines/available: the default, and the most a request may ask for. */
 const AVAILABLE_LIMIT = 50;
 const MAX_AVAILABLE_LIMIT = 100;
 
 linesApi.get("/available", requireVerifiedMember, async (c) => {
   const { country, city, limit: limitParam, cursor } = c.req.query();
   if (country !== undefined && !COUNTRY.test(country)) return invalidRequest(c, "country must be an ISO 3166-1 alpha-2 code");
-  if (city !== undefined && (country === undefined || city.length === 0 || city.length > 200)) {
+  if (city !== undefined && (country === undefined || !isCity(city))) {
     return invalidRequest(c, "city needs a country and 1 to 200 characters");
   }
   const limit = limitParam === undefined ? AVAILABLE_LIMIT : /^\d{1,3}$/.test(limitParam) ? Number(limitParam) : 0;

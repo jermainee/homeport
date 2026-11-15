@@ -5,6 +5,9 @@
 -- Finds a country's or a city's shared lines without reading every line.
 CREATE INDEX lines_region ON lines (sharing_enabled, country, city, online);
 
+-- GET /v1/lines/available no longer lists lines by creation time.
+DROP INDEX lines_sharing;
+
 -- Free lines per region: shared, online and with room for one more member.
 -- Counting them takes about a second at 300,000 lines, so the cron trigger
 -- recounts them every minute instead of each request. A request corrects

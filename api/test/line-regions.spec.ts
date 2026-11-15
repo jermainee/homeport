@@ -168,6 +168,28 @@ describe("GET /v1/lines/regions", () => {
     ]);
   });
 
+  it("counts lines whose city is empty and lines whose city is unknown together, for the country only", async () => {
+    const here = freshCountry();
+    await onlineLine(here, "Alpha");
+    await onlineLineAt(gateway, { country: here, city: "" });
+    await onlineLine(here);
+    await recount();
+
+    expect(await regions((await verifiedMember()).sessionToken, here)).toEqual([
+      { country: here, lines: 3, cities: [{ city: "Alpha", lines: 1 }] },
+    ]);
+  });
+
+  it("recounts on request only once per stale spell, however many requests find the counts stale", async () => {
+    const here = freshCountry();
+    await recount(Date.now() - RECOUNT_STALE_MS - 1_000);
+    const member = await verifiedMember();
+    await regions(member.sessionToken, here);
+    await onlineLine(here, "Alpha");
+
+    expect(await regions(member.sessionToken, here)).toEqual([]);
+  });
+
   it.each(["de", "DEU", "D1", ""])("rejects country=%j with 400", async (country) => {
     const response = await send("GET", `/v1/lines/regions?country=${country}`, (await verifiedMember()).sessionToken);
 
