@@ -52,6 +52,15 @@ describe("POST /v1/wireguard/peers with a country", () => {
     expect(config_text).toContain(`Endpoint = ${GATEWAY.wg_endpoint}`);
   });
 
+  it("takes https_only with a region, as with a line", async () => {
+    const here = freshCountry();
+    await lineAt({ country: here, city: "Alpha" });
+
+    const { peer } = await createdIn((await verifiedMember()).sessionToken, { country: here, https_only: false });
+
+    expect((peer as Peer & { https_only: boolean }).https_only).toBe(false);
+  });
+
   it("picks a line in the city when one is named", async () => {
     const here = freshCountry();
     await lineAt({ country: here, city: "Alpha" });
