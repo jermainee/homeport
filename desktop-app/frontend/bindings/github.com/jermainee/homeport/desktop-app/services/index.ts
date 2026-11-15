@@ -24,6 +24,7 @@ export type {
     CheckoutCheck,
     Credits,
     Device,
+    ExitLine,
     IdentityCheck,
     Line,
     LoginStart,

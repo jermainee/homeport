@@ -91,3 +91,14 @@ export function RemoveDevice(peerID: string): $CancellablePromise<void> {
 export function SaveConfig(peerID: string): $CancellablePromise<boolean> {
     return $Call.ByID(2514448156, peerID);
 }
+
+/**
+ * UpdateDevice moves a device to lineID, or changes its failover
+ * (FailoverCountry, FailoverCity or FailoverOff), or both; an empty
+ * argument keeps what the device has. The device keeps its config: within
+ * about 30 seconds the gateway ends its session on the old line, and its
+ * next connection exits through the new one.
+ */
+export function UpdateDevice(peerID: string, lineID: string, failover: string): $CancellablePromise<$models.Device> {
+    return $Call.ByID(1798641512, peerID, lineID, failover);
+}

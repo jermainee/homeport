@@ -3,16 +3,26 @@
 // in Go; the webview gets the config only as a QR code.
 
 import { UseService } from "../bindings/github.com/jermainee/homeport/desktop-app/services";
-import type { UseApi } from "./use";
+import type { Device as GoDevice } from "../bindings/github.com/jermainee/homeport/desktop-app/services/models";
+import { asFailover, type Device, type UseApi } from "./use";
+
+// Go sends the failover as a plain string.
+const device = (d: GoDevice): Device => ({ ...d, failover: asFailover(d.failover) });
 
 export const wailsUse: UseApi = {
   balance: () => UseService.Balance(),
   buyCredits: () => UseService.BuyCredits(),
   pollCheckout: () => UseService.PollCheckout(),
   lines: async () => (await UseService.Lines()) ?? [],
-  devices: async () => (await UseService.Devices()) ?? [],
-  addDevice: (lineId, name) => UseService.AddDevice(lineId, name),
+  devices: async () => ((await UseService.Devices()) ?? []).map(device),
+  addDevice: async (lineId, name) => {
+    const dev = await UseService.AddDevice(lineId, name);
+    return { ...dev, device: device(dev.device) };
+  },
   saveConfig: (peerId) => UseService.SaveConfig(peerId),
   forgetConfig: (peerId) => UseService.ForgetConfig(peerId),
   removeDevice: (peerId) => UseService.RemoveDevice(peerId),
+  // An empty argument keeps what the device has.
+  updateDevice: async (peerId, change) =>
+    device(await UseService.UpdateDevice(peerId, change.lineId ?? "", change.failover ?? "")),
 };

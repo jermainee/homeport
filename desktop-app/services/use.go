@@ -230,16 +230,53 @@ func deref(s *string) string {
 
 // Device is a device that uses a line: a WireGuard peer.
 type Device struct {
-	PeerID    string    `json:"peerId"`
-	Name      string    `json:"name"`
-	LineID    string    `json:"lineId"`
+	PeerID string `json:"peerId"`
+	Name   string `json:"name"`
+	// LineID is the line the member chose. The device exits through it
+	// whenever it is online.
+	LineID string `json:"lineId"`
+	// Failover is where the device goes while its line is offline:
+	// FailoverCountry, FailoverCity or FailoverOff.
+	Failover string `json:"failover"`
+	// ExitLine is the line the device's current session exits through:
+	// LineID, or a backup line while LineID is offline. Nil while the
+	// device has no session.
+	ExitLine  *ExitLine `json:"exitLine"`
 	IPv4      string    `json:"ipv4"`
 	IPv6      string    `json:"ipv6"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// What a device does while its line is offline. Plain strings, so the
+// webview can send them back as they are.
+const (
+	// FailoverCountry moves it to another line in the same city, else one
+	// in the same country. New devices start with it.
+	FailoverCountry = "country"
+	// FailoverCity moves it to another line in the same city only.
+	FailoverCity = "city"
+	// FailoverOff leaves it without a connection until its line is back.
+	FailoverOff = "off"
+)
+
+// ExitLine is the line a device's session exits through. Country (ISO
+// 3166-1 alpha-2) and City are empty when the API doesn't know them.
+type ExitLine struct {
+	LineID  string    `json:"lineId"`
+	Country string    `json:"country"`
+	City    string    `json:"city"`
+	Since   time.Time `json:"since"` // when the session on this line started
+}
+
 func deviceOf(p apiclient.Peer) Device {
-	return Device{PeerID: p.ID, Name: p.Name, LineID: p.LineID, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt}
+	d := Device{
+		PeerID: p.ID, Name: p.Name, LineID: p.LineID, Failover: p.Failover,
+		IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+	}
+	if e := p.ExitLine; e != nil {
+		d.ExitLine = &ExitLine{LineID: e.LineID, Country: deref(e.Country), City: deref(e.City), Since: e.Since}
+	}
+	return d
 }
 
 // NewDevice is a device just added, with its config as a QR code for the
@@ -356,7 +393,8 @@ func confFileName(name string) string {
 
 const maxTunnelName = 15
 
-// peerError explains why the API refused a new peer.
+// peerError explains why the API refused a peer a line: a new peer, or one
+// moving to another line.
 func peerError(err error) error {
 	var apiErr *apiclient.Error
 	if errors.As(err, &apiErr) {
@@ -367,6 +405,8 @@ func peerError(err error) error {
 			return &Error{Code: ErrLineFull, err: err}
 		case apiErr.Code == "line_not_allowed":
 			return &Error{Code: ErrLineNotAllowed, err: err}
+		case apiErr.Code == "line_on_other_gateway":
+			return &Error{Code: ErrLineOnOtherGateway, err: err}
 		}
 	}
 	return serviceError(err)
@@ -459,6 +499,47 @@ func (s *UseService) Devices(ctx context.Context) ([]Device, error) {
 		out = append(out, deviceOf(p))
 	}
 	return out, nil
+}
+
+// UpdateDevice moves a device to lineID, or changes its failover
+// (FailoverCountry, FailoverCity or FailoverOff), or both; an empty
+// argument keeps what the device has. The device keeps its config: within
+// about 30 seconds the gateway ends its session on the old line, and its
+// next connection exits through the new one.
+func (s *UseService) UpdateDevice(ctx context.Context, peerID, lineID, failover string) (Device, error) {
+	if (lineID == "" && failover == "") ||
+		(failover != "" && failover != FailoverCountry && failover != FailoverCity && failover != FailoverOff) {
+		return Device{}, &Error{Code: ErrUnexpected, err: errors.New("update a device's line, its failover, or both")}
+	}
+	sess, err := session(s.profile)
+	if err != nil {
+		return Device{}, err
+	}
+	p, err := s.api.UpdatePeer(ctx, sess.Token, peerID, lineID, failover)
+	if apiclient.IsStatus(err, http.StatusNotFound) {
+		return Device{}, s.missing(ctx, sess.Token, peerID, lineID, err)
+	}
+	if err != nil {
+		return Device{}, peerError(err)
+	}
+	return deviceOf(p), nil
+}
+
+// missing tells why the API didn't find what UpdateDevice named: it
+// answers 404 both for a device that is gone and for a line that stopped
+// sharing.
+func (s *UseService) missing(ctx context.Context, token, peerID, lineID string, notFound error) error {
+	if lineID == "" {
+		return &Error{Code: ErrDeviceGone, err: notFound}
+	}
+	peers, err := s.api.Peers(ctx, token)
+	if err != nil {
+		return serviceError(err)
+	}
+	if !slices.ContainsFunc(peers, func(p apiclient.Peer) bool { return p.ID == peerID }) {
+		return &Error{Code: ErrDeviceGone, err: notFound}
+	}
+	return &Error{Code: ErrLineUnavailable, err: notFound}
 }
 
 // RemoveDevice deletes a device. Within about 30 seconds the gateway drops

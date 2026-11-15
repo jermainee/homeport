@@ -55,13 +55,28 @@ func (c *Client) AvailableLines(ctx context.Context, sessionToken string) ([]Ava
 
 // Peer is one of the member's WireGuard peers: a device that uses a line.
 type Peer struct {
-	ID        string    `json:"peer_id"`
-	Name      string    `json:"name"`
-	LineID    string    `json:"line_id"`
+	ID     string `json:"peer_id"`
+	Name   string `json:"name"`
+	LineID string `json:"line_id"` // the line the member chose
+	// Failover is where the peer goes while its line is offline: country,
+	// city or off.
+	Failover string `json:"failover"`
+	// ExitLine is the line the peer's current session exits through: LineID,
+	// or a backup line while LineID is offline. Nil without a session.
+	ExitLine  *ExitLine `json:"exit_line"`
 	PublicKey string    `json:"public_key"`
 	IPv4      string    `json:"ipv4"`
 	IPv6      string    `json:"ipv6"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// ExitLine is the line a peer's session exits through, as the gateway last
+// reported it. Country and City are nil when the API doesn't know them.
+type ExitLine struct {
+	LineID  string    `json:"line_id"`
+	Country *string   `json:"country"`
+	City    *string   `json:"city"`
+	Since   time.Time `json:"since"` // when the session on this line started
 }
 
 // PeerCreated is a new peer and its .conf file. ConfigText has
@@ -92,6 +107,23 @@ func (c *Client) Peers(ctx context.Context, sessionToken string) ([]Peer, error)
 	}
 	err := c.do(ctx, http.MethodGet, "/v1/wireguard/peers", sessionToken, nil, &out, http.StatusOK)
 	return out.Peers, err
+}
+
+// UpdatePeer moves a WireGuard peer to lineID, or changes its failover, or
+// both; an empty argument keeps what the peer has. The peer keeps its
+// .conf file. A peer or a line that doesn't exist, or isn't shared, is an
+// *Error with status 404.
+func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, lineID, failover string) (Peer, error) {
+	body := map[string]string{}
+	if lineID != "" {
+		body["line_id"] = lineID
+	}
+	if failover != "" {
+		body["failover"] = failover
+	}
+	var out Peer
+	err := c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), sessionToken, body, &out, http.StatusOK)
+	return out, err
 }
 
 // DeletePeer deletes a WireGuard peer. A peer that doesn't exist, or was

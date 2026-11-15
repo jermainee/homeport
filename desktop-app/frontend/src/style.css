@@ -768,6 +768,85 @@ input:focus-visible {
   margin-top: 6px;
 }
 
+/* A device on a backup line: a window lit in another member's house, the
+   same lamplight as an online line in the picker. The note takes the
+   row's whole width, under the device's name and line. */
+.device:has(.device-backup) {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.device .device-backup {
+  display: flex;
+  flex-basis: 100%;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink);
+  text-wrap: pretty;
+}
+
+.house-window.is-tiny {
+  flex: none;
+  gap: 1px;
+  width: 10px;
+  height: 12px;
+  padding: 1.5px;
+  border-radius: 2px 2px 1px 1px;
+  transform: translateY(1px);
+}
+
+.house-window.is-tiny[data-light="on"] {
+  box-shadow: 0 0 6px 1px var(--lamp-glow);
+}
+
+/* Where a changed device goes while its line is offline. */
+.failover {
+  min-width: 0;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.failover-list {
+  overflow: hidden;
+  background: var(--wall);
+}
+
+.failover-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 14px;
+  font-weight: 400;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.failover-option + .failover-option {
+  border-top: 1px solid var(--rule);
+}
+
+.failover-option:has(input:checked) {
+  background: var(--surface);
+}
+
+.failover-option input {
+  transform: translateY(2px);
+}
+
+.failover-meta {
+  display: block;
+  color: var(--slate);
+  font-size: 12.5px;
+}
+
+.failover .panel-hint {
+  margin: 8px 0 0;
+  text-wrap: pretty;
+}
+
 .device.is-confirming {
   flex-wrap: wrap;
 }

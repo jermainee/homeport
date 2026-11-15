@@ -5,7 +5,7 @@
 import { Identity, type IdentityApi, type IdentityView } from "./identity";
 import { Share, type ShareApi, type ShareView } from "./share";
 import type { SignIn, State } from "./signin";
-import { Use, type Step, type UseApi, type UseView } from "./use";
+import { asFailover, DEVICES_REFRESH_MS, Use, type Step, type UseApi, type UseView } from "./use";
 import { render, shareLine, type HomeView, type Tab } from "./view";
 import { identityParts } from "./view-use";
 
@@ -54,6 +54,7 @@ function useAnnouncement(prev: UseView | undefined, next: UseView): string | und
   if (now.phase === "stalled" && was.phase !== "stalled") return "No credits yet.";
   if (next.step.kind === "config" && next.step.saved && !(prev.step.kind === "config" && prev.step.saved)) return "Saved.";
   if (next.devices.length < prev.devices.length) return "Device removed.";
+  if (prev.step.kind === "edit" && prev.step.saving && next.step.kind === "list") return "Changes saved.";
   return undefined;
 }
 
@@ -99,8 +100,10 @@ function morph(app: HTMLElement, html: string, selector: string): boolean {
 }
 
 // The control that had focus, so it gets focus back after a redraw: its
-// action, and the device or tab it acts on.
+// action (data-action, or data-focus on a form's submit button), and the
+// device or tab it acts on.
 interface FocusKey {
+  attr: "data-action" | "data-focus";
   action: string;
   peer?: string;
   tab?: string;
@@ -108,13 +111,13 @@ interface FocusKey {
 
 function focusKey(el: Element | null): FocusKey | undefined {
   const d = (el as HTMLElement | null)?.dataset;
-  const action = d?.action ?? d?.focus;
-  return action ? { action, peer: d?.peer, tab: d?.tab } : undefined;
+  if (d?.action) return { attr: "data-action", action: d.action, peer: d.peer, tab: d.tab };
+  if (d?.focus) return { attr: "data-focus", action: d.focus, peer: d.peer, tab: d.tab };
+  return undefined;
 }
 
 function selectorFor(k: FocusKey): string {
-  const attr = k.action === "use-create" ? "data-focus" : "data-action";
-  let sel = `[${attr}="${k.action}"]`;
+  let sel = `[${k.attr}="${k.action}"]`;
   if (k.peer) sel += `[data-peer="${CSS.escape(k.peer)}"]`;
   if (k.tab) sel += `[data-tab="${k.tab}"]`;
   return sel;
@@ -137,6 +140,11 @@ function fallbackFor(k: FocusKey): string | undefined {
       return `[data-action="use-cancel-remove"]${peer}`;
     case "use-cancel-remove":
       return `[data-action="use-remove"]${peer}`;
+    case "use-edit":
+      return "#edit-title";
+    case "use-save-device":
+    case "use-cancel-edit":
+      return `[data-action="use-edit"]${peer}`;
     default:
       return undefined;
   }
@@ -151,7 +159,13 @@ const stepFocus: Record<Step["kind"], string> = {
   list: '[data-action="use-add"]',
   add: "#add-title",
   config: "#config-title",
+  edit: "#edit-title",
 };
+
+// The device whose line and failover Use shows for changing, if any.
+function editing(v: UseView | undefined): string | undefined {
+  return v?.kind === "ready" && v.step.kind === "edit" ? v.step.peerId : undefined;
+}
 
 const TAB_KEY = "homeport.tab";
 
@@ -182,6 +196,7 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
   let shownIdentity: IdentityView | undefined;
   let shownUse: UseView | undefined;
   let hungCard: string | undefined;
+  let followDevices: ReturnType<typeof setInterval> | undefined;
 
   const homeView = (): HomeView => ({
     tab,
@@ -269,16 +284,20 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
     use.subscribe((v) => {
       if (v.kind === "signedOut") return goToSignIn();
       const step = stepOf(shownUse);
+      const edited = editing(shownUse);
       if (tab === "use") announce(useAnnouncement(shownUse, v));
       shownUse = v;
       if (tab !== "use") return;
       // The Account rows show the balance too.
       redraw(".home");
-      // A new step of adding a device is a new screen within the tab:
-      // focus its heading, or Add a device when back at the list.
+      // A new step of adding or changing a device is a new screen within
+      // the tab: focus its heading, or, back at the list, the device just
+      // changed or Add a device.
       const now = stepOf(v);
       if (step && now && step !== now) {
-        const target = app.querySelector<HTMLElement>(stepFocus[now]);
+        const back = edited && now === "list" ? `[data-action="use-edit"][data-peer="${CSS.escape(edited)}"]` : "";
+        const target =
+          (back ? app.querySelector<HTMLElement>(back) : null) ?? app.querySelector<HTMLElement>(stepFocus[now]);
         if (target?.matches("h2")) focusHeading(target);
         else target?.focus();
       }
@@ -287,9 +306,20 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
     identity.start();
     void share.start();
     void use.start();
+
+    // While the member looks at the device list, it follows the gateway, so
+    // a device moving to a backup line shows. Forms aren't redrawn under
+    // the member.
+    followDevices = setInterval(() => {
+      const v = use?.view;
+      if (tab !== "use" || document.visibilityState === "hidden" || v?.kind !== "ready" || v.step.kind !== "list") return;
+      void use?.refreshDevices();
+    }, DEVICES_REFRESH_MS);
   };
 
   const stopHome = () => {
+    clearInterval(followDevices);
+    followDevices = undefined;
     share?.dispose();
     identity?.dispose();
     use?.dispose();
@@ -360,6 +390,16 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         use?.setName(data.get("name")?.toString() ?? "");
         return void use?.create();
       }
+      case "edit-device": {
+        // Focus stays with Save changes; back at the list it goes to the
+        // device's Change button.
+        form.querySelector<HTMLElement>('[type="submit"]')?.focus();
+        const line = data.get("line")?.toString();
+        if (line) use?.pickLine(line);
+        const failover = data.get("failover")?.toString();
+        if (failover) use?.pickFailover(asFailover(failover));
+        return void use?.saveDevice();
+      }
     }
   });
 
@@ -371,11 +411,15 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
   app.addEventListener("change", (e) => {
     const input = e.target as HTMLInputElement;
     if (input.name === "line" && input.checked) use?.pickLine(input.value);
+    if (input.name === "failover" && input.checked) use?.pickFailover(asFailover(input.value));
   });
 
-  // Escape leaves the form for a new device, as Cancel does.
+  // Escape leaves the form for a new or changed device, as Cancel does.
   app.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && (e.target as HTMLElement).closest('[data-form="add-device"]')) use?.cancelAdding();
+    if (e.key !== "Escape") return;
+    const form = (e.target as HTMLElement).closest<HTMLElement>("[data-form]")?.dataset.form;
+    if (form === "add-device") use?.cancelAdding();
+    if (form === "edit-device") use?.cancelEditing();
   });
 
   // Arrow keys move between the tabs, as in any tab list.
@@ -439,6 +483,10 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         return use?.cancelRemove();
       case "use-confirm-remove":
         return void use?.confirmRemove();
+      case "use-edit":
+        return use?.startEditing(peer);
+      case "use-cancel-edit":
+        return use?.cancelEditing();
     }
   });
 }

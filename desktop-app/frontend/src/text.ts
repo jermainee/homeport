@@ -15,6 +15,9 @@ export const errorText: Record<ErrorCode, string> = {
   line_unavailable: "That line isn't shared any more. Pick another one.",
   line_full: "That line has as many members as it can take. Pick another one.",
   line_not_allowed: "That line is yours, or linked to you, so you can't use it. Pick another one.",
+  line_on_other_gateway:
+    "That line runs through another Homeport gateway than this device's config. Pick another line, or add the device again on that one.",
+  device_gone: "This device was removed. Add it again to use it.",
   config_gone: "This config is gone. Remove the device and add it again.",
   invalid_name: "Give the device a name of up to 64 characters.",
   unexpected: "Sign-in didn't work. Try again.",

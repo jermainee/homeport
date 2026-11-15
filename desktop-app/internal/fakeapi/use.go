@@ -27,6 +27,8 @@ type Peer struct {
 	PeerID    string    `json:"peer_id"`
 	Name      string    `json:"name"`
 	LineID    string    `json:"line_id"`
+	Failover  string    `json:"failover"`
+	ExitLine  *ExitLine `json:"exit_line"`
 	PublicKey string    `json:"public_key"`
 	IPv4      string    `json:"ipv4"`
 	IPv6      string    `json:"ipv6"`
@@ -34,6 +36,30 @@ type Peer struct {
 
 	memberID string
 	deleted  bool
+}
+
+// ExitLine is the line a peer's session exits through, as the gateway last
+// reported it: the peer's line, or a backup line while that is offline.
+type ExitLine struct {
+	LineID  string    `json:"line_id"`
+	Country *string   `json:"country"`
+	City    *string   `json:"city"`
+	Since   time.Time `json:"since"`
+}
+
+// SetExitLine sets the line peerID's session exits through, as the gateway
+// reports it; nil means the peer has no session.
+func (s *Server) SetExitLine(t testing.TB, peerID string, exit *ExitLine) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.peers {
+		if p.PeerID == peerID && !p.deleted {
+			p.ExitLine = exit
+			return
+		}
+	}
+	t.Fatalf("fakeapi: no peer %s", peerID)
 }
 
 // GatewayWireGuard is the gateway's WireGuard side, which every config
@@ -260,6 +286,7 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		PeerID:    uuid.NewV7().String(),
 		Name:      body.Name,
 		LineID:    body.LineID,
+		Failover:  "country",
 		PublicKey: body.PublicKey,
 		IPv4:      fmt.Sprintf("10.77.%d.%d", host/256, host%256),
 		IPv6:      fmt.Sprintf("fd77::%x", host),
@@ -307,6 +334,54 @@ func (s *Server) listPeers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": out})
+}
+
+// updatePeer moves a peer to another line, or changes its failover. Unlike
+// the API, it knows only one gateway, so it never answers
+// line_on_other_gateway or line_full; FailNext stands in for those.
+func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
+	m := s.memberRef(r)
+	if m == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.verified(m) {
+		writeError(w, http.StatusForbidden, "identity_required")
+		return
+	}
+	var body struct {
+		LineID   *string `json:"line_id"`
+		Failover *string `json:"failover"`
+	}
+	if _, ok := decodeStrict(w, r, &body); !ok ||
+		(body.LineID == nil && body.Failover == nil) ||
+		(body.LineID != nil && *body.LineID == "") ||
+		(body.Failover != nil && !slices.Contains([]string{"country", "city", "off"}, *body.Failover)) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.peers, func(p *Peer) bool {
+		return p.PeerID == r.PathValue("id") && p.memberID == m.MemberID && !p.deleted
+	})
+	if i < 0 {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	p := s.peers[i]
+	if body.LineID != nil && *body.LineID != p.LineID &&
+		!slices.ContainsFunc(s.offered, func(l AvailableLine) bool { return l.LineID == *body.LineID }) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if body.LineID != nil {
+		p.LineID = *body.LineID
+	}
+	if body.Failover != nil {
+		p.Failover = *body.Failover
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) deletePeer(w http.ResponseWriter, r *http.Request) {

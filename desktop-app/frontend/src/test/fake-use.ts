@@ -1,6 +1,6 @@
 // A stand-in for the Go UseService behind the Wails bindings, for tests.
 
-import type { Balance, CheckoutCheck, Device, Line, NewDevice, UseApi } from "../use";
+import type { Balance, CheckoutCheck, Device, DeviceChange, Line, NewDevice, UseApi } from "../use";
 
 export const berlin: Line = { lineId: "line-berlin", country: "DE", city: "Berlin", isp: "", ipv6: true, online: true };
 export const lyon: Line = { lineId: "line-lyon", country: "FR", city: "Lyon", isp: "Orange", ipv6: false, online: false };
@@ -12,6 +12,8 @@ export const laptop: Device = {
   peerId: "peer-laptop",
   name: "Laptop",
   lineId: "line-berlin",
+  failover: "country",
+  exitLine: null,
   ipv4: "10.77.0.2",
   ipv6: "fd77::2",
   createdAt: "2026-11-12T09:00:00Z",
@@ -19,7 +21,7 @@ export const laptop: Device = {
 
 export function newDevice(lineId: string, name: string, n = 3): NewDevice {
   return {
-    device: { peerId: `peer-${n}`, name, lineId, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: "2026-11-14T09:00:00Z" },
+    device: { peerId: `peer-${n}`, name, lineId, failover: "country", exitLine: null, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: "2026-11-14T09:00:00Z" },
     qrCode: "data:image/png;base64,iVBORw0KGgo=",
     fileName: `Homeport-${name}.conf`,
   };
@@ -42,8 +44,11 @@ export class FakeUse implements UseApi {
   addAnswer: Answer<NewDevice> | null = null;
   saveAnswer: Answer<boolean> = true;
   removeAnswer: Error | null = null;
+  /** What the next updateDevice answers; by default the device, changed. */
+  updateAnswer: Answer<Device> | null = null;
 
   calls: string[] = [];
+  updates: Array<[string, DeviceChange]> = [];
   forgotten: string[] = [];
   removed: string[] = [];
   #hold: Promise<void> | null = null;
@@ -97,6 +102,21 @@ export class FakeUse implements UseApi {
     if (this.removeAnswer) throw this.removeAnswer;
     this.removed.push(peerId);
     if (Array.isArray(this.devicesAnswer)) this.devicesAnswer = this.devicesAnswer.filter((d) => d.peerId !== peerId);
+  }
+
+  async updateDevice(peerId: string, change: DeviceChange) {
+    this.calls.push(`updateDevice ${peerId}`);
+    this.updates.push([peerId, change]);
+    await this.#hold;
+    const a = this.updateAnswer;
+    this.updateAnswer = null;
+    if (a) return settle(a);
+    const devices = settle(this.devicesAnswer);
+    const old = devices.find((d) => d.peerId === peerId);
+    if (!old) throw new Error(`no device ${peerId}`);
+    const dev: Device = { ...old, ...change };
+    this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
+    return dev;
   }
 
   /** hold keeps the next calls that change something waiting until release. */

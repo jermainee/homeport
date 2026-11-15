@@ -40,6 +40,11 @@ const (
 	ErrLineFull ErrorCode = "line_full"
 	// ErrLineNotAllowed: the line is the member's own, or linked to them.
 	ErrLineNotAllowed ErrorCode = "line_not_allowed"
+	// ErrLineOnOtherGateway: the line is served by another gateway than the
+	// one the device's config names, so the device can't move to it.
+	ErrLineOnOtherGateway ErrorCode = "line_on_other_gateway"
+	// ErrDeviceGone: the device was removed, say from another computer.
+	ErrDeviceGone ErrorCode = "device_gone"
 	// ErrConfigGone: the device's config was shown once and is gone; the
 	// private key in it was never stored.
 	ErrConfigGone ErrorCode = "config_gone"
