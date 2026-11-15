@@ -121,10 +121,10 @@ export function SetHTTPSOnly(peerID: string, on: boolean): $CancellablePromise<$
  * UpdateDevice moves a device to a free line the API picks in country,
  * and in city unless it is empty, or changes its failover (FailoverCountry,
  * FailoverCity or FailoverOff) or HTTPS only, in one PATCH; an empty
- * argument, or a nil httpsOnly, keeps what the device has. The new line is on the device's gateway and isn't its current
- * one. The device keeps its config: within about 30 seconds the gateway ends
- * its session on the old line, and its next connection exits through the
- * new one.
+ * argument, or a nil httpsOnly, keeps what the device has. The new line is
+ * on the device's gateway and isn't its current one. The device keeps its
+ * config: within about 30 seconds the gateway ends its session on the old
+ * line, and its next connection exits through the new one.
  */
 export function UpdateDevice(peerID: string, country: string, city: string, failover: string, httpsOnly: boolean | null): $CancellablePromise<$models.Device> {
     return $Call.ByID(1798641512, peerID, country, city, failover, httpsOnly);

@@ -708,7 +708,8 @@ export class Use {
         country: d.country || null,
         city: d.city,
         failover: d.failover,
-        httpsOnly: d.httpsOnly,
+        // A turn of the row's switch still on its way counts as done.
+        httpsOnly: httpsOnlyOf(v, d).on,
         saving: false,
       },
     });
@@ -725,11 +726,14 @@ export class Use {
     if (move && step.countries === null) await this.#loadRegions(undefined, true);
   }
 
-  /** pickHttpsOnly turns HTTPS only on or off for the new or changed device. */
+  /**
+   * pickHttpsOnly turns HTTPS only on or off for the new or changed device.
+   * An error stays: none of them is about HTTPS only.
+   */
   pickHttpsOnly(on: boolean): void {
     const step = this.#picking();
     if (!step || busy(step)) return;
-    this.#setStep({ ...step, httpsOnly: on, error: undefined });
+    this.#setStep({ ...step, httpsOnly: on });
   }
 
   /** pickFailover picks where the device goes while its line is offline. */
@@ -769,7 +773,8 @@ export class Use {
       change.city = step.city;
     }
     if (step.failover !== d.failover) change.failover = step.failover;
-    if (step.httpsOnly !== d.httpsOnly) change.httpsOnly = step.httpsOnly;
+    // Against a turn of the row's switch still on its way, as the form started.
+    if (step.httpsOnly !== httpsOnlyOf(v, d).on) change.httpsOnly = step.httpsOnly;
     if (Object.keys(change).length === 0) {
       this.#set({ ...v, step: { kind: "list" } });
       return;

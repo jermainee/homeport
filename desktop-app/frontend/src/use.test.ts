@@ -383,6 +383,17 @@ describe("adding a device", () => {
     expect(ready().devices[0]).toMatchObject({ name: "Laptop", httpsOnly: false });
   });
 
+  it("keeps the name's error when HTTPS only turns", async () => {
+    await open();
+    await use.startAdding();
+    await use.create();
+    expect(adding().error).toBe("invalid_name");
+
+    use.pickHttpsOnly(false);
+
+    expect(adding()).toMatchObject({ httpsOnly: false, error: "invalid_name" });
+  });
+
   it("keeps HTTPS only as it is while the config is created", async () => {
     await open();
     await use.startAdding();
@@ -737,6 +748,22 @@ describe("changing a device", () => {
     expect(api.updates).toEqual([[laptop.peerId, { failover: "off", httpsOnly: false }]]);
     expect(ready().devices[0]).toMatchObject({ failover: "off", httpsOnly: false });
     expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it("starts from a turn of the row's switch still on its way, and doesn't undo it", async () => {
+    await open();
+    api.hold();
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+
+    use.startEditing(laptop.peerId);
+    expect(editing().httpsOnly).toBe(false);
+    api.release();
+    await turning;
+    use.pickFailover("off");
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "off" }]]);
+    expect(ready().devices[0]).toMatchObject({ failover: "off", httpsOnly: false });
   });
 
   it("sends HTTPS only alone when nothing else changed, and nothing once it's back", async () => {
