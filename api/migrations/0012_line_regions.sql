@@ -1,4 +1,4 @@
--- Migration number: 0009 	 2026-11-14T00:00:00.000Z
+-- Migration number: 0012 	 2026-11-14T00:00:00.000Z
 -- Members pick a line by country and city (GET /v1/lines/regions). Code:
 -- src/lines/regions.ts.
 
