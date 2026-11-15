@@ -718,8 +718,10 @@ func (a *API) reportLineEvents(body []byte, call *Call) (int, []byte, error) {
 		case err != nil:
 		case e.Type != "online" && e.Type != "offline" && e.Type != "tampered":
 			err = errors.New("type must be online, offline or tampered")
-		case (e.Type == "tampered") != (e.Check == "http" || e.Check == "dns"):
-			err = errors.New("check must be http or dns for a tampered event, and absent otherwise")
+		case e.Type == "tampered" && e.Check != "http" && e.Check != "dns":
+			err = errors.New("check must be http or dns for a tampered event")
+		case e.Type != "tampered" && e.Check != "":
+			err = errors.New("check is only for tampered events")
 		}
 		if _, perr := netip.ParseAddr(e.ObservedIP); err == nil && perr != nil {
 			err = errors.New("observed_ip is not an IP address")

@@ -31,6 +31,15 @@ import (
 // CanaryConfig.Interval is zero.
 const DefaultCanaryInterval = 15 * time.Minute
 
+// The canary suspends at most CanaryMaxSuspensions lines per
+// CanarySuspensionWindow. More lines failing at once points at Homeport (a
+// changed zone, a broken page) rather than at their owners, so the rest are
+// logged instead of suspended.
+const (
+	CanaryMaxSuspensions   = 5
+	CanarySuspensionWindow = 10 * time.Minute
+)
+
 const (
 	canaryTimeout     = 20 * time.Second // one check of one line, both kinds
 	canaryParallel    = 16               // checks running at once
@@ -38,6 +47,9 @@ const (
 	canaryContentType = "text/html; charset=utf-8"
 	canaryPath        = "/homeport-canary/"
 	canaryWarnEvery   = 10 * time.Minute
+	// canarySuspectFor is how long a line stays suspect after a mismatch
+	// whose confirming check could not run.
+	canarySuspectFor = time.Hour
 )
 
 // CanaryConfig makes the gateway check every online line now and then for
@@ -92,6 +104,12 @@ type canary struct {
 	cancel   context.CancelFunc
 	done     sync.WaitGroup
 	lastWarn atomic.Int64
+
+	mu        sync.Mutex
+	suspended []time.Time // recent suspensions, for the breaker
+	// suspects are line ID + check kind with an unconfirmed mismatch, and
+	// when it happened.
+	suspects map[string]time.Time
 }
 
 // canaryResult is the outcome of one check.
@@ -111,7 +129,7 @@ func startCanary(s *Server, cfg CanaryConfig) (*canary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canary: listen: %w", err)
 	}
-	c := &canary{s: s, cfg: cfg, ln: ln, target: cfg.HTTPTarget, interval: cfg.Interval, log: cfg.Logger}
+	c := &canary{s: s, cfg: cfg, ln: ln, target: cfg.HTTPTarget, interval: cfg.Interval, log: cfg.Logger, suspects: map[string]time.Time{}}
 	if !c.target.IsValid() {
 		c.target = netip.MustParseAddrPort(ln.Addr().String())
 	}
@@ -154,8 +172,12 @@ func (c *canary) run(ctx context.Context) {
 			return
 		case now := <-tick.C:
 			online := c.s.relay.OnlineLines()
+			isOnline := make(map[string]bool, len(online))
+			for _, id := range online {
+				isOnline[id] = true
+			}
 			for id := range due {
-				if !slices.Contains(online, id) {
+				if !isOnline[id] {
 					delete(due, id)
 				}
 			}
@@ -187,19 +209,84 @@ func (c *canary) run(ctx context.Context) {
 }
 
 // check runs one line's checks and suspends the line if one shows it
-// changed a response.
+// changed a response. The agent's address and release are taken first: the
+// report needs them, and an agent that disconnects right after it tampered
+// must not escape it.
 func (c *canary) check(ctx context.Context, lineID string) {
 	ctx, cancel := context.WithTimeout(ctx, canaryTimeout)
 	defer cancel()
-	if c.checkHTTP(ctx, lineID) == canaryTampered {
-		c.s.suspendLine(lineID, "http")
-		c.log.Warn("line suspended: a canary check got a changed page through it", "line_id", lineID, "check", "http")
+	ip, version, ok := c.s.relay.Agent(lineID)
+	if !ok {
 		return
 	}
-	if c.zone != "" && c.checkDNS(ctx, lineID) == canaryTampered {
-		c.s.suspendLine(lineID, "dns")
-		c.log.Warn("line suspended: a canary check got a forged DNS answer through it", "line_id", lineID, "check", "dns")
+	switch {
+	case c.confirmed(ctx, lineID, "http", c.checkHTTP):
+		c.suspend(lineID, "http", ip, version)
+	case c.zone != "" && c.confirmed(ctx, lineID, "dns", c.checkDNS):
+		c.suspend(lineID, "dns", ip, version)
 	}
+}
+
+// confirmed reports whether check shows the line tampering. A mismatch
+// counts only when a second check, with a new nonce and a new control,
+// mismatches too, so one odd answer is forgiven. When the second check
+// cannot run (the agent left right after the mismatch, say), the line
+// becomes suspect for canarySuspectFor: its next mismatch counts at once.
+// A check that passes clears that.
+func (c *canary) confirmed(ctx context.Context, lineID, kind string, check func(context.Context, string) canaryResult) bool {
+	key := lineID + " " + kind
+	first := check(ctx, lineID)
+	c.mu.Lock()
+	suspect := time.Since(c.suspects[key]) < canarySuspectFor
+	c.mu.Unlock()
+	if first != canaryTampered {
+		if first == canaryPassed {
+			c.setSuspect(key, false)
+		}
+		return false
+	}
+	if suspect {
+		return true
+	}
+	switch check(ctx, lineID) {
+	case canaryTampered:
+		return true
+	case canaryPassed:
+		c.setSuspect(key, false)
+	default:
+		c.setSuspect(key, true)
+	}
+	return false
+}
+
+func (c *canary) setSuspect(key string, suspect bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if suspect {
+		c.suspects[key] = time.Now()
+	} else {
+		delete(c.suspects, key)
+	}
+}
+
+// suspend suspends a line that a check caught, unless the breaker holds:
+// CanaryMaxSuspensions lines suspended within CanarySuspensionWindow.
+func (c *canary) suspend(lineID, check string, ip netip.Addr, version string) {
+	now := time.Now()
+	c.mu.Lock()
+	c.suspended = slices.DeleteFunc(c.suspended, func(at time.Time) bool { return now.Sub(at) >= CanarySuspensionWindow })
+	full := len(c.suspended) >= CanaryMaxSuspensions
+	if !full {
+		c.suspended = append(c.suspended, now)
+	}
+	c.mu.Unlock()
+	if full {
+		c.log.Error("canary check failed, but too many lines failed at once to blame their owners; check the canary page and zone",
+			"line_id", lineID, "check", check)
+		return
+	}
+	c.s.suspendLine(lineID, check, ip, version)
+	c.log.Warn("line suspended: a canary check got a changed answer through it, twice", "line_id", lineID, "check", check)
 }
 
 // checkHTTP fetches the canary page with a fresh nonce, directly and then
@@ -275,6 +362,9 @@ func (c *canary) fetch(ctx context.Context, conn net.Conn, nonce string) (canary
 func (c *canary) checkDNS(ctx context.Context, lineID string) canaryResult {
 	name := newNonce() + "." + c.zone
 	want, err := c.cfg.Resolver.LookupNetIP(ctx, "ip4", name)
+	for i := range want {
+		want[i] = want[i].Unmap()
+	}
 	if err != nil || len(want) == 0 || slices.ContainsFunc(want, relayprotocol.SpecialPurpose) {
 		c.warn("canary zone does not resolve to public addresses from the gateway; skipping DNS checks", err)
 		return canaryInconclusive
@@ -309,7 +399,10 @@ func (c *canary) checkDNS(ctx context.Context, lineID string) canaryResult {
 		}
 		switch rcode {
 		case dnsmessage.RCodeSuccess, dnsmessage.RCodeNameError:
-			if sameAddrs(got, want) {
+			// An honest agent may leave addresses out (it keeps answers
+			// within 512 bytes and drops those its policy refuses), but
+			// never answers with none, or with one the zone does not have.
+			if rcode == dnsmessage.RCodeSuccess && len(got) > 0 && subset(got, want) {
 				return canaryPassed
 			}
 			return canaryTampered
@@ -367,12 +460,14 @@ func parseCanaryAnswer(msg []byte, id uint16) (rcode dnsmessage.RCode, addrs []n
 	}
 }
 
-// sameAddrs reports whether a and b hold the same addresses, in any order.
-func sameAddrs(a, b []netip.Addr) bool {
-	a, b = slices.Clone(a), slices.Clone(b)
-	slices.SortFunc(a, netip.Addr.Compare)
-	slices.SortFunc(b, netip.Addr.Compare)
-	return slices.Equal(slices.Compact(a), slices.Compact(b))
+// subset reports whether every address in a is in b.
+func subset(a, b []netip.Addr) bool {
+	for _, addr := range a {
+		if !slices.Contains(b, addr) {
+			return false
+		}
+	}
+	return true
 }
 
 // warn logs a control failure at most once per canaryWarnEvery.

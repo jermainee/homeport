@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +48,8 @@ func (r *zoneResolver) LookupNetIP(_ context.Context, network, host string) ([]n
 type lineAgent struct {
 	page func([]byte) []byte
 	dns  func(q dnsmessage.Question) (dnsmessage.RCode, []netip.Addr)
+	// refuse, if set, is asked before each TCP flow; true refuses it.
+	refuse func() bool
 }
 
 // honest relays HTTP unchanged and answers DNS as the zone does.
@@ -62,6 +65,11 @@ var honest = lineAgent{
 func (a lineAgent) handle(open relayprotocol.FlowOpen, s *quic.Stream) {
 	switch open.Kind {
 	case relayprotocol.KindTCP:
+		if a.refuse != nil && a.refuse() {
+			_ = relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusRefused})
+			_ = s.Close()
+			return
+		}
 		c, err := net.Dial("tcp", open.Dst.String())
 		if err != nil {
 			_ = relayprotocol.WriteFlowResult(s, relayprotocol.FlowResult{Status: relayprotocol.StatusRefused})
@@ -256,9 +264,14 @@ func assertSuspended(t *testing.T, f *canaryFixture) {
 	if _, err := startAgent(t, f.gw, f.cert, honest.handle); err == nil {
 		t.Error("the tampered line's agent was let back in")
 	}
-	_, pin := newAgentCert(t)
-	if err := f.gw.AddLine(gateway.Line{ID: "line-1", OwnerMemberID: "member-owner", AgentPin: pin}); err == nil {
-		t.Error("the tampered line was added back")
+	// The config may list the line until the API has paused it. The line
+	// is accepted, so the config applies, but it is not served.
+	cert, pin := newAgentCert(t)
+	if err := f.gw.AddLine(gateway.Line{ID: "line-1", OwnerMemberID: "member-owner", AgentPin: pin}); err != nil {
+		t.Errorf("adding the suspended line again: %v", err)
+	}
+	if _, err := startAgent(t, f.gw, cert, honest.handle); err == nil {
+		t.Error("an agent for the suspended line got in after the config listed it again")
 	}
 }
 
@@ -343,5 +356,101 @@ func TestCanaryPageIsServedOverPlainHTTP(t *testing.T) {
 	}
 	if !bytes.Contains(resp, []byte("200 OK")) || !bytes.Contains(resp, []byte("0123abcd")) || !bytes.Contains(resp, []byte("text/html")) {
 		t.Errorf("canary page response:\n%s", resp)
+	}
+}
+
+func TestCanaryRemembersAMismatchItCouldNotConfirm(t *testing.T) {
+	// The agent changes the page, then refuses the confirming fetch, as an
+	// agent that disconnects right after tampering makes it fail. The line
+	// stays suspect, and its next changed page suspends it.
+	var mu sync.Mutex
+	fetches := 0
+	agent := honest
+	agent.page = func(b []byte) []byte { return bytes.Replace(b, []byte("<p>"), []byte("<p>ad "), 1) }
+	agent.refuse = func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		fetches++
+		return fetches == 2
+	}
+	f := newCanaryFixture(t, agent)
+
+	waitUntil(t, func() bool { return len(f.tampered()) > 0 })
+	mu.Lock()
+	n := fetches
+	mu.Unlock()
+	if n < 3 {
+		t.Errorf("suspended after %d fetches; want the refused confirmation, then another changed page", n)
+	}
+	if got := f.tampered()[0]; got.Tampered != "http" || !got.ObservedIP.IsValid() || got.AgentVersion != "test" {
+		t.Errorf("tamper event %+v; want check http with the agent's address and version", got)
+	}
+}
+
+func TestCanaryAcceptsAnAnswerTheAgentTrimmed(t *testing.T) {
+	// An agent keeps an answer within 512 bytes and drops addresses its
+	// policy refuses, so an honest line may answer with fewer addresses.
+	agent := honest
+	agent.dns = func(dnsmessage.Question) (dnsmessage.RCode, []netip.Addr) {
+		return dnsmessage.RCodeSuccess, canaryAnswer[:1]
+	}
+	f := newCanaryFixture(t, agent)
+
+	if opens := f.checkedFor(time.Second); len(opens) < 4 {
+		t.Fatalf("the line was checked %d times in a second", len(opens))
+	}
+	if got := f.tampered(); len(got) != 0 {
+		t.Errorf("a line that trimmed an answer was reported tampered: %+v", got)
+	}
+}
+
+func TestCanaryConfirmsAMismatchBeforeItSuspends(t *testing.T) {
+	// One odd answer, then honest ones: the line is not suspended.
+	var mu sync.Mutex
+	odd := 1
+	agent := honest
+	agent.dns = func(dnsmessage.Question) (dnsmessage.RCode, []netip.Addr) {
+		mu.Lock()
+		defer mu.Unlock()
+		if odd > 0 {
+			odd--
+			return dnsmessage.RCodeSuccess, []netip.Addr{netip.MustParseAddr("11.99.99.99")}
+		}
+		return dnsmessage.RCodeSuccess, canaryAnswer
+	}
+	f := newCanaryFixture(t, agent)
+
+	f.checkedFor(time.Second)
+	if got := f.tampered(); len(got) != 0 {
+		t.Errorf("a single odd answer suspended the line: %+v", got)
+	}
+}
+
+func TestCanaryStopsSuspendingWhenManyLinesFailAtOnce(t *testing.T) {
+	// Many lines failing together points at Homeport (a changed zone, a
+	// broken page), not at their owners: the canary stops suspending.
+	f := newCanaryFixture(t, honest)
+	forged := honest
+	forged.dns = func(dnsmessage.Question) (dnsmessage.RCode, []netip.Addr) {
+		return dnsmessage.RCodeSuccess, []netip.Addr{netip.MustParseAddr("11.99.99.99")}
+	}
+	for i := range 8 {
+		cert, pin := newAgentCert(t)
+		id := "line-forged-" + strconv.Itoa(i)
+		if err := f.gw.AddLine(gateway.Line{ID: id, OwnerMemberID: "member-owner", AgentPin: pin}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := startAgent(t, f.gw, cert, forged.handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitUntil(t, func() bool { return len(f.tampered()) >= gateway.CanaryMaxSuspensions })
+	f.checkedFor(time.Second)
+	if n := len(f.tampered()); n != gateway.CanaryMaxSuspensions {
+		t.Errorf("%d lines were suspended, want the first %d only", n, gateway.CanaryMaxSuspensions)
+	}
+	if !f.gw.LineOnline("line-1") {
+		t.Error("the honest line went offline")
 	}
 }

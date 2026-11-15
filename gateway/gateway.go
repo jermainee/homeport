@@ -129,8 +129,9 @@ type LineEvent struct {
 	ObservedIP   netip.Addr // the agent's public IP as the gateway sees it
 	AgentVersion string     // from the agent's hello
 	// Tampered names the check that caught the line, "http" or "dns". The
-	// line is suspended: its agent is disconnected, and the line cannot be
-	// added again while the gateway runs. An offline event follows.
+	// line is suspended: its agent is disconnected, and AddLine accepts the
+	// line but does not serve it while the gateway runs. An offline event
+	// follows.
 	Tampered string
 }
 
@@ -254,10 +255,11 @@ func (s *Server) CanaryAddr() netip.AddrPort {
 }
 
 // suspendLine stops serving a line that a canary check caught changing a
-// response: it reports the line tampered, disconnects its agent and keeps
-// it from being added again while the gateway runs. The control API pauses
-// the line on the report, so the next config no longer lists it.
-func (s *Server) suspendLine(id, check string) {
+// response: it reports the line tampered, with the address and release its
+// agent had during the check, disconnects the agent and keeps the line from
+// being served again while the gateway runs. The control API pauses the
+// line on the report, so the next config no longer lists it.
+func (s *Server) suspendLine(id, check string, ip netip.Addr, version string) {
 	s.mu.Lock()
 	if s.suspended[id] || s.closed {
 		s.mu.Unlock()
@@ -265,7 +267,6 @@ func (s *Server) suspendLine(id, check string) {
 	}
 	s.suspended[id] = true
 	delete(s.lines, id)
-	ip, version, _ := s.relay.Agent(id)
 	s.mu.Unlock()
 	if s.cfg.OnLineEvent != nil {
 		s.cfg.OnLineEvent(LineEvent{LineID: id, ObservedIP: ip, AgentVersion: version, Tampered: check})
@@ -301,7 +302,9 @@ func (s *Server) AddLine(l Line) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.suspended[l.ID] {
-		return fmt.Errorf("gateway: line %s is suspended: a canary check caught it tampering", l.ID)
+		// The config lists the line until the API has paused it. Accept
+		// it, so the config applies, but do not serve it.
+		return nil
 	}
 	if err := s.relay.SetLine(relay.Line{ID: l.ID, Pin: l.AgentPin}); err != nil {
 		return fmt.Errorf("gateway: %w", err)
