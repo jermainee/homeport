@@ -10,8 +10,8 @@ import (
 	"uuid"
 )
 
-// AvailableLine is a line another member shares, as GET /v1/lines/available
-// lists it.
+// AvailableLine is a line another member shares. GET /v1/lines/regions
+// counts the online ones, and POST /v1/wireguard/peers picks one.
 type AvailableLine struct {
 	LineID  string  `json:"line_id"`
 	Country string  `json:"country"`
@@ -27,6 +27,7 @@ type Peer struct {
 	PeerID    string    `json:"peer_id"`
 	Name      string    `json:"name"`
 	LineID    string    `json:"line_id"`
+	Line      LinePlace `json:"line"`
 	Failover  string    `json:"failover"`
 	ExitLine  *ExitLine `json:"exit_line"`
 	PublicKey string    `json:"public_key"`
@@ -36,6 +37,13 @@ type Peer struct {
 
 	memberID string
 	deleted  bool
+}
+
+// LinePlace is where a peer's line is.
+type LinePlace struct {
+	Country *string `json:"country"`
+	City    *string `json:"city"`
+	ISP     *string `json:"isp"`
 }
 
 // ExitLine is the line a peer's session exits through, as the gateway last
@@ -224,7 +232,19 @@ func (s *Server) createCheckoutSession(w http.ResponseWriter, r *http.Request) {
 	s.answerLocked(w, m, body.RequestID, raw, http.StatusCreated, map[string]string{"url": url})
 }
 
-func (s *Server) listAvailableLines(w http.ResponseWriter, r *http.Request) {
+// region is a country or a city and how many free lines it has, as GET
+// /v1/lines/regions answers.
+type region struct {
+	Country string   `json:"country,omitempty"`
+	City    string   `json:"city,omitempty"`
+	Lines   int      `json:"lines"`
+	Cities  []region `json:"cities,omitempty"`
+}
+
+// listRegions counts the online lines offered, per country, or with
+// ?country= that country's per city, most lines first. Lines in an unknown
+// city count for their country only.
+func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
 	m := s.memberRef(r)
 	if m == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -234,13 +254,46 @@ func (s *Server) listAvailableLines(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "identity_required")
 		return
 	}
+	country := r.URL.Query().Get("country")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lines := slices.Clone(s.offered)
-	if lines == nil {
-		lines = []AvailableLine{}
+	countries := map[string]*region{}
+	for _, l := range s.offered {
+		// The API lists no line whose country it doesn't know.
+		if !l.Online || l.Country == "" || (country != "" && l.Country != country) {
+			continue
+		}
+		c := countries[l.Country]
+		if c == nil {
+			c = &region{Country: l.Country}
+			countries[l.Country] = c
+		}
+		c.Lines++
+		if country == "" || l.City == nil || *l.City == "" {
+			continue
+		}
+		i := slices.IndexFunc(c.Cities, func(x region) bool { return x.City == *l.City })
+		if i < 0 {
+			c.Cities = append(c.Cities, region{City: *l.City})
+			i = len(c.Cities) - 1
+		}
+		c.Cities[i].Lines++
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
+	out := []region{}
+	for _, c := range countries {
+		if country != "" && c.Cities == nil {
+			c.Cities = []region{}
+		}
+		slices.SortFunc(c.Cities, func(a, b region) int {
+			if a.Lines != b.Lines {
+				return b.Lines - a.Lines
+			}
+			return strings.Compare(a.City, b.City)
+		})
+		out = append(out, *c)
+	}
+	slices.SortFunc(out, func(a, b region) int { return strings.Compare(a.Country, b.Country) })
+	writeJSON(w, http.StatusOK, map[string]any{"countries": out})
 }
 
 func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
@@ -254,13 +307,18 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		RequestID string `json:"request_id"`
-		LineID    string `json:"line_id"`
-		Name      string `json:"name"`
-		PublicKey string `json:"public_key"`
+		RequestID string  `json:"request_id"`
+		LineID    string  `json:"line_id"`
+		Country   string  `json:"country"`
+		City      *string `json:"city"`
+		Name      string  `json:"name"`
+		PublicKey string  `json:"public_key"`
 	}
 	raw, ok := decodeStrict(w, r, &body)
-	if !ok || !uuidV7.MatchString(body.RequestID) || body.LineID == "" ||
+	// The contract's oneOf: one line, or a region (a country, maybe a city).
+	oneLine := body.LineID != "" && body.Country == "" && body.City == nil
+	inRegion := body.LineID == "" && body.Country != "" && (body.City == nil || *body.City != "")
+	if !ok || !uuidV7.MatchString(body.RequestID) || !(oneLine || inRegion) ||
 		len([]rune(body.Name)) < 1 || len([]rune(body.Name)) > 64 ||
 		!key32.MatchString(body.PublicKey) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
@@ -271,8 +329,13 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 	if s.replayLocked(w, m, body.RequestID, raw) {
 		return
 	}
-	if !slices.ContainsFunc(s.offered, func(l AvailableLine) bool { return l.LineID == body.LineID }) {
+	line, found := s.peerLineLocked(body.LineID, body.Country, body.City, "")
+	if !found && oneLine {
 		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusConflict, "no_free_line")
 		return
 	}
 	for _, p := range s.peers {
@@ -285,7 +348,8 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 	p := &Peer{
 		PeerID:    uuid.NewV7().String(),
 		Name:      body.Name,
-		LineID:    body.LineID,
+		LineID:    line.LineID,
+		Line:      LinePlace{Country: &line.Country, City: line.City, ISP: line.ISP},
 		Failover:  "country",
 		PublicKey: body.PublicKey,
 		IPv4:      fmt.Sprintf("10.77.%d.%d", host/256, host%256),
@@ -298,6 +362,35 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		"peer":        p,
 		"config_text": peerConfig(p),
 	})
+}
+
+// peerLineLocked finds the line a peer goes on: lineID, or else the online
+// line in country (and city), other than except, with the fewest peers.
+func (s *Server) peerLineLocked(lineID, country string, city *string, except string) (AvailableLine, bool) {
+	if lineID != "" {
+		i := slices.IndexFunc(s.offered, func(l AvailableLine) bool { return l.LineID == lineID })
+		if i < 0 {
+			return AvailableLine{}, false
+		}
+		return s.offered[i], true
+	}
+	var best AvailableLine
+	bestPeers := -1
+	for _, l := range s.offered {
+		if !l.Online || l.LineID == except || l.Country != country || (city != nil && (l.City == nil || *l.City != *city)) {
+			continue
+		}
+		n := 0
+		for _, p := range s.peers {
+			if !p.deleted && p.LineID == l.LineID {
+				n++
+			}
+		}
+		if bestPeers < 0 || n < bestPeers {
+			best, bestPeers = l, n
+		}
+	}
+	return best, bestPeers >= 0
 }
 
 // peerConfig is the .conf file the API returns, with the placeholder
@@ -351,11 +444,14 @@ func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		LineID   *string `json:"line_id"`
+		Country  *string `json:"country"`
+		City     *string `json:"city"`
 		Failover *string `json:"failover"`
 	}
 	if _, ok := decodeStrict(w, r, &body); !ok ||
-		(body.LineID == nil && body.Failover == nil) ||
-		(body.LineID != nil && *body.LineID == "") ||
+		(body.LineID == nil && body.Country == nil && body.Failover == nil) ||
+		(body.LineID != nil && (*body.LineID == "" || body.Country != nil)) ||
+		(body.Country != nil && *body.Country == "") || (body.City != nil && (body.Country == nil || *body.City == "")) ||
 		(body.Failover != nil && !slices.Contains([]string{"country", "city", "off"}, *body.Failover)) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
@@ -374,6 +470,16 @@ func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
 		!slices.ContainsFunc(s.offered, func(l AvailableLine) bool { return l.LineID == *body.LineID }) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
+	}
+	if body.Country != nil {
+		// A move to a region: another free line there, never its own.
+		line, found := s.peerLineLocked("", *body.Country, body.City, p.LineID)
+		if !found {
+			writeError(w, http.StatusConflict, "no_free_line")
+			return
+		}
+		p.LineID = line.LineID
+		p.Line = LinePlace{Country: &line.Country, City: line.City, ISP: line.ISP}
 	}
 	if body.LineID != nil {
 		p.LineID = *body.LineID

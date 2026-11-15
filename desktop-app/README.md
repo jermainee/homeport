@@ -5,11 +5,11 @@ The Homeport app for Linux, macOS and Windows, built with [Wails v3](https://v3.
 It signs the member in with an email link and runs the Stripe Identity check that every member passes before Share or Use turns on. Then it has two tabs:
 
 - **Share** shares this Mac's home line: the switch runs the sharing agent from [`agent/`](../agent/README.md) inside the app.
-- **Use** shows the member's credits, buys more through Stripe Checkout, and adds devices that use another member's line with the official WireGuard app: a QR code for the iPhone, or a `.conf` file for a Mac or a travel router.
+- **Use** shows the member's credits, buys more through Stripe Checkout, and adds devices that use another member's line with the official WireGuard app: a QR code for the iPhone, or a `.conf` file for a Mac or a travel router. The member picks a country, and optionally a city, each with how many lines are free there; the API assigns the line, and the app shows its city and ISP. A country with more than 8 cities gets a search field, so the list stays short at any size.
 
 ![Sign-in screen](docs/sign-in.png) ![Share screen](docs/share.png) ![Identity check](docs/identity.png)
 
-![Use screen](docs/use.png) ![A new device's config](docs/use-qr.png)
+![Use screen](docs/use.png) ![Picking where a new device's line is](docs/use-add.png) ![A new device's config](docs/use-qr.png) ![Moving a device to another line](docs/use-change.png)
 
 The screenshots after sign-in are the dev preview (for example `?preview=home&share=online&tab=use`), which runs the real screens against fake data. The QR code in it is real: it holds a config with a throwaway key.
 
@@ -122,7 +122,7 @@ Closing the window keeps Share running in the menu bar. Quit stops the agent but
 - **Add a device:** the app makes the device's X25519 key pair and sends only the public key with `POST /v1/wireguard/peers`. It puts the private key into the returned `config_text` and keeps the config in memory only, as a QR code for the WireGuard app and for "Save .conf file" (written `0600`). Done, signing out or quitting drops it; nothing can show it again. A device whose config is lost is removed and added again.
 - **Devices:** `GET /v1/wireguard/peers` lists them, and Remove deletes one (`DELETE /v1/wireguard/peers/{id}`). The API doesn't report usage per device yet. While the Use tab shows the list, the app reloads the devices (not the lines) every 30 seconds.
 - **Backup lines:** while a device's line is offline, the gateway moves it to another line in the same city, then the same country, as the device's failover allows, and back once its own line has been online for 5 minutes. The list says when a device runs on a backup line, and where, from the peer's `exit_line`.
-- **Change a device:** Change picks another line, with the same picker as Add a device, and the failover: same city then same country (the default), same city only, or off. `PATCH /v1/wireguard/peers/{id}` sends only what changed, and the device keeps its config. The API answers 404 both for a removed device and for a line that stopped sharing; the app tells them apart by listing the devices. A line on another gateway than the device's config can't be picked; the device has to be added again on that line.
+- **Change a device:** Change keeps the device's line, or moves it to another free line in a country, and optionally a city, picked as in Add a device; and it sets the failover: same city then same country (the default), same city only, or off. `PATCH /v1/wireguard/peers/{id}` sends only what changed, and the device keeps its config. The API picks the new line on the gateway the device's config names, never its current one, and answers `409 no_free_line` when the region has no other free line there; a 404 means the device was removed.
 
 POSTs reuse their `request_id` (and for a device, its key pair) after a response that never arrived, so a retry gets the first answer instead of a second Stripe session or peer.
 

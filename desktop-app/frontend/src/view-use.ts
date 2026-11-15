@@ -5,7 +5,21 @@
 import type { IdentityView } from "./identity";
 import type { ErrorCode } from "./signin";
 import { countryName, esc, formatAbout, useErrorText, whole } from "./text";
-import { backupLine, FAILOVERS, type Checkout, type Device, type ExitLine, type Failover, type Line, type Ready, type UseView } from "./use";
+import {
+  backupLine,
+  FAILOVERS,
+  type AddStep,
+  type Checkout,
+  type City,
+  type Device,
+  type EditStep,
+  type ExitLine,
+  type Failover,
+  type Ready,
+  type Region,
+  type RegionPick,
+  type UseView,
+} from "./use";
 
 const busyAttrs = (busy: boolean) => (busy ? 'aria-disabled="true" aria-busy="true"' : "");
 
@@ -103,9 +117,15 @@ function head(line: string, problem = false): string {
 }
 
 /** Where a line is, as members know it: "Berlin, Germany". */
-export function linePlace(l: Pick<Line, "city" | "country">): string {
+export function linePlace(l: Pick<Device, "city" | "country">): string {
+  if (!l.country) return l.city || "Place not known";
   const country = countryName(l.country);
   return l.city ? `${l.city}, ${country}` : country;
+}
+
+/** Who provides a line, as a device row and the key card say it. */
+function ispLine(isp: string): string {
+  return isp ? `${isp} line` : "";
 }
 
 /** Where a backup line is, as far as Homeport knows: "Potsdam, Germany", or "". */
@@ -146,9 +166,9 @@ export function usePanel(v: UseView, identity: IdentityView | undefined): string
     case "ready":
       switch (v.step.kind) {
         case "add":
-          return addStep(v, v.step);
+          return addStep(v.step);
         case "config":
-          return configStep(v, v.step);
+          return configStep(v.step);
         case "edit":
           return editStep(v, v.step);
         default:
@@ -190,8 +210,6 @@ function checkoutPart(c: Checkout): string {
 }
 
 function deviceRow(d: Device, v: Ready): string {
-  const line = v.lines.find((l) => l.lineId === d.lineId);
-  const where = line ? linePlace(line) : "Line not shared right now";
   const r = v.removing;
   if (r?.peerId === d.peerId) {
     return `
@@ -213,7 +231,8 @@ function deviceRow(d: Device, v: Ready): string {
     <li class="row device" data-peer="${esc(d.peerId)}">
       <div class="row-text">
         <h3>${esc(d.name)}</h3>
-        <p>${esc(where)}</p>
+        <p>${esc(linePlace(d))}</p>
+        ${d.isp ? `<p>${esc(ispLine(d.isp))}</p>` : ""}
       </div>
       <div class="row-actions">
         <button class="button quiet" type="button" data-action="use-edit" data-peer="${esc(d.peerId)}"
@@ -264,52 +283,159 @@ function overview(v: Ready): string {
     </div>`;
 }
 
-function lineOption(l: Line, picked: boolean): string {
-  const meta = [l.isp, l.ipv6 ? "IPv6" : ""].filter(Boolean).join(", ");
+/** How many cities the list shows before the member has to type. */
+export const CITY_LIST = 8;
+
+const byName = new Intl.Collator(undefined, { sensitivity: "base" });
+
+/** Text compared without case or accents, so "kol" finds "Köln". */
+const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
+
+/**
+ * The cities the list shows: the first CITY_LIST, most lines first, or with
+ * a query those whose name holds it. The picked city stays in the list.
+ */
+export function visibleCities(cities: City[], query: string, picked: string): { shown: City[]; matches: number } {
+  const q = fold(query.trim());
+  const matching = q ? cities.filter((c) => fold(c.city).includes(q)) : cities;
+  const shown = matching.slice(0, CITY_LIST);
+  const pick = cities.find((c) => c.city === picked);
+  if (pick && !shown.includes(pick)) shown.push(pick);
+  return { shown, matches: matching.length };
+}
+
+const freeLines = (n: number) => `${whole.format(n)} free ${n === 1 ? "line" : "lines"}`;
+
+// The lit panes of a city's window say roughly how many lines are free:
+// one pane for one line, all four from four lines on. The id keeps a
+// focused radio focused when the list is drawn again.
+function cityOption(id: string, value: string, label: string, lines: number, picked: boolean): string {
+  const lit = Math.min(4, Math.max(1, lines));
   return `
-    <label class="line-option ${l.online ? "" : "is-offline"}">
-      <input type="radio" name="line" value="${esc(l.lineId)}" ${picked ? "checked" : ""} />
-      <span class="house-window is-small" data-light="${l.online ? "on" : "off"}" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-      <span class="line-text">
-        <span class="line-place">${esc(linePlace(l))}</span>
-        ${meta ? `<span class="line-meta">${esc(meta)}</span>` : ""}
-      </span>
-      <span class="line-state">${l.online ? "Online" : "Offline now"}</span>
+    <label class="line-option city-option">
+      <input id="${id}" type="radio" name="city" value="${esc(value)}" ${picked ? "checked" : ""} />
+      <span class="house-window is-small" data-lit="${lit}" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="line-text"><span class="line-place">${esc(label)}</span></span>
+      <span class="line-state">${whole.format(lines)} free</span>
     </label>`;
 }
 
-// The lines to pick from, for a new device or one that changes its line.
-function linePicker(lines: Line[], picked: string | null): string {
-  return `<fieldset class="lines">
-        <legend class="label">Line</legend>
-        <div class="group line-list">${lines.map((l) => lineOption(l, l.lineId === picked)).join("")}</div>
-      </fieldset>`;
+// The countries by their names in the member's language, sorted once per
+// list rather than on every redraw.
+const sortedCountries = new WeakMap<Region[], { country: string; name: string; lines: number }[]>();
+
+function byCountryName(countries: Region[]) {
+  let sorted = sortedCountries.get(countries);
+  if (!sorted) {
+    sorted = countries.map((c) => ({ ...c, name: countryName(c.country) })).sort((a, b) => byName.compare(a.name, b.name));
+    sortedCountries.set(countries, sorted);
+  }
+  return sorted;
 }
 
-function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
-  if (v.lines.length === 0) {
-    return `
-    <section class="panel use-step" aria-labelledby="add-title">
+/** The country select; `busy` while what was picked is being sent. */
+function countryPicker(s: RegionPick, countries: Region[], busy: boolean, error: ErrorCode | undefined): string {
+  return `
+    <label class="label" for="device-country">Country</label>
+    <select id="device-country" name="country" ${busy ? "disabled" : ""}
+      ${error === "no_country" ? 'aria-invalid="true" aria-describedby="country-error"' : ""}>
+      ${s.country === null ? '<option value="" selected disabled>Choose a country</option>' : ""}
+      ${byCountryName(countries)
+        .map((c) => `<option value="${esc(c.country)}" ${c.country === s.country ? "selected" : ""}>${esc(`${c.name}, ${freeLines(c.lines)}`)}</option>`)
+        .join("")}
+    </select>
+    ${error === "no_country" ? `<p id="country-error" class="field-error" role="alert">${esc(useErrorText("no_country"))}</p>` : ""}`;
+}
+
+/** The cities of the picked country, with any city first. */
+function cityPicker(s: RegionPick, country: Region, busy: boolean): string {
+  const name = countryName(country.country);
+  const any = cityOption("city-any", "", `Any city in ${name}`, country.lines, s.city === "");
+  if (s.cities === null) {
+    return `<fieldset class="lines cities" aria-busy="true">
+        <legend class="label">City</legend>
+        <div class="group line-list">${any}</div>
+        <p class="status"><span class="beacon" aria-hidden="true"></span>Finding cities…</p>
+      </fieldset>`;
+  }
+  const { shown, matches } = visibleCities(s.cities, s.query, s.city);
+  const hidden = matches - CITY_LIST;
+  const hint =
+    hidden > 0
+      ? `${whole.format(hidden)} more ${hidden === 1 ? "city" : "cities"}. Type to find one.`
+      : s.query.trim() && matches === 0
+        ? `No city in ${name} matches. Any city still works.`
+        : "";
+  const more = hint ? `<p id="city-more" class="panel-hint city-more">${esc(hint)}</p>` : "";
+  const search =
+    s.cities.length > CITY_LIST
+      ? `<input id="city-query" type="search" autocomplete="off" spellcheck="false" aria-controls="city-list"
+          aria-label="Find a city in ${esc(name)}" placeholder="Find a city in ${esc(name)}" value="${esc(s.query)}"
+          ${hint ? 'aria-describedby="city-more"' : ""} />`
+      : "";
+  const failed = s.citiesError
+    ? `${alert(s.citiesError)}<div class="panel-actions"><button class="button quiet" type="button" data-action="use-reload-cities">Load the cities again</button></div>`
+    : "";
+  // Each radio's id is its city's place in the full list, so it stays the
+  // same while the member types.
+  const all = s.cities;
+  const options = shown.map((c) => cityOption(`city-${all.indexOf(c)}`, c.city, c.city, c.lines, c.city === s.city));
+  // While what was picked is being sent, the pick stays on screen.
+  return `<fieldset class="lines cities" ${busy ? "disabled" : ""}>
+      <legend class="label">City</legend>
+      ${search}
+      <div class="group line-list" id="city-list">${any}${options.join("")}</div>
+      ${more}
+      ${failed}
+    </fieldset>`;
+}
+
+/** The country and city pickers, once the countries are there. */
+function regionPicker(s: RegionPick, countries: Region[], busy: boolean, error: ErrorCode | undefined): string {
+  const country = countries.find((c) => c.country === s.country);
+  return `${countryPicker(s, countries, busy, error)}${country ? cityPicker(s, country, busy) : ""}`;
+}
+
+const finding = `<p class="status"><span class="beacon" aria-hidden="true"></span>Finding where lines are free…</p>`;
+
+function addStep(s: AddStep): string {
+  const head = (line: string, cls = "") => `
       <div class="step-head">
         <h2 id="add-title" tabindex="-1">Add a device</h2>
-        <p class="panel-line empty">Nobody shares a line you can use right now. Lines appear here when members turn Share on.</p>
-      </div>
+        <p class="panel-line ${cls}">${line}</p>
+      </div>`;
+  const back = (label: string) =>
+    `<button class="button quiet" type="button" data-action="use-cancel-add">${label}</button>`;
+  if (s.countries === null) {
+    return `
+    <section class="panel use-step" aria-labelledby="add-title" aria-busy="true">
+      ${head("Pick where its traffic should come out. Homeport finds a free home line there.")}
       <div class="panel-actions">
-        <button class="button quiet" type="button" data-action="use-cancel-add">Back</button>
+        ${finding}
+        ${back("Cancel")}
+      </div>
+    </section>`;
+  }
+  if (s.countries.length === 0) {
+    const failed = s.error !== undefined;
+    return `
+    <section class="panel use-step" aria-labelledby="add-title">
+      ${failed ? head("Homeport couldn't find out where lines are free.") : head("Nobody shares a line you can use right now. Lines appear here when members turn Share on.", "empty")}
+      ${failed ? alert(s.error) : ""}
+      <div class="panel-actions">
+        ${failed ? '<button class="button primary" type="button" data-action="use-reload-regions">Try again</button>' : ""}
+        ${back(failed ? "Cancel" : "Back")}
       </div>
     </section>`;
   }
   const nameError = s.error === "invalid_name";
-  const lines = linePicker(v.lines, s.lineId);
+  const formError = s.error && s.error !== "invalid_name" && s.error !== "no_country" ? alert(s.error) : "";
   return `
     <section class="panel use-step" aria-labelledby="add-title">
-      <div class="step-head">
-        <h2 id="add-title" tabindex="-1">Add a device</h2>
-        <p class="panel-line">Pick the home line it connects through. A lit window means the line is online now.</p>
-      </div>
+      ${head("Pick where its traffic should come out. Homeport finds a free home line there.")}
       <form class="add-form" data-form="add-device" novalidate>
-        ${lines}
-        ${s.error && !nameError ? alert(s.error) : ""}
+        ${regionPicker(s, s.countries, s.creating, s.error)}
+        ${formError}
         <label class="label" for="device-name">Device name</label>
         <input id="device-name" name="name" type="text" maxlength="64" autocomplete="off" spellcheck="false"
           placeholder="iPhone" value="${esc(s.name)}"
@@ -329,7 +455,7 @@ function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
  * What each failover does, named after the picked line's city and country
  * when Homeport knows them: "Use another line in Lyon only".
  */
-export function failoverLabel(f: Failover, line: Pick<Line, "city" | "country"> | undefined): string {
+export function failoverLabel(f: Failover, line: { city: string; country: string } | undefined): string {
   const city = line?.city ?? "";
   const country = line?.country ? countryName(line.country) : "";
   switch (f) {
@@ -344,7 +470,7 @@ export function failoverLabel(f: Failover, line: Pick<Line, "city" | "country"> 
   }
 }
 
-function failoverOption(f: Failover, picked: boolean, line: Line | undefined): string {
+function failoverOption(f: Failover, picked: boolean, line: { city: string; country: string } | undefined): string {
   return `
     <label class="failover-option">
       <input type="radio" name="failover" value="${f}" ${picked ? "checked" : ""} />
@@ -354,18 +480,49 @@ function failoverOption(f: Failover, picked: boolean, line: Line | undefined): s
     </label>`;
 }
 
-function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string {
+// Where a moving device's line will be, once the member picked a region:
+// the region's city and country, or nothing yet.
+function movePlace(s: EditStep): { city: string; country: string } | undefined {
+  return s.country ? { city: s.city, country: s.country } : undefined;
+}
+
+// Keep the device's line, or move it to another line in a region the
+// member picks; the API picks the line there, on the device's gateway.
+function moveChoice(s: EditStep, d: Device | undefined): string {
+  const here = d ? [linePlace(d), ispLine(d.isp)].filter(Boolean).join(". ") : "";
+  return `
+    <fieldset class="failover move" ${s.saving ? "disabled" : ""}>
+      <legend class="label">Line</legend>
+      <div class="group failover-list">
+        <label class="failover-option">
+          <input id="move-keep" type="radio" name="move" value="keep" ${s.move ? "" : "checked"} />
+          <span class="failover-text">Keep its line${here ? `<span class="failover-meta">${esc(here)}</span>` : ""}</span>
+        </label>
+        <label class="failover-option">
+          <input id="move-other" type="radio" name="move" value="move" ${s.move ? "checked" : ""} />
+          <span class="failover-text">Move it to another line<span class="failover-meta">Pick a country, and a city if you like. Homeport finds a free line there.</span></span>
+        </label>
+      </div>
+    </fieldset>`;
+}
+
+// The region a moving device goes to, as the countries load or fail.
+function moveRegion(s: EditStep): string {
+  if (!s.move) return "";
+  if (s.countries === null) return `<div class="panel-actions">${finding}</div>`;
+  if (s.countries.length === 0) {
+    return s.error && s.error !== "no_free_line"
+      ? `<div class="panel-actions"><button class="button quiet" type="button" data-action="use-reload-regions">Try again</button></div>`
+      : `<p class="panel-line empty">Nobody shares another line you can use right now.</p>`;
+  }
+  return regionPicker(s, s.countries, s.saving, s.error);
+}
+
+function editStep(v: Ready, s: EditStep): string {
   const d = v.devices.find((d) => d.peerId === s.peerId);
   const name = d?.name ?? "device";
-  const picked = v.lines.find((l) => l.lineId === s.lineId);
-  const lines = v.lines.length
-    ? linePicker(v.lines, s.lineId)
-    : `<p class="panel-line empty">Nobody shares another line you can use right now.</p>`;
-  // Its own line is missing from the list once it stopped sharing.
-  const gone =
-    d && !v.lines.some((l) => l.lineId === d.lineId)
-      ? `<p class="panel-line edit-line-gone">Its line isn't shared right now. Pick another one.</p>`
-      : "";
+  // The failover follows the line the device will be on.
+  const place = s.move ? movePlace(s) : d;
   return `
     <section class="panel use-step" aria-labelledby="edit-title">
       <div class="step-head">
@@ -373,12 +530,12 @@ function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string
         <p class="panel-line">It keeps its config, so there's nothing to scan or import again.</p>
       </div>
       <form class="add-form" data-form="edit-device" novalidate>
-        ${gone}
-        ${lines}
-        ${alert(s.error)}
+        ${moveChoice(s, d)}
+        ${moveRegion(s)}
+        ${s.error && s.error !== "no_country" ? alert(s.error) : ""}
         <fieldset class="failover">
           <legend class="label">If its line goes offline</legend>
-          <div class="group failover-list">${FAILOVERS.map((f) => failoverOption(f, f === s.failover, picked)).join("")}</div>
+          <div class="group failover-list">${FAILOVERS.map((f) => failoverOption(f, f === s.failover, place)).join("")}</div>
           <p class="panel-hint">It moves back once its own line has been online again for a few minutes.</p>
         </fieldset>
         <div class="panel-actions">
@@ -391,9 +548,8 @@ function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string
     </section>`;
 }
 
-function configStep(v: Ready, s: Extract<Ready["step"], { kind: "config" }>): string {
+function configStep(s: Extract<Ready["step"], { kind: "config" }>): string {
   const dev = s.device.device;
-  const line = v.lines.find((l) => l.lineId === dev.lineId);
   return `
     <section class="panel use-step" aria-labelledby="config-title">
       <div class="step-head">
@@ -405,7 +561,8 @@ function configStep(v: Ready, s: Extract<Ready["step"], { kind: "config" }>): st
           alt="QR code of the WireGuard config for ${esc(dev.name)}" />
         <figcaption>
           <span class="key-name">${esc(dev.name)}</span>
-          ${line ? `<span class="key-place">${esc(linePlace(line))}</span>` : ""}
+          <span class="key-place">${esc(linePlace(dev))}</span>
+          ${dev.isp ? `<span class="key-isp">${esc(ispLine(dev.isp))}</span>` : ""}
         </figcaption>
       </figure>
       <p class="panel-note">On a Mac or a travel router, save the file and import it into WireGuard.</p>

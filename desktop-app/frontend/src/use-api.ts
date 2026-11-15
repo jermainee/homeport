@@ -13,10 +13,11 @@ export const wailsUse: UseApi = {
   balance: () => UseService.Balance(),
   buyCredits: () => UseService.BuyCredits(),
   pollCheckout: () => UseService.PollCheckout(),
-  lines: async () => (await UseService.Lines()) ?? [],
+  countries: async () => (await UseService.Countries()) ?? [],
+  cities: async (country) => (await UseService.Cities(country)) ?? [],
   devices: async () => ((await UseService.Devices()) ?? []).map(device),
-  addDevice: async (lineId, name) => {
-    const dev = await UseService.AddDevice(lineId, name);
+  addDevice: async (country, city, name) => {
+    const dev = await UseService.AddDevice(country, city, name);
     return { ...dev, device: device(dev.device) };
   },
   saveConfig: (peerId) => UseService.SaveConfig(peerId),
@@ -24,5 +25,5 @@ export const wailsUse: UseApi = {
   removeDevice: (peerId) => UseService.RemoveDevice(peerId),
   // An empty argument keeps what the device has.
   updateDevice: async (peerId, change) =>
-    device(await UseService.UpdateDevice(peerId, change.lineId ?? "", change.failover ?? "")),
+    device(await UseService.UpdateDevice(peerId, change.country ?? "", change.city ?? "", change.failover ?? "")),
 };

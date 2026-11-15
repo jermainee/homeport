@@ -29,6 +29,14 @@ export interface CheckoutCheck {
 }
 
 /**
+ * City is a city with free lines for the member, and how many.
+ */
+export interface City {
+    "city": string;
+    "lines": number;
+}
+
+/**
  * Credits is the member's balance by kind.
  */
 export interface Credits {
@@ -38,17 +46,25 @@ export interface Credits {
 }
 
 /**
- * Device is a device that uses a line: a WireGuard peer.
+ * Device is a device that uses a line: a WireGuard peer. Country, City and
+ * ISP say where its line is; each is empty when the API doesn't know it.
  */
 export interface Device {
     "peerId": string;
     "name": string;
 
     /**
-     * LineID is the line the member chose. The device exits through it
-     * whenever it is online.
+     * LineID is the line the member chose, or the API picked. The device
+     * exits through it whenever it is online.
      */
     "lineId": string;
+
+    /**
+     * ISO 3166-1 alpha-2
+     */
+    "country": string;
+    "city": string;
+    "isp": string;
 
     /**
      * Failover is where the device goes while its line is offline:
@@ -125,27 +141,6 @@ export enum ErrorCode {
     ErrSignedOut = "signed_out",
 
     /**
-     * ErrLineUnavailable: the line stopped sharing, or its owner left.
-     */
-    ErrLineUnavailable = "line_unavailable",
-
-    /**
-     * ErrLineFull: the line serves as many members as it can.
-     */
-    ErrLineFull = "line_full",
-
-    /**
-     * ErrLineNotAllowed: the line is the member's own, or linked to them.
-     */
-    ErrLineNotAllowed = "line_not_allowed",
-
-    /**
-     * ErrLineOnOtherGateway: the line is served by another gateway than the
-     * one the device's config names, so the device can't move to it.
-     */
-    ErrLineOnOtherGateway = "line_on_other_gateway",
-
-    /**
      * ErrDeviceGone: the device was removed, say from another computer.
      */
     ErrDeviceGone = "device_gone",
@@ -160,6 +155,16 @@ export enum ErrorCode {
      * ErrInvalidName: a device needs a name of 1 to 64 characters.
      */
     ErrInvalidName = "invalid_name",
+
+    /**
+     * ErrNoCountry: a device needs a country to get a line in.
+     */
+    ErrNoCountry = "no_country",
+
+    /**
+     * ErrNoFreeLine: the country or city has no free line right now.
+     */
+    ErrNoFreeLine = "no_free_line",
 
     /**
      * ErrUnexpected: anything else. The message has the details for logs.
@@ -229,23 +234,6 @@ export enum IdentityState {
 };
 
 /**
- * Line is a line the member can use. City and ISP are empty when the API
- * doesn't know them.
- */
-export interface Line {
-    "lineId": string;
-
-    /**
-     * ISO 3166-1 alpha-2
-     */
-    "country": string;
-    "city": string;
-    "isp": string;
-    "ipv6": boolean;
-    "online": boolean;
-}
-
-/**
  * LoginStart is a started sign-in, as the sign-in screen shows it.
  */
 export interface LoginStart {
@@ -309,6 +297,17 @@ export interface NewDevice {
  */
 export interface PollResult {
     "status": LoginStatus;
+}
+
+/**
+ * Region is a country with free lines for the member, and how many.
+ */
+export interface Region {
+    /**
+     * ISO 3166-1 alpha-2
+     */
+    "country": string;
+    "lines": number;
 }
 
 /**

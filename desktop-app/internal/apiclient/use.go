@@ -31,26 +31,28 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, sessionToken, reques
 	return out.URL, err
 }
 
-// AvailableLine is a line the member can use. City and ISP are empty when
-// the API doesn't know them.
-type AvailableLine struct {
-	ID      string  `json:"line_id"`
-	Country string  `json:"country"`
-	City    *string `json:"city"`
-	ISP     *string `json:"isp"`
-	IPv6    bool    `json:"ipv6"`
-	Online  bool    `json:"online"`
+// Region is a country, or a city, with how many free lines the member can
+// get there. Cities lists a country's cities when the request named it.
+type Region struct {
+	Country string   `json:"country"`
+	City    string   `json:"city"`
+	Lines   int      `json:"lines"`
+	Cities  []Region `json:"cities"`
 }
 
-// AvailableLines lists the lines the member can use: lines that are
-// sharing, minus the member's own and lines linked to them. It needs a
+// Regions lists the countries with free lines for the member, or with
+// country, that country and its cities, most lines first. It needs a
 // verified identity (403 identity_required).
-func (c *Client) AvailableLines(ctx context.Context, sessionToken string) ([]AvailableLine, error) {
-	var out struct {
-		Lines []AvailableLine `json:"lines"`
+func (c *Client) Regions(ctx context.Context, sessionToken, country string) ([]Region, error) {
+	path := "/v1/lines/regions"
+	if country != "" {
+		path += "?country=" + url.QueryEscape(country)
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/lines/available", sessionToken, nil, &out, http.StatusOK)
-	return out.Lines, err
+	var out struct {
+		Countries []Region `json:"countries"`
+	}
+	err := c.do(ctx, http.MethodGet, path, sessionToken, nil, &out, http.StatusOK)
+	return out.Countries, err
 }
 
 // Peer is one of the member's WireGuard peers: a device that uses a line.
@@ -58,6 +60,8 @@ type Peer struct {
 	ID     string `json:"peer_id"`
 	Name   string `json:"name"`
 	LineID string `json:"line_id"` // the line the member chose
+	// Line is where LineID is.
+	Line LinePlace `json:"line"`
 	// Failover is where the peer goes while its line is offline: country,
 	// city or off.
 	Failover string `json:"failover"`
@@ -68,6 +72,14 @@ type Peer struct {
 	IPv4      string    `json:"ipv4"`
 	IPv6      string    `json:"ipv6"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// LinePlace is where a peer's line is. Each part is nil when the API
+// doesn't know it.
+type LinePlace struct {
+	Country *string `json:"country"`
+	City    *string `json:"city"`
+	ISP     *string `json:"isp"`
 }
 
 // ExitLine is the line a peer's session exits through, as the gateway last
@@ -86,14 +98,18 @@ type PeerCreated struct {
 	ConfigText string `json:"config_text"`
 }
 
-// CreatePeer creates a WireGuard peer on lineID for the device whose public
-// key (standard base64) is given. The private key never leaves the app.
-func (c *Client) CreatePeer(ctx context.Context, sessionToken, requestID, lineID, name, publicKey string) (PeerCreated, error) {
+// CreatePeer creates a WireGuard peer for the device whose public key
+// (standard base64) is given, on a free line the API picks in country, and
+// in city unless it is empty. The private key never leaves the app.
+func (c *Client) CreatePeer(ctx context.Context, sessionToken, requestID, country, city, name, publicKey string) (PeerCreated, error) {
 	body := map[string]string{
 		"request_id": requestID,
-		"line_id":    lineID,
+		"country":    country,
 		"name":       name,
 		"public_key": publicKey,
+	}
+	if city != "" {
+		body["city"] = city
 	}
 	var out PeerCreated
 	err := c.do(ctx, http.MethodPost, "/v1/wireguard/peers", sessionToken, body, &out, http.StatusCreated)
@@ -109,14 +125,18 @@ func (c *Client) Peers(ctx context.Context, sessionToken string) ([]Peer, error)
 	return out.Peers, err
 }
 
-// UpdatePeer moves a WireGuard peer to lineID, or changes its failover, or
-// both; an empty argument keeps what the peer has. The peer keeps its
-// .conf file. A peer or a line that doesn't exist, or isn't shared, is an
-// *Error with status 404.
-func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, lineID, failover string) (Peer, error) {
+// UpdatePeer moves a WireGuard peer to a free line the API picks in
+// country (and city unless it is empty), or changes its failover, or both;
+// an empty argument keeps what the peer has. The peer keeps its .conf
+// file. A peer that doesn't exist is an *Error with status 404; a region
+// without another free line on the peer's gateway is 409 no_free_line.
+func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, country, city, failover string) (Peer, error) {
 	body := map[string]string{}
-	if lineID != "" {
-		body["line_id"] = lineID
+	if country != "" {
+		body["country"] = country
+		if city != "" {
+			body["city"] = city
+		}
 	}
 	if failover != "" {
 		body["failover"] = failover

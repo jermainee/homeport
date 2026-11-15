@@ -3,8 +3,8 @@
 
 /**
  * UseService is Use: the member's credits, buying more through Stripe
- * Checkout, the lines they can use, and the devices (WireGuard peers) that
- * use them.
+ * Checkout, where they can get a line, and the devices (WireGuard peers)
+ * that use one.
  * 
  * Locking follows AuthService: no API call holds the lock.
  * @module
@@ -19,13 +19,14 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * AddDevice creates a WireGuard config for a device named name on lineID.
- * The app makes the device's key pair and sends the API only the public
- * key; the private key goes into the config, which the member sees once:
- * it stays in memory until ForgetConfig, and no copy is stored.
+ * AddDevice creates a WireGuard config for a device named name, on a free
+ * line the API picks in country, and in city unless it is empty. The app
+ * makes the device's key pair and sends the API only the public key; the
+ * private key goes into the config, which the member sees once: it stays
+ * in memory until ForgetConfig, and no copy is stored.
  */
-export function AddDevice(lineID: string, name: string): $CancellablePromise<$models.NewDevice> {
-    return $Call.ByID(2885959988, lineID, name);
+export function AddDevice(country: string, city: string, name: string): $CancellablePromise<$models.NewDevice> {
+    return $Call.ByID(2885959988, country, city, name);
 }
 
 /**
@@ -45,6 +46,24 @@ export function BuyCredits(): $CancellablePromise<$models.Balance> {
 }
 
 /**
+ * Cities lists the cities of country with free lines for the member, most
+ * lines first. Lines whose city the API doesn't know count only in
+ * Countries.
+ */
+export function Cities(country: string): $CancellablePromise<$models.City[] | null> {
+    return $Call.ByID(3919116428, country);
+}
+
+/**
+ * Countries lists the countries with free lines for the member, by code.
+ * Never counting the member's own lines, or ones linked to them: the API
+ * leaves those out.
+ */
+export function Countries(): $CancellablePromise<$models.Region[] | null> {
+    return $Call.ByID(1517911199);
+}
+
+/**
  * Devices lists the member's devices, newest first.
  */
 export function Devices(): $CancellablePromise<$models.Device[] | null> {
@@ -57,14 +76,6 @@ export function Devices(): $CancellablePromise<$models.Device[] | null> {
  */
 export function ForgetConfig(peerID: string): $CancellablePromise<void> {
     return $Call.ByID(1648852840, peerID);
-}
-
-/**
- * Lines lists the lines the member can use. Never the member's own line,
- * or one linked to them: the API leaves those out.
- */
-export function Lines(): $CancellablePromise<$models.Line[] | null> {
-    return $Call.ByID(1602683570);
 }
 
 /**
@@ -93,12 +104,14 @@ export function SaveConfig(peerID: string): $CancellablePromise<boolean> {
 }
 
 /**
- * UpdateDevice moves a device to lineID, or changes its failover
- * (FailoverCountry, FailoverCity or FailoverOff), or both; an empty
- * argument keeps what the device has. The device keeps its config: within
- * about 30 seconds the gateway ends its session on the old line, and its
- * next connection exits through the new one.
+ * UpdateDevice moves a device to a free line the API picks in country,
+ * and in city unless it is empty, or changes its failover (FailoverCountry,
+ * FailoverCity or FailoverOff), or both; an empty argument keeps what the
+ * device has. The new line is on the device's gateway and isn't its current
+ * one. The device keeps its config: within about 30 seconds the gateway ends
+ * its session on the old line, and its next connection exits through the
+ * new one.
  */
-export function UpdateDevice(peerID: string, lineID: string, failover: string): $CancellablePromise<$models.Device> {
-    return $Call.ByID(1798641512, peerID, lineID, failover);
+export function UpdateDevice(peerID: string, country: string, city: string, failover: string): $CancellablePromise<$models.Device> {
+    return $Call.ByID(1798641512, peerID, country, city, failover);
 }

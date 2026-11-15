@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, Use, type UseView } from "./use";
 import { serviceError } from "./test/fake-auth";
-import { FakeUse, balance, berlin, laptop, lyon, newDevice, porto } from "./test/fake-use";
+import { FakeUse, balance, berlin, france, germany, laptop, lyon, munich, newDevice, portugal } from "./test/fake-use";
 
 let api: FakeUse;
 let use: Use;
@@ -31,13 +31,13 @@ function ready(): Extract<UseView, { kind: "ready" }> {
 const bought = { purchased: 1_025_000, earned: 5_000, total: 1_030_000, bytes: 103_000_000_000 };
 
 describe("opening Use", () => {
-  it("shows the balance, the lines and the member's devices", async () => {
+  it("shows the balance and the member's devices, and loads no lines", async () => {
     await open();
 
+    expect(api.calls.sort()).toEqual(["balance", "devices"]);
     expect(use.view).toEqual({
       kind: "ready",
       balance,
-      lines: [berlin, lyon],
       devices: [laptop],
       checkout: { phase: "idle" },
       step: { kind: "list" },
@@ -60,14 +60,14 @@ describe("opening Use", () => {
   });
 
   it("offers a retry when Homeport can't be reached", async () => {
-    api.linesAnswer = serviceError("offline");
+    api.devicesAnswer = serviceError("offline");
     await open();
     expect(use.view).toEqual({ kind: "failed", error: "offline" });
 
-    api.linesAnswer = [berlin];
+    api.devicesAnswer = [laptop];
     await use.retry();
 
-    expect(ready().lines).toEqual([berlin]);
+    expect(ready().devices).toEqual([laptop]);
   });
 
   it("goes to sign-in when the session ended", async () => {
@@ -79,7 +79,7 @@ describe("opening Use", () => {
   });
 
   it("asks to verify when the API says the member isn't verified", async () => {
-    api.linesAnswer = serviceError("identity_required");
+    api.devicesAnswer = serviceError("identity_required");
 
     await open();
 
@@ -117,7 +117,7 @@ describe("opening Use", () => {
 
   it("follows the devices alone, to show where each one exits", async () => {
     await open();
-    const backup = { ...laptop, exitLine: { lineId: porto.lineId, country: "PT", city: "", since: "2026-11-14T13:02:10Z" } };
+    const backup = { ...laptop, exitLine: { lineId: "line-porto", country: "PT", city: "", since: "2026-11-14T13:02:10Z" } };
     api.devicesAnswer = [backup];
     const calls = api.calls.length;
 
@@ -272,37 +272,122 @@ describe("buying credits", () => {
 });
 
 describe("adding a device", () => {
-  it("starts with the first online line picked", async () => {
-    api.linesAnswer = [lyon, porto, berlin];
+  /** The add step, failing the test unless the member is adding a device. */
+  function adding() {
+    const step = ready().step;
+    if (step.kind !== "add") throw new Error(`step is ${step.kind}, want add`);
+    return step;
+  }
+
+  it("loads the countries, and picks the one the newest device is in, with its cities", async () => {
     await open();
 
-    use.startAdding();
+    await use.startAdding();
 
-    expect(ready().step).toEqual({ kind: "add", lineId: porto.lineId, name: "", creating: false });
+    expect(adding()).toEqual({
+      kind: "add",
+      countries: [germany, france],
+      country: "DE",
+      cities: [berlin, munich],
+      city: "",
+      query: "",
+      name: "",
+      creating: false,
+    });
   });
 
-  it("creates the config on the line the member picked and shows it", async () => {
+  it("shows the form at once, and the countries once they arrive", async () => {
     await open();
-    use.startAdding();
-    use.pickLine(lyon.lineId);
+    api.holdRegions();
+
+    const loading = use.startAdding();
+    const first = adding();
+    api.releaseRegions();
+    await loading;
+
+    expect(first).toMatchObject({ countries: null, country: null, cities: null });
+    expect(adding().countries).toEqual([germany, france]);
+  });
+
+  it("picks no country for a member without devices, when there are several", async () => {
+    api.devicesAnswer = [];
+    await open();
+
+    await use.startAdding();
+
+    expect(adding()).toMatchObject({ country: null, cities: null });
+    expect(api.calls.some((c) => c.startsWith("cities"))).toBe(false);
+  });
+
+  it("picks the only country there is", async () => {
+    api.devicesAnswer = [];
+    api.countriesAnswer = [portugal];
+    api.citiesAnswers = { PT: [] };
+    await open();
+
+    await use.startAdding();
+
+    expect(adding()).toMatchObject({ country: "PT", cities: [] });
+  });
+
+  it("shows the cities of the country the member picks, starting from any city", async () => {
+    await open();
+    await use.startAdding();
+    use.pickCity("Munich");
+    use.setQuery("mu");
+
+    await use.pickCountry("FR");
+
+    expect(adding()).toMatchObject({ country: "FR", cities: [lyon], city: "", query: "" });
+  });
+
+  it("keeps the cities of the country picked last when answers cross", async () => {
+    await open();
+    await use.startAdding();
+    let answerFrance!: (c: typeof lyon[]) => void;
+    api.cities = (country: string) =>
+      country === "FR" ? new Promise((r) => (answerFrance = r)) : Promise.resolve([berlin, munich]);
+
+    const france = use.pickCountry("FR");
+    await use.pickCountry("DE");
+    answerFrance([lyon]);
+    await france;
+
+    expect(adding()).toMatchObject({ country: "DE", cities: [berlin, munich] });
+  });
+
+  it("creates the config in the city the member picked and shows it", async () => {
+    await open();
+    await use.startAdding();
+    use.pickCity("Munich");
     use.setName("  iPhone ");
 
     await use.create();
 
-    const created = newDevice(lyon.lineId, "iPhone");
-    expect(api.calls).toContain(`addDevice ${lyon.lineId} iPhone`);
+    const created = newDevice("DE", "Munich", "iPhone");
+    expect(api.calls).toContain("addDevice DE Munich iPhone");
     expect(ready().step).toEqual({ kind: "config", device: created, saving: false, saved: false });
     expect(ready().devices).toEqual([created.device, laptop]);
   });
 
+  it("creates the config in any city of the country when no city is picked", async () => {
+    await open();
+    await use.startAdding();
+    use.setName("Laptop");
+
+    await use.create();
+
+    expect(api.calls).toContain("addDevice DE - Laptop");
+  });
+
   it("is busy while the config is created", async () => {
     await open();
-    use.startAdding();
+    await use.startAdding();
     use.setName("iPhone");
     api.hold();
 
     const pending = use.create();
-    expect(ready().step).toMatchObject({ kind: "add", creating: true });
+    expect(adding()).toMatchObject({ creating: true });
     await use.create();
     api.release();
     await pending;
@@ -312,57 +397,121 @@ describe("adding a device", () => {
 
   it("needs a name before it asks the API", async () => {
     await open();
-    use.startAdding();
+    await use.startAdding();
     use.setName("   ");
 
     await use.create();
 
-    expect(ready().step).toEqual({ kind: "add", lineId: berlin.lineId, name: "   ", creating: false, error: "invalid_name" });
+    expect(adding()).toMatchObject({ name: "   ", creating: false, error: "invalid_name" });
     expect(api.calls.some((c) => c.startsWith("addDevice"))).toBe(false);
   });
 
-  it("needs a line", async () => {
-    api.linesAnswer = [];
+  it("needs a country", async () => {
+    api.devicesAnswer = [];
     await open();
-    use.startAdding();
+    await use.startAdding();
     use.setName("iPhone");
 
     await use.create();
 
-    expect(ready().step).toMatchObject({ kind: "add", lineId: null, error: "line_unavailable" });
+    expect(adding()).toMatchObject({ country: null, error: "no_country" });
     expect(api.calls.some((c) => c.startsWith("addDevice"))).toBe(false);
   });
 
-  it("reloads the lines when the picked one is gone, and unpicks it", async () => {
+  it("reloads the region when it has no free line any more, and goes back to any city once the city is gone", async () => {
     await open();
-    use.startAdding();
-    use.pickLine(lyon.lineId);
+    await use.startAdding();
+    use.pickCity("Munich");
     use.setName("iPhone");
-    api.addAnswer = serviceError("line_unavailable");
-    api.linesAnswer = [berlin];
+    api.addAnswer = serviceError("no_free_line");
+    api.countriesAnswer = [{ country: "DE", lines: 2 }, france];
+    api.citiesAnswers = { DE: [berlin] };
 
     await use.create();
 
-    expect(ready().lines).toEqual([berlin]);
-    expect(ready().step).toEqual({ kind: "add", lineId: null, name: "iPhone", creating: false, error: "line_unavailable" });
+    expect(adding()).toMatchObject({
+      countries: [{ country: "DE", lines: 2 }, france],
+      country: "DE",
+      cities: [berlin],
+      city: "",
+      name: "iPhone",
+      creating: false,
+      error: "no_free_line",
+    });
   });
 
-  it("keeps the form when the line is full", async () => {
+  it("forgets the country too when no line is left in it", async () => {
     await open();
-    use.startAdding();
+    await use.startAdding();
     use.setName("iPhone");
-    api.addAnswer = serviceError("line_full");
+    api.addAnswer = serviceError("no_free_line");
+    api.countriesAnswer = [france];
 
     await use.create();
 
-    expect(ready().step).toEqual({ kind: "add", lineId: berlin.lineId, name: "iPhone", creating: false, error: "line_full" });
+    expect(adding()).toMatchObject({ countries: [france], country: null, cities: null, error: "no_free_line" });
   });
 
-  it("goes back to the list on Cancel", async () => {
+  it("keeps the country the member picks while the countries reload", async () => {
     await open();
-    use.startAdding();
+    await use.startAdding();
+    use.setName("iPhone");
+    api.addAnswer = serviceError("no_free_line");
+    api.holdRegions();
+
+    const failing = use.create();
+    await vi.waitFor(() => expect(api.count("countries")).toBe(2));
+    const picking = use.pickCountry("FR");
+    api.releaseRegions();
+    await failing;
+    await picking;
+
+    expect(adding()).toMatchObject({ country: "FR", cities: [lyon], error: "no_free_line" });
+  });
+
+  it("says why a country's cities didn't load, and loads them again on request", async () => {
+    api.citiesAnswers = { DE: serviceError("offline") };
+    await open();
+    await use.startAdding();
+    expect(adding()).toMatchObject({ country: "DE", cities: [], citiesError: "offline" });
+
+    api.citiesAnswers = { DE: [berlin] };
+    await use.reloadCities();
+
+    expect(adding()).toMatchObject({ country: "DE", cities: [berlin] });
+    expect(adding().citiesError).toBeUndefined();
+  });
+
+  it("says why the countries didn't load, and loads them again on request", async () => {
+    await open();
+    api.countriesAnswer = serviceError("offline");
+    await use.startAdding();
+    expect(adding()).toMatchObject({ countries: [], error: "offline" });
+
+    api.countriesAnswer = [germany];
+    await use.reloadRegions();
+
+    expect(adding()).toMatchObject({ countries: [germany], country: "DE", cities: [berlin, munich] });
+    expect(adding().error).toBeUndefined();
+  });
+
+  it("goes to sign-in when the session ended while the countries load", async () => {
+    await open();
+    api.countriesAnswer = serviceError("signed_out");
+
+    await use.startAdding();
+
+    expect(use.view).toEqual({ kind: "signedOut" });
+  });
+
+  it("goes back to the list on Cancel, and stays there when the countries arrive late", async () => {
+    await open();
+    api.holdRegions();
+    const loading = use.startAdding();
 
     use.cancelAdding();
+    api.releaseRegions();
+    await loading;
 
     expect(ready().step).toEqual({ kind: "list" });
   });
@@ -371,10 +520,10 @@ describe("adding a device", () => {
 describe("the new device's config", () => {
   async function created() {
     await open();
-    use.startAdding();
+    await use.startAdding();
     use.setName("iPhone");
     await use.create();
-    return newDevice(berlin.lineId, "iPhone");
+    return newDevice("DE", "", "iPhone");
   }
 
   it("is saved where the member chooses", async () => {
@@ -424,18 +573,32 @@ describe("the new device's config", () => {
 
 describe("changing a device", () => {
   const exitOn = (lineId: string) => ({ lineId, country: "DE", city: "Berlin", since: "2026-11-14T13:02:10Z" });
+  const movedLine = "line-DE-Munich-2";
+
+  /** The edit step, failing the test unless the member is changing a device. */
+  function editing() {
+    const step = ready().step;
+    if (step.kind !== "edit") throw new Error(`step is ${step.kind}, want edit`);
+    return step;
+  }
+
+  /** Opens the laptop's form and chooses to move it, to Munich unless told otherwise. */
+  async function moving(city = "Munich") {
+    use.startEditing(laptop.peerId);
+    await use.setMove(true);
+    use.pickCity(city);
+  }
 
   it("does not call the old line a backup line while the device moves to its new one", async () => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
+    await moving();
     // The gateway moves the device at its next config fetch; until then the
     // API reports the session on the old line.
-    api.updateAnswer = { ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) };
+    api.updateAnswer = { ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) };
 
     await use.saveDevice();
     const saved = backupLine(ready().devices[0]!);
-    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) }];
+    api.devicesAnswer = [{ ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) }];
     await use.refreshDevices();
     const refreshed = backupLine(ready().devices[0]!);
 
@@ -445,17 +608,16 @@ describe("changing a device", () => {
 
   it("shows a backup line again once the device has left its old line", async () => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
-    api.updateAnswer = { ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) };
+    await moving();
+    api.updateAnswer = { ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) };
     await use.saveDevice();
 
-    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: null }];
+    api.devicesAnswer = [{ ...laptop, lineId: movedLine, exitLine: null }];
     await use.refreshDevices();
-    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, exitLine: exitOn(berlin.lineId) }];
+    api.devicesAnswer = [{ ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) }];
     await use.refreshDevices();
 
-    expect(backupLine(ready().devices[0]!)?.lineId).toBe(berlin.lineId);
+    expect(backupLine(ready().devices[0]!)?.lineId).toBe(laptop.lineId);
   });
 
   it("says so when the device was removed while its form was open", async () => {
@@ -467,32 +629,75 @@ describe("changing a device", () => {
 
     await use.saveDevice();
 
-    expect(ready().step).toMatchObject({ kind: "edit", peerId: laptop.peerId, error: "device_gone" });
+    expect(editing()).toMatchObject({ peerId: laptop.peerId, error: "device_gone" });
     expect(api.updates).toEqual([]);
   });
 
-  it("starts from the device's line and failover", async () => {
-    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, failover: "city" }];
+  it("starts from the device's failover, keeping its line, with a move's region at its city", async () => {
+    api.devicesAnswer = [{ ...laptop, failover: "city" }];
     await open();
 
     use.startEditing(laptop.peerId);
 
-    expect(ready().step).toEqual({ kind: "edit", peerId: laptop.peerId, lineId: lyon.lineId, failover: "city", saving: false });
+    expect(editing()).toEqual({
+      kind: "edit",
+      peerId: laptop.peerId,
+      move: false,
+      countries: null,
+      country: "DE",
+      cities: null,
+      city: "Berlin",
+      query: "",
+      failover: "city",
+      saving: false,
+    });
+    expect(api.calls).not.toContain("countries");
   });
 
-  it("moves the device to the line the member picked, and keeps its failover", async () => {
+  it("loads where lines are free once the member chooses to move it, keeping its city", async () => {
     await open();
     use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
+
+    await use.setMove(true);
+
+    expect(editing()).toMatchObject({ move: true, countries: [germany, france], country: "DE", cities: [berlin, munich], city: "Berlin" });
+  });
+
+  it("moves the device to another free line in the region, and keeps its failover", async () => {
+    await open();
+    await moving();
 
     await use.saveDevice();
 
-    expect(api.updates).toEqual([[laptop.peerId, { lineId: lyon.lineId }]]);
+    expect(api.updates).toEqual([[laptop.peerId, { country: "DE", city: "Munich" }]]);
     expect(ready().step).toEqual({ kind: "list" });
-    expect(ready().devices).toEqual([{ ...laptop, lineId: lyon.lineId }]);
+    expect(ready().devices).toEqual([{ ...laptop, lineId: movedLine, city: "Munich", isp: "M-net" }]);
   });
 
-  it("changes only the failover when the line stays", async () => {
+  it("moves the device anywhere in another country", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    await use.setMove(true);
+    await use.pickCountry("FR");
+
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { country: "FR", city: "" }]]);
+  });
+
+  it("needs a country to move to", async () => {
+    api.devicesAnswer = [{ ...laptop, country: "", city: "" }];
+    await open();
+    use.startEditing(laptop.peerId);
+    await use.setMove(true);
+
+    await use.saveDevice();
+
+    expect(editing()).toMatchObject({ country: null, error: "no_country" });
+    expect(api.updates).toEqual([]);
+  });
+
+  it("changes only the failover when it keeps its line", async () => {
     await open();
     use.startEditing(laptop.peerId);
     use.pickFailover("off");
@@ -505,9 +710,8 @@ describe("changing a device", () => {
 
   it("goes back without asking Homeport when nothing changed", async () => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
-    use.pickLine(berlin.lineId);
+    await moving();
+    await use.setMove(false);
 
     await use.saveDevice();
 
@@ -515,58 +719,45 @@ describe("changing a device", () => {
     expect(ready().step).toEqual({ kind: "list" });
   });
 
-  it("is busy while it saves, and ignores a second press and Cancel", async () => {
+  it("is busy while it saves, and ignores a second press, Cancel and a new pick", async () => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickFailover("city");
+    await moving();
     api.hold();
 
     const pending = use.saveDevice();
-    expect(ready().step).toMatchObject({ kind: "edit", saving: true });
+    expect(editing()).toMatchObject({ saving: true });
     await use.saveDevice();
     use.cancelEditing();
-    use.pickLine(lyon.lineId);
-    expect(ready().step).toMatchObject({ kind: "edit", lineId: berlin.lineId, saving: true });
+    use.pickCity("Berlin");
+    await use.setMove(false);
+    expect(editing()).toMatchObject({ move: true, city: "Munich", saving: true });
     api.release();
     await pending;
 
-    expect(api.updates).toEqual([[laptop.peerId, { failover: "city" }]]);
+    expect(api.updates).toEqual([[laptop.peerId, { country: "DE", city: "Munich" }]]);
     expect(ready().step).toEqual({ kind: "list" });
   });
 
-  it.each(["line_full", "line_on_other_gateway", "line_not_allowed", "offline"] as const)(
-    "keeps the form and says why on %s",
-    async (code) => {
-      await open();
-      use.startEditing(laptop.peerId);
-      use.pickLine(lyon.lineId);
-      api.updateAnswer = serviceError(code);
-
-      await use.saveDevice();
-
-      expect(ready().step).toEqual({
-        kind: "edit",
-        peerId: laptop.peerId,
-        lineId: lyon.lineId,
-        failover: "country",
-        saving: false,
-        error: code,
-      });
-      expect(ready().devices).toEqual([laptop]);
-    },
-  );
-
-  it("reloads the lines when the picked one is gone, and picks the device's own again", async () => {
+  it.each(["offline", "rate_limited", "unexpected"] as const)("keeps the form and says why on %s", async (code) => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
-    api.updateAnswer = serviceError("line_unavailable");
-    api.linesAnswer = [berlin, porto];
+    await moving();
+    api.updateAnswer = serviceError(code);
 
     await use.saveDevice();
 
-    expect(ready().lines).toEqual([berlin, porto]);
-    expect(ready().step).toMatchObject({ kind: "edit", lineId: berlin.lineId, error: "line_unavailable" });
+    expect(editing()).toMatchObject({ move: true, country: "DE", city: "Munich", saving: false, error: code });
+    expect(ready().devices).toEqual([laptop]);
+  });
+
+  it("reloads where lines are free when the region has no other free line, and goes back to any city once the city is gone", async () => {
+    await open();
+    await moving();
+    api.updateAnswer = serviceError("no_free_line");
+    api.citiesAnswers = { DE: [berlin] };
+
+    await use.saveDevice();
+
+    expect(editing()).toMatchObject({ country: "DE", cities: [berlin], city: "", saving: false, error: "no_free_line" });
   });
 
   it("drops a device that was removed meanwhile, and goes back to the list", async () => {
@@ -594,8 +785,7 @@ describe("changing a device", () => {
 
   it("goes back to the list on Cancel", async () => {
     await open();
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
+    await moving();
 
     use.cancelEditing();
 
@@ -609,7 +799,7 @@ describe("changing a device", () => {
     use.startEditing("peer-unknown");
     expect(ready().step).toEqual({ kind: "list" });
 
-    use.startAdding();
+    await use.startAdding();
     use.startEditing(laptop.peerId);
     expect(ready().step).toMatchObject({ kind: "add" });
   });
@@ -620,13 +810,12 @@ describe("changing a device", () => {
     api.devices = () => new Promise((r) => (answer = r));
     const refreshing = use.refresh();
 
-    use.startEditing(laptop.peerId);
-    use.pickLine(lyon.lineId);
+    await moving();
     await use.saveDevice();
     answer([laptop]); // the list from before the change
     await refreshing;
 
-    expect(ready().devices).toEqual([{ ...laptop, lineId: lyon.lineId }]);
+    expect(ready().devices).toEqual([{ ...laptop, lineId: movedLine, city: "Munich", isp: "M-net" }]);
   });
 });
 

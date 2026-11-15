@@ -3,13 +3,13 @@
 // starting screen; the flow then runs with fake answers. On home,
 // &share=off|connecting|online|paused|offline|gateway|error picks Share's
 // state, &share=unverified|processing|requires_input the identity, and
-// &use=ready|empty|broke|backup|unreachable how Use starts; &tab=use opens
-// Use.
+// &use=ready|empty|broke|backup|unreachable|nolines how Use starts; &tab=use
+// opens Use.
 
 import type { IdentityApi } from "./identity";
 import type { ShareApi, ShareStatus } from "./share";
 import type { AuthApi, LoginStatus, Member } from "./signin";
-import type { Balance, Device, ExitLine, Line, UseApi } from "./use";
+import type { Balance, City, Device, ExitLine, Region, UseApi } from "./use";
 
 const identities = ["unverified", "processing", "requires_input"];
 
@@ -125,26 +125,33 @@ export function previewIdentity(): IdentityApi {
   };
 }
 
-const previewLines: Line[] = [
-  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", ipv6: true, online: true },
-  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", ipv6: false, online: true },
-  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e8", country: "FR", city: "Lyon", isp: "Orange", ipv6: true, online: false },
-  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e9", country: "FR", city: "Villeurbanne", isp: "Free", ipv6: true, online: true },
-];
+// Where free lines are: Germany has more cities than the list shows, so the
+// city search appears.
+const previewCities: Record<string, City[]> = {
+  DE: [
+    ["Berlin", 17], ["Munich", 9], ["Hamburg", 7], ["Frankfurt am Main", 6], ["Cologne", 4], ["Leipzig", 3],
+    ["Stuttgart", 3], ["Düsseldorf", 2], ["Dresden", 2], ["Bremen", 1], ["Hanover", 1], ["Nuremberg", 1],
+  ].map(([city, lines]) => ({ city: city as string, lines: lines as number })),
+  AT: [{ city: "Vienna", lines: 3 }, { city: "Graz", lines: 1 }],
+  PT: [{ city: "Lisbon", lines: 2 }, { city: "Porto", lines: 1 }],
+  FR: [{ city: "Lyon", lines: 1 }, { city: "Villeurbanne", lines: 1 }],
+};
+const previewCountries: Region[] = Object.entries(previewCities).map(([country, cities]) => ({
+  country,
+  lines: cities.reduce((sum, c) => sum + c.lines, 0) + (country === "DE" ? 2 : 0),
+}));
+const previewIsps: Record<string, string> = { DE: "Deutsche Telekom", AT: "A1", PT: "MEO", FR: "Orange" };
+
+// In the backup preview, the travel router's line in Lyon is offline, and a
+// line in Villeurbanne carries it meanwhile.
+const offlineLine = "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e8";
+const backupExit = { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e9", country: "FR", city: "Villeurbanne" };
 
 // Where a device's session exits, as the gateway reports it: its own line
 // while that is online, else a backup line as its failover allows.
-function exitOf(d: Pick<Device, "lineId" | "failover">, since: string): ExitLine | null {
-  const own = previewLines.find((l) => l.lineId === d.lineId);
-  if (!own) return null;
-  const backup =
-    d.failover === "off"
-      ? undefined
-      : previewLines.find(
-          (l) => l.online && l.lineId !== own.lineId && l.country === own.country && (d.failover === "country" || l.city === own.city),
-        );
-  const line = own.online ? own : backup;
-  return line ? { lineId: line.lineId, country: line.country, city: line.city, since } : null;
+function exitOf(d: Pick<Device, "lineId" | "country" | "city" | "failover">, since: string): ExitLine | null {
+  if (d.lineId !== offlineLine) return { lineId: d.lineId, country: d.country, city: d.city, since };
+  return d.failover === "off" ? null : { ...backupExit, since };
 }
 
 // A real config's QR code, made by go-qrcode as UseService makes it, for a
@@ -163,8 +170,10 @@ export function previewUse(start: string): UseApi {
     start === "empty" || start === "broke"
       ? []
       : [
-          { peerId: "p-router", name: "Travel router", lineId: previewLines[start === "backup" ? 2 : 0]!.lineId, failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
-          { peerId: "p-laptop", name: "Laptop", lineId: previewLines[1]!.lineId, failover: "country", exitLine: null, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
+          start === "backup"
+            ? { peerId: "p-router", name: "Travel router", lineId: offlineLine, country: "FR", city: "Lyon", isp: "Orange", failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" }
+            : { peerId: "p-router", name: "Travel router", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
+          { peerId: "p-laptop", name: "Laptop", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", failover: "country", exitLine: null, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
         ];
   const now = new Date().toISOString();
   devices = devices.map((d) => ({ ...d, exitLine: exitOf(d, now) }));
@@ -185,15 +194,32 @@ export function previewUse(start: string): UseApi {
       balance = { ...balance, purchased: balance.purchased + 1_000_000, total: balance.total + 1_000_000, bytes: balance.bytes + 100_000_000_000 };
       return { arrived: true, balance };
     },
-    async lines() {
-      return previewLines;
+    async countries() {
+      await sleep(300);
+      return start === "nolines" ? [] : previewCountries;
+    },
+    async cities(country) {
+      await sleep(250);
+      return previewCities[country] ?? [];
     },
     async devices() {
       return devices;
     },
-    async addDevice(lineId, name) {
+    async addDevice(country, city, name) {
       await sleep(700);
-      const device: Device = { peerId: `p-${n}`, name, lineId, failover: "country", exitLine: null, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: new Date().toISOString() };
+      const device: Device = {
+        peerId: `p-${n}`,
+        name,
+        lineId: `01a1c4af-8a0f-7f5c-b0ff-05e16a4457f${n}`,
+        country,
+        city: city || previewCities[country]?.[0]?.city || "",
+        isp: previewIsps[country] ?? "",
+        failover: "country",
+        exitLine: null,
+        ipv4: `10.77.0.${n}`,
+        ipv6: `fd77::${n}`,
+        createdAt: new Date().toISOString(),
+      };
       n++;
       devices = [device, ...devices];
       return { device, qrCode: previewQR, fileName: `Homeport-${name.replace(/[^A-Za-z0-9]+/g, "-")}.conf`.slice(0, 20) };
@@ -211,7 +237,17 @@ export function previewUse(start: string): UseApi {
       await sleep(500);
       const old = devices.find((d) => d.peerId === peerId);
       if (!old) throw fail("device_gone");
-      const moved = { ...old, ...change };
+      const moved: Device =
+        change.country === undefined
+          ? { ...old }
+          : {
+              ...old,
+              lineId: `01a1c4af-8a0f-7f5c-b0ff-05e16a4457f${n++}`,
+              country: change.country,
+              city: change.city || previewCities[change.country]?.[0]?.city || "",
+              isp: previewIsps[change.country] ?? "",
+            };
+      if (change.failover) moved.failover = change.failover;
       const device: Device = { ...moved, exitLine: exitOf(moved, new Date().toISOString()) };
       devices = devices.map((d) => (d.peerId === peerId ? device : d));
       return device;
