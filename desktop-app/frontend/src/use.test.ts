@@ -617,6 +617,19 @@ describe("changing a device", () => {
     expect(refreshed).toBeUndefined();
   });
 
+  it("does not call the old line a backup line when HTTPS only turns during the move", async () => {
+    await open();
+    await moving();
+    api.updateAnswer = { ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) };
+    await use.saveDevice();
+    api.httpsOnlyAnswer = { ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) };
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(ready().devices[0]?.httpsOnly).toBe(false);
+    expect(backupLine(ready().devices[0]!)).toBeUndefined();
+  });
+
   it("shows a backup line again once the device has left its old line", async () => {
     await open();
     await moving();

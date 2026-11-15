@@ -813,7 +813,7 @@ export class Use {
     this.#devicesVersion++;
     this.#set({
       ...now,
-      devices: now.devices.map((x) => (x.peerId === peerId ? dev : x)),
+      devices: this.#followMoves(now.devices.map((x) => (x.peerId === peerId ? dev : x))),
       httpsOnly: without(now.httpsOnly, peerId),
     });
   }
