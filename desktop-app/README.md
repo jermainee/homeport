@@ -54,7 +54,7 @@ Share needs a member whose identity is verified and a gateway that has announced
 `npm run dev` in `frontend/` serves the UI without Go. Add `?preview=<state>` to run it against a fake AuthService: `signedOut`, `approve` (approves after a few polls), `offline`, `expired`, `home` or `unreachable`. On `home`:
 
 - `&share=<state>` sets the fake ShareService: `off`, `connecting`, `online`, `paused`, `offline`, `gateway` or `error`, or `unverified`, `processing` or `requires_input` for the member's identity. "Verify identity" then runs a fake check that ends verified.
-- `&use=<state>` sets the fake UseService: `ready`, `empty` or `broke` (no devices, no credits), `backup` (the travel router's line is offline, so it runs on a backup line), or `unreachable`.
+- `&use=<state>` sets the fake UseService: `ready`, `empty` or `broke` (no devices, no credits), `backup` (the travel router's line is offline, so it runs on a backup line), or `unreachable`. The laptop has HTTPS only off, so both positions of the switch show.
 - `&tab=use` opens the Use tab.
 
 Production builds leave the fakes out.
@@ -69,7 +69,7 @@ cd frontend && npm test
 - `services/auth_test.go` tests `AuthService` against `internal/fakeapi`, an in-memory stand-in for the API's member and share endpoints.
 - `services/share_test.go` tests `ShareService` against the same fake API, with a fake agent behind the `services.Agent` interface: enrollment, the line and its gateway pin, the switch, retries while the API or a gateway is unavailable, another VPN, today's count, sign-out and restarts.
 - `services/identity_test.go` tests `IdentityService`: the check's page opens in the browser, a retry reuses the request, and polling reports each step, including a new check after a failed one.
-- `services/use_test.go` tests `UseService`: the balance in credits and bytes, Checkout and waiting for the credits, the lines, and new devices. It decodes each QR code with gozxing, checks that the config's private key belongs to the public key the API got and is stored nowhere, and covers the save path, the file's permissions and the config's single showing. It also covers each device's exit line, and moving a device or changing its failover, with the API's refusals.
+- `services/use_test.go` tests `UseService`: the balance in credits and bytes, Checkout and waiting for the credits, the lines, and new devices. It decodes each QR code with gozxing, checks that the config's private key belongs to the public key the API got and is stored nowhere, and covers the save path, the file's permissions and the config's single showing. It also covers each device's exit line, moving a device or changing its failover, and turning HTTPS only off and on, with the API's refusals.
 - `frontend/src/signin.test.ts`, `share.test.ts`, `identity.test.ts` and `use.test.ts` test the state machines against fakes of the Go services (`src/test/`), with fake timers for polling.
 - `frontend/src/ui.test.ts`, `ui-share.test.ts`, `ui-use.test.ts` and `view.test.ts` test focus, announcements, tabs and rendering in happy-dom.
 
@@ -81,7 +81,7 @@ cd frontend && npm test
 | `services/` | Wails services the frontend calls. The webview never calls the API, so the session token never reaches JavaScript |
 | `services/share.go` | `ShareService`: enrolls this computer, turns sharing on and off at the API and runs the agent |
 | `services/identity.go` | `IdentityService`: opens the Stripe Identity check in the browser and polls how it stands |
-| `services/use.go` | `UseService`: credits, Checkout, lines, and devices with their WireGuard config and QR code, their line and failover |
+| `services/use.go` | `UseService`: credits, Checkout, lines, and devices with their WireGuard config and QR code, their line, failover and HTTPS only |
 | `internal/apiclient/` | Client for the member and share endpoints in `contracts/control-api.openapi.yaml` |
 | `internal/profile/` | Profile directory: a stable install id, the session, and per member (`members/<id>/`) the agent key and Share state |
 | `internal/tray/` | The menu bar icon and menu: Share status, the Share switch, Open and Quit. `icons/gen.go` draws its icons |
@@ -123,6 +123,7 @@ Closing the window keeps Share running in the menu bar. Quit stops the agent but
 - **Devices:** `GET /v1/wireguard/peers` lists them, and Remove deletes one (`DELETE /v1/wireguard/peers/{id}`). The API doesn't report usage per device yet. While the Use tab shows the list, the app reloads the devices (not the lines) every 30 seconds.
 - **Backup lines:** while a device's line is offline, the gateway moves it to another line in the same city, then the same country, as the device's failover allows, and back once its own line has been online for 5 minutes. The list says when a device runs on a backup line, and where, from the peer's `exit_line`.
 - **Change a device:** Change keeps the device's line, or moves it to another free line in a country, and optionally a city, picked as in Add a device; and it sets the failover: same city then same country (the default), same city only, or off. `PATCH /v1/wireguard/peers/{id}` sends only what changed, and the device keeps its config. The API picks the new line on the gateway the device's config names, never its current one, and answers `409 no_free_line` when the region has no other free line there; a 404 means the device was removed.
+- **HTTPS only:** every device starts with it on, and its row has a switch for it. While it's on, the gateway lets through only the device's TCP that opens with TLS, so plain HTTP, SSH and mail apps that start unencrypted don't work; the row says so, and that turning it off lets the line's owner read and change that traffic. The switch sends only `https_only` with `PATCH /v1/wireguard/peers/{id}`, keeps the device's config, and resets its open connections within about 30 seconds. DNS through Homeport and UDP aren't affected.
 
 POSTs reuse their `request_id` (and for a device, its key pair) after a response that never arrived, so a retry gets the first answer instead of a second Stripe session or peer.
 
