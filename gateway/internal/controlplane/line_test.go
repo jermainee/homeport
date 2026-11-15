@@ -51,3 +51,25 @@ func TestLineEventWithANonSemverAgentVersionIsStillValid(t *testing.T) {
 		t.Errorf("line events %+v; want one, with version 0.0.0 for an agent version the contract would refuse", got)
 	}
 }
+
+func TestATamperedLineIsReportedWithTheCheckThatCaughtIt(t *testing.T) {
+	f := newBareFixture(t)
+	ip := netip.MustParseAddr("2001:db8:4d2::1c")
+
+	f.ctl.OnLineEvent(gateway.LineEvent{LineID: lineID, Online: true, ObservedIP: ip, AgentVersion: "0.1.0"})
+	f.ctl.OnLineEvent(gateway.LineEvent{LineID: lineID, ObservedIP: ip, AgentVersion: "0.1.0", Tampered: "dns"})
+	f.ctl.OnLineEvent(gateway.LineEvent{LineID: lineID, ObservedIP: ip, AgentVersion: "0.1.0"})
+	f.flush(t)
+
+	got := f.api.lineEventsReceived()
+	if len(got) != 3 {
+		t.Fatalf("API received %d line events, want 3", len(got))
+	}
+	want := lineEvent{EventID: got[1].EventID, LineID: lineID, Type: "tampered", ObservedIP: ip.String(), AgentVersion: "0.1.0", At: got[1].At, Check: "dns"}
+	if got[1] != want {
+		t.Errorf("tamper event is %+v, want %+v", got[1], want)
+	}
+	if got[0].Check != "" || got[2].Check != "" || got[2].Type != "offline" {
+		t.Errorf("online and offline events carry a check: %+v", got)
+	}
+}

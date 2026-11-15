@@ -126,10 +126,11 @@ type SessionStart struct {
 type LineEvent struct {
 	EventID      string `json:"event_id"`
 	LineID       string `json:"line_id"`
-	Type         string `json:"type"` // "online" or "offline"
+	Type         string `json:"type"` // "online", "offline" or "tampered"
 	ObservedIP   string `json:"observed_ip"`
 	AgentVersion string `json:"agent_version"`
 	At           string `json:"at"`
+	Check        string `json:"check,omitempty"` // for "tampered": "http" or "dns"
 }
 
 // EventResult is the API's answer for one usage or line event.
