@@ -361,9 +361,11 @@ func (c *canary) fetch(ctx context.Context, conn net.Conn, nonce string) (canary
 // the line, and compares the line's answer with the gateway's own.
 func (c *canary) checkDNS(ctx context.Context, lineID string) canaryResult {
 	name := newNonce() + "." + c.zone
-	want, err := c.cfg.Resolver.LookupNetIP(ctx, "ip4", name)
-	for i := range want {
-		want[i] = want[i].Unmap()
+	found, err := c.cfg.Resolver.LookupNetIP(ctx, "ip4", name)
+	// A new slice: the resolver may hand the same one to others.
+	want := make([]netip.Addr, len(found))
+	for i, addr := range found {
+		want[i] = addr.Unmap()
 	}
 	if err != nil || len(want) == 0 || slices.ContainsFunc(want, relayprotocol.SpecialPurpose) {
 		c.warn("canary zone does not resolve to public addresses from the gateway; skipping DNS checks", err)

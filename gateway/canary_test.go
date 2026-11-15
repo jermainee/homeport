@@ -454,3 +454,32 @@ func TestCanaryStopsSuspendingWhenManyLinesFailAtOnce(t *testing.T) {
 		t.Error("the honest line went offline")
 	}
 }
+
+// sharedResolver answers every name with the same slice, as a resolver with
+// a cache may: the canary must not change it.
+type sharedResolver struct{ answer []netip.Addr }
+
+func (r sharedResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return r.answer, nil
+}
+
+func TestCanaryLeavesTheResolversAnswerAlone(t *testing.T) {
+	mapped := make([]netip.Addr, len(canaryAnswer))
+	for i, a := range canaryAnswer {
+		mapped[i] = netip.AddrFrom16(a.As16()) // ::ffff:a.b.c.d
+	}
+	shared := sharedResolver{answer: mapped}
+	f := newCanaryFixture(t, honest, func(c *gateway.CanaryConfig) { c.Resolver = shared })
+
+	if opens := f.checkedFor(500 * time.Millisecond); len(opens) < 2 {
+		t.Fatalf("the line was checked %d times", len(opens))
+	}
+	for i, a := range shared.answer {
+		if !a.Is4In6() {
+			t.Fatalf("the canary changed the resolver's answer: address %d is %s now", i, a)
+		}
+	}
+	if got := f.tampered(); len(got) != 0 {
+		t.Errorf("an honest line was reported tampered: %+v", got)
+	}
+}
