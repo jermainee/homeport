@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Homeport control API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     The contract between the Homeport control API (`api/`), the edge gateway
     (`gateway/`) and the apps. Both sides build against this file.
@@ -999,6 +999,11 @@ paths:
         A new `line_id` gets the same checks as `createWireguardPeer`. It must
         also be on the same gateway as the peer's current line, since that is
         the gateway the device's `.conf` file names.
+
+        With `country`, and optionally `city`, instead of `line_id`, the API
+        picks the line as `createWireguardPeer` does: a free line there, on
+        the peer's gateway, other than the peer's current line. Without one,
+        it answers `409 no_free_line` and changes nothing.
       security:
         - memberSession: []
       parameters:
@@ -1013,6 +1018,9 @@ paths:
               move:
                 summary: Move to another line, failover within the city only
                 externalValue: examples/member/wireguard-peer-update.json
+              region:
+                summary: Move to another free line in Berlin
+                externalValue: examples/member/wireguard-peer-update-region.json
         x-max-body-bytes: 16384
       responses:
         "200":
@@ -1052,9 +1060,10 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: |
-            `line_full`, or `line_on_other_gateway`: the line is served by
-            another gateway than the one the device's `.conf` file names.
-            Create a new peer for that line instead.
+            `line_full`; `line_on_other_gateway`: the line is served by
+            another gateway than the one the device's `.conf` file names
+            (create a new peer for that line instead); or `no_free_line`: the
+            region has no other free line on the peer's gateway.
           content:
             application/json:
               schema:
@@ -1063,7 +1072,7 @@ paths:
                   - type: object
                     properties:
                       error:
-                        enum: [line_full, line_on_other_gateway]
+                        enum: [line_full, line_on_other_gateway, no_free_line]
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
     delete:
@@ -2133,12 +2142,23 @@ components:
       type: string
       enum: [country, city, "off"]
     WireguardPeerUpdate:
+      description: A new line, by `line_id` or by `country` (and `city`), not both; a new `failover`; or both.
       type: object
       additionalProperties: false
       minProperties: 1
+      dependentRequired:
+        city: [country]
       properties:
         line_id:
           $ref: "#/components/schemas/Id"
+        country:
+          description: Move to a free line the API picks in this country.
+          $ref: "#/components/schemas/CountryCode"
+        city:
+          description: Only a line in this city of `country`.
+          type: string
+          minLength: 1
+          maxLength: 200
         failover:
           $ref: "#/components/schemas/Failover"
         https_only:
