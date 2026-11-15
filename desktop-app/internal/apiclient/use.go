@@ -73,6 +73,9 @@ type Peer struct {
 	// Failover is where the peer goes while its line is offline: country,
 	// city or off.
 	Failover string `json:"failover"`
+	// HTTPSOnly is whether the gateway admits a TCP flow from the peer only
+	// if it opens with TLS.
+	HTTPSOnly bool `json:"https_only"`
 	// ExitLine is the line the peer's current session exits through: LineID,
 	// or a backup line while LineID is offline. Nil without a session.
 	ExitLine  *ExitLine `json:"exit_line"`
@@ -149,6 +152,16 @@ func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, country, 
 	if failover != "" {
 		body["failover"] = failover
 	}
+	var out Peer
+	err := c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), sessionToken, body, &out, http.StatusOK)
+	return out, err
+}
+
+// SetPeerHTTPSOnly turns HTTPS only on or off for a WireGuard peer, and
+// changes nothing else. A peer that doesn't exist is an *Error with status
+// 404.
+func (c *Client) SetPeerHTTPSOnly(ctx context.Context, sessionToken, peerID string, on bool) (Peer, error) {
+	body := map[string]bool{"https_only": on}
 	var out Peer
 	err := c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), sessionToken, body, &out, http.StatusOK)
 	return out, err

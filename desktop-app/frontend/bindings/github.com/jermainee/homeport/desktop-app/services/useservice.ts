@@ -105,6 +105,18 @@ export function SaveConfig(peerID: string): $CancellablePromise<boolean> {
 }
 
 /**
+ * SetHTTPSOnly turns HTTPS only on or off for one device, and changes
+ * nothing else. While it is on, the gateway lets through only the device's
+ * TCP that opens with TLS: plain HTTP, SSH and mail that starts
+ * unencrypted don't work. Off, they do, and the line's owner can read and
+ * change that unencrypted traffic. The change resets the device's open
+ * connections within about 30 seconds; its config stays.
+ */
+export function SetHTTPSOnly(peerID: string, on: boolean): $CancellablePromise<$models.Device> {
+    return $Call.ByID(940356444, peerID, on);
+}
+
+/**
  * UpdateDevice moves a device to a free line the API picks in country,
  * and in city unless it is empty, or changes its failover (FailoverCountry,
  * FailoverCity or FailoverOff), or both; an empty argument keeps what the

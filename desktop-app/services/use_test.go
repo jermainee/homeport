@@ -438,7 +438,7 @@ func TestAddDeviceGetsAFreeLineInTheCity(t *testing.T) {
 	}
 	want := services.Device{
 		PeerID: p.PeerID, Name: "iPhone", LineID: munich, Country: "DE", City: "Munich", ISP: "M-net",
-		Failover: services.FailoverCountry, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		Failover: services.FailoverCountry, HTTPSOnly: true, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if got.Device != want {
 		t.Errorf("device = %+v, want %+v", got.Device, want)
@@ -956,6 +956,101 @@ func TestUpdateDeviceThatWasRemoved(t *testing.T) {
 
 			if code := errCode(err); code != services.ErrDeviceGone {
 				t.Errorf("error = %v, want code %q", err, services.ErrDeviceGone)
+			}
+		})
+	}
+}
+
+// Every device starts with HTTPS only on: the gateway lets through only
+// TCP that opens with TLS, so the line's owner can't read or change it.
+func TestDevicesStartWithHTTPSOnlyOn(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	if !dev.Device.HTTPSOnly {
+		t.Errorf("new device = %+v, want HTTPS only on", dev.Device)
+	}
+
+	got, err := f.use.Devices(t.Context())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+	if len(got) != 1 || !got[0].HTTPSOnly {
+		t.Errorf("devices = %+v, want one with HTTPS only on", got)
+	}
+}
+
+// A member who needs plain HTTP or SSH on one device turns HTTPS only off
+// for it, and on again; its line and failover stay as they are.
+func TestSetHTTPSOnlyTurnsItOffAndOnForOneDevice(t *testing.T) {
+	f := newUse(t)
+	berlin := f.offerBerlin()
+	phone, _ := f.addDevice(t, "Berlin", "iPhone")
+	router, _ := f.addDevice(t, "Berlin", "Travel router")
+	if _, err := f.use.UpdateDevice(t.Context(), phone.Device.PeerID, "", "", services.FailoverCity); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, on := range []bool{false, true} {
+		got, err := f.use.SetHTTPSOnly(t.Context(), phone.Device.PeerID, on)
+		if err != nil {
+			t.Fatalf("SetHTTPSOnly %t: %v", on, err)
+		}
+		want := phone.Device
+		want.Failover = services.FailoverCity
+		want.HTTPSOnly = on
+		if got != want {
+			t.Errorf("SetHTTPSOnly %t: device = %+v, want %+v", on, got, want)
+		}
+		peers := map[string]fakeapi.Peer{}
+		for _, p := range f.api.Peers(t, email) {
+			peers[p.PeerID] = p
+		}
+		if p := peers[phone.Device.PeerID]; p.HTTPSOnly != on || p.LineID != berlin || p.Failover != services.FailoverCity {
+			t.Errorf("SetHTTPSOnly %t: peer = %+v, want HTTPS only %[1]t on %[3]s with failover city", on, p, berlin)
+		}
+		if p := peers[router.Device.PeerID]; !p.HTTPSOnly {
+			t.Errorf("SetHTTPSOnly %t: the other device lost HTTPS only: %+v", on, p)
+		}
+	}
+}
+
+func TestSetHTTPSOnlyOnADeviceThatWasRemoved(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := f.use.SetHTTPSOnly(t.Context(), dev.Device.PeerID, false)
+
+	if code := errCode(err); code != services.ErrDeviceGone {
+		t.Errorf("error = %v, want code %q", err, services.ErrDeviceGone)
+	}
+}
+
+func TestSetHTTPSOnlyWhenTheAPIRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		want   services.ErrorCode
+	}{
+		{"unverified", http.StatusForbidden, "identity_required", services.ErrIdentityRequired},
+		{"signed out", http.StatusUnauthorized, "unauthorized", services.ErrSignedOut},
+		{"rate limited", http.StatusTooManyRequests, "rate_limited", services.ErrRateLimited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUse(t)
+			dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+			f.api.FailNext("PATCH /v1/wireguard/peers/", tc.status, tc.code)
+
+			_, err := f.use.SetHTTPSOnly(t.Context(), dev.Device.PeerID, false)
+
+			if code := errCode(err); code != tc.want {
+				t.Errorf("error = %v, want code %q", err, tc.want)
+			}
+			if p := f.api.Peers(t, email)[0]; !p.HTTPSOnly {
+				t.Errorf("peer = %+v, want HTTPS only still on", p)
 			}
 		})
 	}

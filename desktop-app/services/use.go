@@ -263,6 +263,10 @@ type Device struct {
 	// Failover is where the device goes while its line is offline:
 	// FailoverCountry, FailoverCity or FailoverOff.
 	Failover string `json:"failover"`
+	// HTTPSOnly is whether the gateway lets through only the device's TCP
+	// that opens with TLS, so the line's owner can't read or change it.
+	// Every device starts with it on.
+	HTTPSOnly bool `json:"httpsOnly"`
 	// ExitLine is the line the device's current session exits through:
 	// LineID, or a backup line while LineID is offline. Nil while the
 	// device has no session.
@@ -297,7 +301,7 @@ func deviceOf(p apiclient.Peer) Device {
 	d := Device{
 		PeerID: p.ID, Name: p.Name, LineID: p.LineID,
 		Country: deref(p.Line.Country), City: deref(p.Line.City), ISP: deref(p.Line.ISP),
-		Failover: p.Failover, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		Failover: p.Failover, HTTPSOnly: p.HTTPSOnly, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if e := p.ExitLine; e != nil {
 		d.ExitLine = &ExitLine{LineID: e.LineID, Country: deref(e.Country), City: deref(e.City), Since: e.Since}
@@ -546,6 +550,27 @@ func (s *UseService) UpdateDevice(ctx context.Context, peerID, country, city, fa
 	}
 	if err != nil {
 		return Device{}, peerError(err)
+	}
+	return deviceOf(p), nil
+}
+
+// SetHTTPSOnly turns HTTPS only on or off for one device, and changes
+// nothing else. While it is on, the gateway lets through only the device's
+// TCP that opens with TLS: plain HTTP, SSH and mail that starts
+// unencrypted don't work. Off, they do, and the line's owner can read and
+// change that unencrypted traffic. The change resets the device's open
+// connections within about 30 seconds; its config stays.
+func (s *UseService) SetHTTPSOnly(ctx context.Context, peerID string, on bool) (Device, error) {
+	sess, err := session(s.profile)
+	if err != nil {
+		return Device{}, err
+	}
+	p, err := s.api.SetPeerHTTPSOnly(ctx, sess.Token, peerID, on)
+	if apiclient.IsStatus(err, http.StatusNotFound) {
+		return Device{}, &Error{Code: ErrDeviceGone, err: err}
+	}
+	if err != nil {
+		return Device{}, serviceError(err)
 	}
 	return deviceOf(p), nil
 }
