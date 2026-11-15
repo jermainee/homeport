@@ -47,7 +47,16 @@ export function linkedPairsSql(members: string): string {
  * yet. The arguments are SQL expressions.
  */
 export function lineHasRoomSql(line: string, member?: string): string {
+  return `(${lineUsersSql(line, member)} < ${MAX_USERS_PER_LINE})`;
+}
+
+/**
+ * SQL expression: how many members use the line `line` (have an active
+ * peer on it), not counting the member `member`. The arguments are SQL
+ * expressions.
+ */
+export function lineUsersSql(line: string, member?: string): string {
   const others = member === undefined ? "" : ` AND u.member_id <> ${member}`;
-  return `((SELECT COUNT(DISTINCT u.member_id) FROM wireguard_peers u
-             WHERE u.line_id = ${line} AND u.deleted_at IS NULL${others}) < ${MAX_USERS_PER_LINE})`;
+  return `(SELECT COUNT(DISTINCT u.member_id) FROM wireguard_peers u
+             WHERE u.line_id = ${line} AND u.deleted_at IS NULL${others})`;
 }

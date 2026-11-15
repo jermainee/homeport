@@ -8,5 +8,6 @@
       "ipv6": true,
       "online": true
     }
-  ]
+  ],
+  "next_cursor": null
 }

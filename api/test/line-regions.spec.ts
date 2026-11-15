@@ -5,8 +5,9 @@ import worker from "../src/index";
 import { RECOUNT_CRON, RECOUNT_STALE_MS } from "../src/lines/regions";
 import { expectContract } from "./contract";
 import { MAX_USERS_PER_LINE } from "../src/pricing";
-import { announcedGateway, gatewayCall, peerOn } from "./gateway-fixtures";
-import { signIn, uniqueEmail, uuidv7 } from "./helpers";
+import { announcedGateway, peerOn } from "./gateway-fixtures";
+import { signIn, uniqueEmail } from "./helpers";
+import { countryPool, type Member, onlineLine as onlineLineAt } from "./region-fixtures";
 import { link, send, sharingLine, verifiedMember } from "./share-fixtures";
 
 interface CityRegion {
@@ -20,42 +21,16 @@ interface CountryRegion {
   cities?: CityRegion[];
 }
 
-type Member = { sessionToken: string; memberId: string };
-
 let gateway: { gatewayId: string; token: string };
 
 beforeAll(async () => {
   gateway = await announcedGateway();
 });
 
-// User-assigned ISO 3166 codes, one per test, so counts don't add up across tests.
-const freeCodes = ["QM", "QN", "QO", "QP", "QQ", "QR", "QS", "QT", "QU", "QV", "QW", "QY", "QZ", "XA", "XB", "XC"];
-function freshCountry(): string {
-  const code = freeCodes.shift();
-  if (!code) throw new Error("out of test country codes");
-  return code;
-}
+const freshCountry = countryPool(["QM", "QN", "QO", "QP", "QQ", "QR", "QS", "QT", "QU", "QV", "QW", "QY", "QZ", "XA", "XB", "XC"]);
 
-/** A shared line in `country`/`city` whose agent is connected to the gateway. */
-async function onlineLine(country: string, city?: string, owner?: Member): Promise<string> {
-  const member = owner ?? (await verifiedMember());
-  const cf = { country, ...(city ? { city } : {}) } as Partial<IncomingRequestCfProperties>;
-  const lineId = await sharingLine(member.sessionToken, cf);
-  await env.DB.prepare(`UPDATE lines SET gateway_id = ? WHERE id = ?`).bind(gateway.gatewayId, lineId).run();
-  const response = await gatewayCall(gateway.token, "POST", "/v1/gateway/line-events", {
-    events: [
-      {
-        event_id: uuidv7(),
-        line_id: lineId,
-        type: "online",
-        observed_ip: "203.0.113.47",
-        agent_version: "0.1.0",
-        at: new Date().toISOString(),
-      },
-    ],
-  });
-  if (response.status !== 200) throw new Error(`line event failed: ${response.status}`);
-  return lineId;
+function onlineLine(country: string, city?: string, owner?: Member): Promise<string> {
+  return onlineLineAt(gateway, { country, ...(city ? { city } : {}) }, owner);
 }
 
 /** Runs the cron trigger that recounts the free lines in each region. */

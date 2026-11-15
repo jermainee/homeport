@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { SessionVariables } from "../auth/middleware";
-import { COUNTRY } from "../formats";
+import { COUNTRY, ID } from "../formats";
+import { SERVED_LINE_SQL } from "../gateway/served";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { requireVerifiedMember } from "../identity/require-verified";
@@ -85,21 +86,44 @@ linesApi.post("/", verifiedMemberIdempotent, async (c) => {
   );
 });
 
+/** Lines per page of GET /v1/lines/available, unless the request asks for fewer. */
+const AVAILABLE_LIMIT = 50;
+const MAX_AVAILABLE_LIMIT = 100;
+
 linesApi.get("/available", requireVerifiedMember, async (c) => {
+  const { country, city, limit: limitParam, cursor } = c.req.query();
+  if (country !== undefined && !COUNTRY.test(country)) return invalidRequest(c, "country must be an ISO 3166-1 alpha-2 code");
+  if (city !== undefined && (country === undefined || city.length === 0 || city.length > 200)) {
+    return invalidRequest(c, "city needs a country and 1 to 200 characters");
+  }
+  const limit = limitParam === undefined ? AVAILABLE_LIMIT : /^\d{1,3}$/.test(limitParam) ? Number(limitParam) : 0;
+  if (limit < 1 || limit > MAX_AVAILABLE_LIMIT) {
+    return invalidRequest(c, `limit must be a whole number from 1 to ${MAX_AVAILABLE_LIMIT}`);
+  }
+  // The cursor is the last line_id of the previous page; lines are ordered by id.
+  if (cursor !== undefined && !ID.test(cursor)) return invalidRequest(c, "cursor must be a next_cursor of this list");
+
   // A line needs a known country to be listed (the contract requires one),
-  // an owner who is not suspended, and no pause for tampering.
+  // and a gateway must serve it.
+  const where = [
+    country === undefined ? "" : " AND l.country = ?2",
+    city === undefined ? "" : " AND l.city = ?3",
+    cursor === undefined ? "" : " AND l.id > ?4",
+  ].join("");
   const { results } = await c.env.DB.prepare(
     `SELECT l.id, l.country, l.city, l.isp, l.ipv6, l.online
-       FROM lines l JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
-      WHERE l.sharing_enabled = 1 AND l.paused_at IS NULL AND l.country IS NOT NULL
+       FROM lines l JOIN members o ON o.id = l.member_id
+      WHERE ${SERVED_LINE_SQL} AND l.country IS NOT NULL${where}
         AND NOT ${ownerIsLinkedSql("?1", "l.member_id")}
         AND ${lineHasRoomSql("l.id", "?1")}
-      ORDER BY l.created_at`,
+      ORDER BY l.id
+      LIMIT ?5`,
   )
-    .bind(c.get("member").id)
+    .bind(c.get("member").id, country ?? null, city ?? null, cursor ?? null, limit + 1)
     .all<{ id: string; country: string; city: string | null; isp: string | null; ipv6: number; online: number }>();
+  const page = results.slice(0, limit);
   return c.json({
-    lines: results.map((line) => ({
+    lines: page.map((line) => ({
       line_id: line.id,
       country: line.country,
       city: line.city,
@@ -107,6 +131,7 @@ linesApi.get("/available", requireVerifiedMember, async (c) => {
       ipv6: line.ipv6 === 1,
       online: line.online === 1,
     })),
+    next_cursor: results.length > limit ? (page.at(-1)?.id ?? null) : null,
   });
 });
 
