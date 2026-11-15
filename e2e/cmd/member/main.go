@@ -15,9 +15,12 @@
 //	checkout             start buying a credit pack and print its page
 //	verify               mark the identity verified (dev route)
 //	credits N            grant N purchased credits (dev route)
-//	lines                list the lines this member may use
-//	peer LINE_ID         add a WireGuard peer on a line and print its .conf,
-//	                     private key included
+//	regions [COUNTRY]    countries with free lines for this member, or a
+//	                     country's cities, with how many each has
+//	lines COUNTRY [CITY] the first page of lines this member may use there
+//	peer COUNTRY [CITY]  add a WireGuard peer on a line the API picks there,
+//	                     and print its .conf, private key included
+//	peer LINE_ID         the same, on one line
 //	share KEY_FILE       share this machine's line with the agent CLI: register
 //	                     its key (homeport-agent -print-pin -key KEY_FILE makes
 //	                     one), create the line, turn sharing on, and print the
@@ -40,7 +43,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jermainee/homeport/e2e/internal/memberapi"
@@ -67,7 +72,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// The default stays out of the repo, so a session token is never committed.
 	sessionPath := flags.String("session", filepath.Join(os.TempDir(), "homeport-member.json"), "session file (an app profile's session.json works too)")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(stderr, "usage: member [-api URL] [-session FILE] signin EMAIL [-dev] | me | identity | checkout | verify | credits N | lines | peer LINE_ID | share KEY_FILE")
+		_, _ = fmt.Fprintln(stderr, "usage: member [-api URL] [-session FILE] signin EMAIL [-dev] | me | identity | checkout | verify | credits N | regions [COUNTRY] | lines COUNTRY [CITY] | peer COUNTRY [CITY] | peer LINE_ID | share KEY_FILE")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -135,24 +140,39 @@ func command(ctx context.Context, c *memberapi.Client, s session, cmd string, ar
 			return fmt.Errorf("credits: %q is not a positive whole number", args[0])
 		}
 		return c.DevGrantCredits(ctx, s.MemberID, n)
-	case cmd == "lines" && len(args) == 0:
-		lines, err := c.AvailableLines(ctx)
+	case cmd == "regions" && len(args) <= 1:
+		regions, err := c.Regions(ctx, at(args, 0))
+		if err != nil {
+			return err
+		}
+		return printJSON(stdout, regions)
+	case cmd == "lines" && (len(args) == 1 || len(args) == 2):
+		lines, err := c.AvailableLines(ctx, args[0], at(args, 1))
 		if err != nil {
 			return err
 		}
 		return printJSON(stdout, lines)
-	case cmd == "peer" && len(args) == 1:
+	case cmd == "peer" && (len(args) == 1 || len(args) == 2):
 		key, err := gateway.GenerateKey()
 		if err != nil {
 			return err
 		}
 		host, _ := os.Hostname()
-		peer, err := c.CreatePeer(ctx, args[0], "member tool on "+truncate(host, 40), key.PublicKey().String())
+		name := "member tool on " + truncate(host, 40)
+		var peer memberapi.Peer
+		if countryCode.MatchString(args[0]) {
+			peer, err = c.CreatePeerIn(ctx, args[0], at(args, 1), name, key.PublicKey().String())
+		} else if len(args) == 1 {
+			peer, err = c.CreatePeer(ctx, args[0], name, key.PublicKey().String())
+		} else {
+			return fmt.Errorf("peer: %q is not a country code, so it takes no city", args[0])
+		}
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprint(stdout, wgclient.WithPrivateKey(peer.ConfigText, key))
-		_, _ = fmt.Fprintf(stderr, "member: peer %s, tunnel address %s. The .conf holds its private key; keep it to yourself.\n", peer.Peer.ID, peer.Peer.IPv4)
+		_, _ = fmt.Fprintf(stderr, "member: peer %s on line %s (%s), tunnel address %s. The .conf holds its private key; keep it to yourself.\n",
+			peer.Peer.ID, peer.Peer.LineID, place(peer), peer.Peer.IPv4)
 		return nil
 	case cmd == "share" && len(args) == 1:
 		return share(ctx, c, args[0], stdout)
@@ -308,4 +328,29 @@ func truncate(s string, n int) string {
 		return string(r[:n])
 	}
 	return s
+}
+
+// countryCode is an ISO 3166-1 alpha-2 code, as the API takes it.
+var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// at returns args[i], or "" when there is none.
+func at(args []string, i int) string {
+	if i < len(args) {
+		return args[i]
+	}
+	return ""
+}
+
+// place says where a peer's line is: "Berlin, DE", or what of it is known.
+func place(p memberapi.Peer) string {
+	var parts []string
+	for _, s := range []*string{p.Peer.Line.City, p.Peer.Line.Country} {
+		if s != nil && *s != "" {
+			parts = append(parts, *s)
+		}
+	}
+	if len(parts) == 0 {
+		return "place unknown"
+	}
+	return strings.Join(parts, ", ")
 }

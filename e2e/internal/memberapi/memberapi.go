@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -248,19 +249,58 @@ type AvailableLine struct {
 	Online  bool   `json:"online"`
 }
 
-// AvailableLines lists the lines the member may use.
-func (c *Client) AvailableLines(ctx context.Context) ([]AvailableLine, error) {
+// AvailableLines lists the first page of lines the member may use in
+// country, and in city unless it is empty.
+func (c *Client) AvailableLines(ctx context.Context, country, city string) ([]AvailableLine, error) {
 	var l struct {
 		Lines []AvailableLine `json:"lines"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/lines/available", true, nil, http.StatusOK, &l)
+	err := c.do(ctx, http.MethodGet, "/v1/lines/available?"+regionQuery(country, city).Encode(), true, nil, http.StatusOK, &l)
 	return l.Lines, err
+}
+
+// Region is a country with free lines for the member, and its cities when
+// the request named the country.
+type Region struct {
+	Country string `json:"country"`
+	Lines   int    `json:"lines"`
+	Cities  []struct {
+		City  string `json:"city"`
+		Lines int    `json:"lines"`
+	} `json:"cities,omitempty"`
+}
+
+// Regions lists the countries with free lines for the member, or with
+// country, that country and its cities.
+func (c *Client) Regions(ctx context.Context, country string) ([]Region, error) {
+	var r struct {
+		Countries []Region `json:"countries"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/lines/regions?"+regionQuery(country, "").Encode(), true, nil, http.StatusOK, &r)
+	return r.Countries, err
+}
+
+func regionQuery(country, city string) url.Values {
+	q := url.Values{}
+	if country != "" {
+		q.Set("country", country)
+	}
+	if city != "" {
+		q.Set("city", city)
+	}
+	return q
 }
 
 // Peer is a created WireGuard peer.
 type Peer struct {
 	Peer struct {
-		ID        string `json:"peer_id"`
+		ID     string `json:"peer_id"`
+		LineID string `json:"line_id"`
+		Line   struct {
+			Country *string `json:"country"`
+			City    *string `json:"city"`
+			ISP     *string `json:"isp"`
+		} `json:"line"`
 		IPv4      string `json:"ipv4"`
 		IPv6      string `json:"ipv6"`
 		HTTPSOnly bool   `json:"https_only"`
@@ -272,13 +312,24 @@ type Peer struct {
 
 // CreatePeer adds a WireGuard peer with publicKey (base64) on a line.
 func (c *Client) CreatePeer(ctx context.Context, lineID, name, publicKey string) (Peer, error) {
+	return c.createPeer(ctx, map[string]any{"line_id": lineID}, name, publicKey)
+}
+
+// CreatePeerIn adds a WireGuard peer with publicKey (base64) on a line the
+// API picks in country, and in city unless it is empty.
+func (c *Client) CreatePeerIn(ctx context.Context, country, city, name, publicKey string) (Peer, error) {
+	target := map[string]any{"country": country}
+	if city != "" {
+		target["city"] = city
+	}
+	return c.createPeer(ctx, target, name, publicKey)
+}
+
+func (c *Client) createPeer(ctx context.Context, target map[string]any, name, publicKey string) (Peer, error) {
+	body := map[string]any{"request_id": NewRequestID(), "name": name, "public_key": publicKey}
+	maps.Copy(body, target)
 	var p Peer
-	err := c.do(ctx, http.MethodPost, "/v1/wireguard/peers", true, map[string]any{
-		"request_id": NewRequestID(),
-		"line_id":    lineID,
-		"name":       name,
-		"public_key": publicKey,
-	}, http.StatusCreated, &p)
+	err := c.do(ctx, http.MethodPost, "/v1/wireguard/peers", true, body, http.StatusCreated, &p)
 	return p, err
 }
 

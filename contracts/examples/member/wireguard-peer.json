@@ -2,6 +2,11 @@
   "peer_id": "01a1c4af-89c1-7c5b-a49a-3d557fc869e7",
   "name": "iPhone",
   "line_id": "01a1c4af-8c3e-7d21-9b4a-6f0e2d9c1a57",
+  "line": {
+    "country": "DE",
+    "city": "Berlin",
+    "isp": "Deutsche Telekom AG"
+  },
   "failover": "city",
   "https_only": true,
   "exit_line": {

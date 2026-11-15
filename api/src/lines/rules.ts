@@ -9,12 +9,29 @@ import { MAX_USERS_PER_LINE } from "../pricing";
  * card, Connect account), or a session of each from the same app install.
  */
 export function ownerIsLinkedSql(member: string, owner: string): string {
+  // A placeholder is one member for the whole statement: SQLite builds their
+  // linked set once, which keeps a scan over many lines cheap. A column is a
+  // different member on each row: probing per row is about 4 times cheaper
+  // there than building a set per row. Both forms say the same.
+  if (/^\?\d+$/.test(member)) return `(${owner} IN (${linkedMembersSql(member)}))`;
   return `(${owner} = ${member}
     OR EXISTS (SELECT 1 FROM member_links ml
                 WHERE (ml.member_id = ${member} AND ml.linked_member_id = ${owner})
                    OR (ml.member_id = ${owner} AND ml.linked_member_id = ${member}))
     OR EXISTS (SELECT 1 FROM auth_sessions mine JOIN auth_sessions theirs ON theirs.install_id = mine.install_id
                 WHERE mine.member_id = ${member} AND theirs.member_id = ${owner} AND mine.install_id IS NOT NULL))`;
+}
+
+/**
+ * SQL query: the member `member` and every member linked to them, as
+ * ownerIsLinkedSql defines it. No row is NULL, so NOT IN works on it.
+ */
+function linkedMembersSql(member: string): string {
+  return `SELECT ${member}
+    UNION SELECT ml.linked_member_id FROM member_links ml WHERE ml.member_id = ${member}
+    UNION SELECT ml.member_id FROM member_links ml WHERE ml.linked_member_id = ${member}
+    UNION SELECT theirs.member_id FROM auth_sessions mine JOIN auth_sessions theirs ON theirs.install_id = mine.install_id
+           WHERE mine.member_id = ${member} AND mine.install_id IS NOT NULL`;
 }
 
 /**
@@ -33,9 +50,20 @@ export function linkedPairsSql(members: string): string {
 
 /**
  * SQL condition: the line `line` has room for the member `member`, who may
- * already use it. Both arguments are SQL expressions.
+ * already use it. Without `member`, room for a member who doesn't use it
+ * yet. The arguments are SQL expressions.
  */
-export function lineHasRoomSql(line: string, member: string): string {
-  return `((SELECT COUNT(DISTINCT u.member_id) FROM wireguard_peers u
-             WHERE u.line_id = ${line} AND u.deleted_at IS NULL AND u.member_id <> ${member}) < ${MAX_USERS_PER_LINE})`;
+export function lineHasRoomSql(line: string, member?: string): string {
+  return `(${lineUsersSql(line, member)} < ${MAX_USERS_PER_LINE})`;
+}
+
+/**
+ * SQL expression: how many members use the line `line` (have an active
+ * peer on it), not counting the member `member`. The arguments are SQL
+ * expressions.
+ */
+export function lineUsersSql(line: string, member?: string): string {
+  const others = member === undefined ? "" : ` AND u.member_id <> ${member}`;
+  return `(SELECT COUNT(DISTINCT u.member_id) FROM wireguard_peers u
+             WHERE u.line_id = ${line} AND u.deleted_at IS NULL${others})`;
 }

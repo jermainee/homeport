@@ -27,10 +27,11 @@
     // the gateway cannot read the SNI.
     "TOPUP_HOSTNAMES": "checkout.stripe.com,js.stripe.com,api.stripe.com,hooks.stripe.com,m.stripe.network,m.stripe.com,b.stripe.com,q.stripe.com,r.stripe.com,files.stripe.com"
   },
-  // Hourly: deletes raw usage and line events after 7 days, and expired
-  // idempotency records (src/prune.ts).
+  // Every minute: recounts the free lines in each region
+  // (src/lines/regions.ts). Hourly: deletes raw usage and line events after
+  // 7 days, and expired idempotency records (src/prune.ts).
   "triggers": {
-    "crons": ["17 * * * *"]
+    "crons": ["* * * * *", "17 * * * *"]
   },
   // Keeps `wrangler types` independent of a local .dev.vars file. Set them
   // with `wrangler secret put`, and locally in .dev.vars.

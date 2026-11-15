@@ -79,7 +79,7 @@ Every member has one account, one identity check and one credit balance. In this
 **Use flow**
 
 1. Sign up once and pass Stripe Identity (ID document + selfie). Neither mode turns on before verification succeeds.
-2. Pick country, then city, optionally ISP. Each line shows uptime, upload speed and IPv6 support.
+2. Pick a country, then optionally a city; each shows how many free lines it has. Homeport assigns the least-loaded free line there and shows its city and ISP. A member who wants one specific line can still name it. Later: filter by ISP, and show each line's uptime, upload speed and IPv6 support.
 3. Buy credits (100 GB for €40 net) or use earned credits, then get a WireGuard config per device (file or QR code) plus SOCKS5 credentials.
 4. Connect with the official WireGuard app, or load the config into a travel router (GL.iNet, OpenWrt) so every device behind it goes through home. Usage is metered on the gateway, so the router needs no Homeport software.
 5. Run the built-in Home Check: it shows exactly what websites see (IP, ISP, DNS resolver, IPv6, WebRTC, timezone mismatch).
@@ -180,6 +180,15 @@ Both the buyer and the seller agent connect out to the gateway, so the seller's 
 - **Regions:** one gateway cluster per seller region, Frankfurt first. If a gateway fails, the agent reconnects to another in the same region within seconds, and the buyer keeps the same exit IP.
 - **Control plane outage:** running sessions continue until their current quota lease is used up; only new sessions wait.
 - **Agent authentication:** a key pair is created at enrollment and used for mutual TLS on the QUIC connection; the agent reports line status, public IP and speed through the gateway.
+
+### Line selection at scale
+
+With hundreds of thousands of lines, nobody should page through all of them, and no request should read all of them.
+
+- **Built now:** a member picks a region, not a line. The API lists the countries with free lines, and a country's cities, with how many each has. A free line is online, has room for the member, and is not theirs or a linked member's. When the member adds a device, the API assigns the least-loaded free line in that region; a member can still name one line. Counting every line takes about a second at 300,000 lines, so a cron recounts the regions every minute, and each request corrects the counts for its member. Today there is one gateway, and a new line joins the gateway that announced itself last.
+- **Regional gateways (later):** one gateway cluster per region, a country or a group of small countries. A new line joins the gateway serving its country, taken from the line's location, instead of the newest gateway. A device's config names its line's gateway, and failover only uses lines on that gateway, so a region with its own gateway fails over within the region without a new config. A line that moves to another country (the line test notices) moves to that country's gateway; its users then need new configs, unless gateways forward to each other.
+- **Delta config sync (later):** today each gateway fetches its full config, every peer and line it serves, every 30 seconds. An unchanged config costs only a 304, but any change resends everything. Instead, the API keeps a change sequence per gateway. A gateway sends the last sequence number it applied and gets only the peers and lines added, changed or removed since. It fetches a full snapshot on start, or when it has fallen too far behind. A nudge from the API, or a long poll, applies a new device within seconds instead of at the next poll.
+- **Region counts (later):** with regional gateways, the minute recount runs per region. It can also become incremental, updated from line events and peer changes.
 
 ## Data plane and connection fidelity
 

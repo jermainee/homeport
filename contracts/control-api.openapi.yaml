@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Homeport control API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     The contract between the Homeport control API (`api/`), the edge gateway
     (`gateway/`) and the apps. Both sides build against this file.
@@ -777,23 +777,114 @@ paths:
     get:
       tags: [use]
       operationId: listAvailableLines
-      summary: Lines the member can use
+      summary: Lines the member can use, one page at a time
       description: |
-        Lines that are sharing, minus the member's own lines and lines linked
-        to them by household, device, card or Connect account.
+        Lines that are sharing and have room for the member, minus the
+        member's own lines and lines linked to them by household, device,
+        card or Connect account. Offline lines are listed too, with
+        `online: false`.
+
+        For members who want one specific line. Most let the API pick one:
+        GET /v1/lines/regions, then POST /v1/wireguard/peers with a
+        `country`. Lines are ordered by `line_id`; pass `next_cursor` as
+        `cursor` for the next page. Without `country` the list spans every
+        country; that form is deprecated, and a later version requires
+        `country`.
       security:
         - memberSession: []
+      parameters:
+        - name: country
+          in: query
+          required: false
+          description: Only lines in this country.
+          schema:
+            $ref: "#/components/schemas/CountryCode"
+        - name: city
+          in: query
+          required: false
+          description: Only lines in this city of `country`.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: limit
+          in: query
+          required: false
+          description: Lines per page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: string
+            minLength: 1
       responses:
         "200":
-          description: Available lines.
+          description: One page of available lines.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AvailableLines"
               examples:
                 lines:
-                  summary: One line in Berlin
+                  summary: One line in Berlin, and no more pages
                   externalValue: examples/member/lines-available.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/IdentityRequired"
+  /v1/lines/regions:
+    get:
+      tags: [use]
+      operationId: listLineRegions
+      summary: Where the member can get a line
+      description: |
+        The countries that have free lines for the member, with how many.
+        With `country`, that country alone, and its cities. A line counts
+        when it is sharing, online, has room for the member, and is not the
+        member's own or linked to them by household, device, card or
+        Connect account. A line whose city is not known counts for its
+        country only.
+
+        The counts are at most about a minute old, so a line that just came
+        online or filled up may be counted wrongly for that long. The
+        member's own and linked lines, and full lines the member already
+        uses, are accounted for at once.
+
+        Countries are ordered by code. Cities are ordered by most lines
+        first, then by name.
+      security:
+        - memberSession: []
+      parameters:
+        - name: country
+          in: query
+          required: false
+          description: Only this country, with its cities.
+          schema:
+            $ref: "#/components/schemas/CountryCode"
+      responses:
+        "200":
+          description: Regions with free lines. Empty when there are none.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineRegions"
+              examples:
+                countries:
+                  summary: Every country with free lines
+                  externalValue: examples/member/line-regions.json
+                cities:
+                  summary: Germany and its cities
+                  externalValue: examples/member/line-regions-country.json
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -809,6 +900,11 @@ paths:
         complete `.conf` file except for the private key: the client replaces
         the placeholder `{{PRIVATE_KEY}}` with its key before it saves the
         file or shows the QR code.
+
+        The request names a region, `country` and optionally `city`, and the
+        API picks the line: an online line there with room for the member,
+        never their own or a linked member's, with the fewest other members
+        on it. A request with `line_id` asks for that line instead.
       security:
         - memberSession: []
       requestBody:
@@ -819,7 +915,10 @@ paths:
               $ref: "#/components/schemas/WireguardPeerCreate"
             examples:
               phone:
-                summary: Config for a phone
+                summary: Config for a phone, on a line in Berlin
+                externalValue: examples/member/wireguard-peer-request-region.json
+              line:
+                summary: Config for a phone, on one specific line
                 externalValue: examples/member/wireguard-peer-request.json
         x-max-body-bytes: 16384
       responses:
@@ -854,8 +953,9 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: |
-            `idempotency_conflict`, `line_full`, or `public_key_taken`: the
-            key belongs to another peer.
+            `idempotency_conflict`; `line_full`; `no_free_line`: the region
+            has no free line now; or `public_key_taken`: the key belongs to
+            another peer.
           content:
             application/json:
               schema:
@@ -864,7 +964,7 @@ paths:
                   - type: object
                     properties:
                       error:
-                        enum: [idempotency_conflict, line_full, public_key_taken]
+                        enum: [idempotency_conflict, line_full, no_free_line, public_key_taken]
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "429":
@@ -1797,12 +1897,15 @@ components:
     AvailableLines:
       type: object
       additionalProperties: false
-      required: [lines]
+      required: [lines, next_cursor]
       properties:
         lines:
           type: array
           items:
             $ref: "#/components/schemas/AvailableLine"
+        next_cursor:
+          description: Pass as `cursor` for the next page. Null on the last page.
+          type: [string, "null"]
     AvailableLine:
       type: object
       additionalProperties: false
@@ -1823,32 +1926,106 @@ components:
           type: boolean
         online:
           type: boolean
+    CountryCode:
+      description: ISO 3166-1 alpha-2 code.
+      type: string
+      pattern: "^[A-Z]{2}$"
+    LineRegions:
+      type: object
+      additionalProperties: false
+      required: [countries]
+      properties:
+        countries:
+          type: array
+          items:
+            $ref: "#/components/schemas/CountryRegion"
+    CountryRegion:
+      type: object
+      additionalProperties: false
+      required: [country, lines]
+      properties:
+        country:
+          $ref: "#/components/schemas/CountryCode"
+        lines:
+          description: Free lines in the country, those in unknown cities included.
+          type: integer
+          minimum: 1
+        cities:
+          description: Only when the request names the country.
+          type: array
+          items:
+            $ref: "#/components/schemas/CityRegion"
+    CityRegion:
+      type: object
+      additionalProperties: false
+      required: [city, lines]
+      properties:
+        city:
+          type: string
+          minLength: 1
+        lines:
+          description: Free lines in the city.
+          type: integer
+          minimum: 1
     WireguardPeerCreate:
+      description: Names either a region (WireguardPeerInRegion) or one line (WireguardPeerOnLine).
+      oneOf:
+        - $ref: "#/components/schemas/WireguardPeerInRegion"
+        - $ref: "#/components/schemas/WireguardPeerOnLine"
+    WireguardPeerInRegion:
+      type: object
+      additionalProperties: false
+      required: [request_id, country, name, public_key]
+      properties:
+        https_only:
+          $ref: "#/components/schemas/HttpsOnly"
+          default: true
+        request_id:
+          $ref: "#/components/schemas/UuidV7"
+        country:
+          description: The API picks a free line in this country.
+          $ref: "#/components/schemas/CountryCode"
+        city:
+          description: Only a line in this city of `country`, as GET /v1/lines/regions names it.
+          type: string
+          minLength: 1
+          maxLength: 200
+        name:
+          $ref: "#/components/schemas/PeerName"
+        public_key:
+          description: The device's WireGuard public key.
+          $ref: "#/components/schemas/Key32"
+    WireguardPeerOnLine:
       type: object
       additionalProperties: false
       required: [request_id, line_id, name, public_key]
       properties:
         https_only:
-          description: |
-            HTTPS only: the gateway admits a TCP flow from this device only
-            if it opens with a TLS ClientHello, with any server name or none,
-            so the line's owner and their ISP can neither read nor change it.
-            Plain HTTP, SSH, STARTTLS and other unencrypted TCP is refused.
-            DNS through the virtual resolver, over UDP or TCP, and other UDP,
-            such as QUIC, are not affected.
-          type: boolean
+          $ref: "#/components/schemas/HttpsOnly"
           default: true
         request_id:
           $ref: "#/components/schemas/UuidV7"
         line_id:
+          description: This line, instead of one the API picks.
           $ref: "#/components/schemas/Id"
         name:
-          type: string
-          minLength: 1
-          maxLength: 64
+          $ref: "#/components/schemas/PeerName"
         public_key:
           description: The device's WireGuard public key.
           $ref: "#/components/schemas/Key32"
+    HttpsOnly:
+      description: |
+        HTTPS only: the gateway admits a TCP flow from this device only
+        if it opens with a TLS ClientHello, with any server name or none,
+        so the line's owner and their ISP can neither read nor change it.
+        Plain HTTP, SSH, STARTTLS and other unencrypted TCP is refused.
+        DNS through the virtual resolver, over UDP or TCP, and other UDP,
+        such as QUIC, are not affected.
+      type: boolean
+    PeerName:
+      type: string
+      minLength: 1
+      maxLength: 64
     WireguardPeerCreated:
       type: object
       additionalProperties: false
@@ -1871,15 +2048,17 @@ components:
     WireguardPeer:
       type: object
       additionalProperties: false
-      required: [peer_id, name, line_id, failover, https_only, exit_line, public_key, ipv4, ipv6, created_at]
+      required: [peer_id, name, line_id, line, failover, https_only, exit_line, public_key, ipv4, ipv6, created_at]
       properties:
         peer_id:
           $ref: "#/components/schemas/Id"
         name:
           type: string
         line_id:
-          description: The line the member chose. The peer exits through it whenever it is online.
+          description: The peer's line, chosen by the member or picked by the API. The peer exits through it whenever it is online.
           $ref: "#/components/schemas/Id"
+        line:
+          $ref: "#/components/schemas/LinePlace"
         failover:
           $ref: "#/components/schemas/Failover"
         https_only:
@@ -1910,6 +2089,20 @@ components:
           format: ipv6
         created_at:
           $ref: "#/components/schemas/Timestamp"
+    LinePlace:
+      description: Where `line_id` is, as members know it.
+      type: object
+      additionalProperties: false
+      required: [country, city, isp]
+      properties:
+        country:
+          description: ISO 3166-1 alpha-2 code, or null when the line's country is unknown.
+          type: [string, "null"]
+          pattern: "^[A-Z]{2}$"
+        city:
+          type: [string, "null"]
+        isp:
+          type: [string, "null"]
     ExitLine:
       type: object
       additionalProperties: false

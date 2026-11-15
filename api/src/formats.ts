@@ -6,6 +6,16 @@ export const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 /** UuidV7: created by the sender; its timestamp orders and expires it. */
 export const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/** CountryCode: an ISO 3166-1 alpha-2 code. */
+export const COUNTRY = /^[A-Z]{2}$/;
+
+/** A city as requests name it: 1 to 200 characters, counted in code points as the contract's maxLength does. */
+export function isCity(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const characters = Array.from(value).length;
+  return characters >= 1 && characters <= 200;
+}
+
 /** Sha256Hex: 64 lowercase hex characters. */
 export const SHA256_HEX = /^[0-9a-f]{64}$/;
 

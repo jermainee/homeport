@@ -1,13 +1,13 @@
 import { Hono } from "hono";
 import { requireSession, type SessionVariables } from "../auth/middleware";
 import { apiError, hasOnlyFields, invalidRequest, readJsonObject } from "../http";
-import { timestamp } from "../formats";
+import { COUNTRY, isCity, timestamp } from "../formats";
 import { type IdempotentVariables, verifiedMemberIdempotent } from "../idempotency";
 import { requireVerifiedMember } from "../identity/require-verified";
 import { servedLineSql } from "../gateway/served";
 import { KEY32, isName } from "../keys";
-import { lineHasRoomSql, ownerIsLinkedSql } from "../lines/rules";
-import { MAX_PEERS_PER_MEMBER } from "../pricing";
+import { lineHasRoomSql, lineUsersSql, ownerIsLinkedSql } from "../lines/rules";
+import { MAX_PEERS_PER_MEMBER, MAX_USERS_PER_LINE } from "../pricing";
 import { FIRST_PEER_HOST, LAST_PEER_HOST, tunnelIpv4, tunnelIpv6, wireguardConfig } from "./config";
 import { CURRENT_SESSION_WINDOW_MS, type Failover, isFailover } from "./failover";
 
@@ -29,6 +29,9 @@ interface PeerRow {
   public_key: string;
   address_index: number;
   created_at: number;
+  line_country: string | null;
+  line_city: string | null;
+  line_isp: string | null;
   exit_line_id?: string | null;
   exit_country?: string | null;
   exit_city?: string | null;
@@ -43,9 +46,10 @@ const PEER_COLUMNS = `p.id, p.name, p.line_id, p.failover, p.https_only, p.publi
  * CURRENT_SESSION_WINDOW_MS. The first placeholder (?1) is the window's start.
  */
 function peersWithExitSql(where: string): string {
-  return `SELECT ${PEER_COLUMNS}, s.line_id AS exit_line_id, x.country AS exit_country, x.city AS exit_city,
-                 s.started_at AS exit_since
+  return `SELECT ${PEER_COLUMNS}, pl.country AS line_country, pl.city AS line_city, pl.isp AS line_isp,
+                 s.line_id AS exit_line_id, x.country AS exit_country, x.city AS exit_city, s.started_at AS exit_since
             FROM wireguard_peers p
+            JOIN lines pl ON pl.id = p.line_id
             LEFT JOIN usage_sessions s ON s.session_id = (
                    SELECT o.session_id FROM usage_sessions o
                     WHERE o.peer_id = p.id AND o.ended = 0 AND o.updated_at >= ?1
@@ -85,6 +89,7 @@ function peerBody(peer: PeerRow) {
     peer_id: peer.id,
     name: peer.name,
     line_id: peer.line_id,
+    line: { country: peer.line_country, city: peer.line_city, isp: peer.line_isp },
     failover: peer.failover,
     https_only: peer.https_only === 1,
     exit_line:
@@ -103,11 +108,50 @@ function peerBody(peer: PeerRow) {
   };
 }
 
+/** Where a new peer goes: one line, or a line the API picks in a region. */
+type PeerTarget = { lineId: string } | { country: string; city: string | null };
+
+/** The target a create request names, or why it is invalid. */
+function peerTarget(body: Record<string, unknown>): PeerTarget | string {
+  const { line_id: lineId, country, city } = body;
+  if (lineId !== undefined) {
+    if (country !== undefined || city !== undefined) return "send line_id, or country and city, not both";
+    return typeof lineId === "string" ? { lineId } : "line_id must be an id";
+  }
+  if (country === undefined) return "country or line_id is required";
+  if (typeof country !== "string" || !COUNTRY.test(country)) return "country must be an ISO 3166-1 alpha-2 code";
+  if (city === undefined) return { country, city: null };
+  if (!isCity(city)) return "city must have 1 to 200 characters";
+  return { country, city };
+}
+
+/**
+ * SQL query of the one line a new peer of the member ?2 goes on, as column
+ * `id`. For one line, the line ?3 if it has room for the member. For a
+ * region, the API picks a line in the country ?7, and in the city ?8 when
+ * the target names one: served, online, not the member's own or linked to
+ * them, with room for the member, and with the fewest other members on it.
+ */
+function newPeerLineSql(target: PeerTarget): string {
+  if ("lineId" in target) return `SELECT ?3 AS id WHERE ${lineHasRoomSql("?3", "?2")}`;
+  return `SELECT id FROM (
+             SELECT l.id, ${lineUsersSql("l.id", "?2")} AS others
+               FROM lines l JOIN members o ON o.id = l.member_id
+              WHERE ${servedLineSql("l", "o")} AND l.online = 1 AND l.country = ?7${target.city === null ? "" : " AND l.city = ?8"}
+                AND NOT ${ownerIsLinkedSql("?2", "l.member_id")})
+           WHERE others < ${MAX_USERS_PER_LINE}
+           ORDER BY others, id
+           LIMIT 1`;
+}
+
 wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
   const body = c.get("body");
-  if (!hasOnlyFields(body, ["request_id", "line_id", "name", "public_key", "https_only"])) return invalidRequest(c, "unknown field");
-  const { line_id: lineId, name, public_key: publicKey, https_only: httpsOnly = true } = body;
-  if (typeof lineId !== "string") return invalidRequest(c, "line_id is required");
+  if (!hasOnlyFields(body, ["request_id", "line_id", "country", "city", "name", "public_key", "https_only"])) {
+    return invalidRequest(c, "unknown field");
+  }
+  const target = peerTarget(body);
+  if (typeof target === "string") return invalidRequest(c, target);
+  const { name, public_key: publicKey, https_only: httpsOnly = true } = body;
   if (typeof httpsOnly !== "boolean") return invalidRequest(c, "https_only must be true or false");
   if (!isName(name)) return invalidRequest(c, "name must have 1 to 64 characters");
   if (typeof publicKey !== "string" || !KEY32.test(publicKey)) {
@@ -116,63 +160,88 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
 
   const db = c.env.DB;
   const memberId = c.get("member").id;
-  const line = await usableLine(db, lineId, memberId);
-  if (!line) return apiError(c, 404, "not_found");
-  // No self-dealing: never the member's own line, or a linked member's.
-  if (line.linked) return apiError(c, 403, "line_not_allowed");
+  if ("lineId" in target) {
+    const line = await usableLine(db, target.lineId, memberId);
+    if (!line) return apiError(c, 404, "not_found");
+    // No self-dealing: never the member's own line, or a linked member's.
+    if (line.linked) return apiError(c, 403, "line_not_allowed");
+  }
 
-  // One statement takes the lowest free address and checks the line's room
-  // and the member's peer cap. D1 runs it atomically, so concurrent requests
-  // never share an address or overfill a line.
-  let peer: PeerRow | null;
+  // One statement picks or checks the line, takes the lowest free address
+  // and checks the member's peer cap. D1 runs it atomically, so concurrent
+  // requests never share an address or overfill a line.
+  let created: { id: string } | null;
   try {
-    peer = await db
-      .prepare(
-        `INSERT INTO wireguard_peers (id, member_id, line_id, name, public_key, address_index, created_at, https_only)
-         SELECT ?1, ?2, ?3, ?4, ?5, free.host, ?6, ?7
-           FROM (SELECT CASE
-                   WHEN NOT EXISTS (SELECT 1 FROM wireguard_peers WHERE deleted_at IS NULL AND address_index = ${FIRST_PEER_HOST})
-                     THEN ${FIRST_PEER_HOST}
-                   ELSE (SELECT MIN(p.address_index) + 1 FROM wireguard_peers p
-                          WHERE p.deleted_at IS NULL
-                            AND NOT EXISTS (SELECT 1 FROM wireguard_peers q
-                                             WHERE q.deleted_at IS NULL AND q.address_index = p.address_index + 1))
-                 END AS host) AS free
-          WHERE free.host <= ${LAST_PEER_HOST} AND ${lineHasRoomSql("?3", "?2")}
-            AND (SELECT COUNT(*) FROM wireguard_peers mine
-                  WHERE mine.member_id = ?2 AND mine.deleted_at IS NULL) < ${MAX_PEERS_PER_MEMBER}
-         RETURNING id, name, line_id, failover, https_only, public_key, address_index, created_at`,
+    const statement = db.prepare(
+      `INSERT INTO wireguard_peers (id, member_id, line_id, name, public_key, address_index, created_at, https_only)
+       SELECT ?1, ?2, line.id, ?4, ?5, free.host, ?6, ?9
+         FROM (${newPeerLineSql(target)}) AS line,
+              (SELECT CASE
+                 WHEN NOT EXISTS (SELECT 1 FROM wireguard_peers WHERE deleted_at IS NULL AND address_index = ${FIRST_PEER_HOST})
+                   THEN ${FIRST_PEER_HOST}
+                 ELSE (SELECT MIN(p.address_index) + 1 FROM wireguard_peers p
+                        WHERE p.deleted_at IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM wireguard_peers q
+                                           WHERE q.deleted_at IS NULL AND q.address_index = p.address_index + 1))
+               END AS host) AS free
+        WHERE free.host <= ${LAST_PEER_HOST}
+          AND (SELECT COUNT(*) FROM wireguard_peers mine
+                WHERE mine.member_id = ?2 AND mine.deleted_at IS NULL) < ${MAX_PEERS_PER_MEMBER}
+       RETURNING id`,
+    );
+    // ?3 is the one line asked for; ?7 and ?8 the region; ?9 https_only.
+    const region = "lineId" in target ? null : target;
+    created = await statement
+      .bind(
+        crypto.randomUUID(),
+        memberId,
+        "lineId" in target ? target.lineId : null,
+        name,
+        publicKey,
+        Date.now(),
+        region?.country ?? null,
+        region?.city ?? null,
+        httpsOnly ? 1 : 0,
       )
-      .bind(crypto.randomUUID(), memberId, lineId, name, publicKey, Date.now(), httpsOnly ? 1 : 0)
-      .first<PeerRow>();
+      .first<{ id: string }>();
   } catch (error) {
     if (error instanceof Error && error.message.includes("wireguard_peers.public_key")) {
       return apiError(c, 409, "public_key_taken");
     }
     throw error;
   }
-  if (!peer) {
-    const limits = await db
+  if (!created) {
+    const counts = await db
       .prepare(
-        `SELECT ${lineHasRoomSql("?1", "?2")} AS room,
-                (SELECT COUNT(*) FROM wireguard_peers WHERE member_id = ?2 AND deleted_at IS NULL) AS peers`,
+        `SELECT (SELECT COUNT(*) FROM wireguard_peers WHERE member_id = ? AND deleted_at IS NULL) AS mine,
+                (SELECT COUNT(*) FROM wireguard_peers WHERE deleted_at IS NULL) AS everyone`,
       )
-      .bind(lineId, memberId)
-      .first<{ room: number; peers: number }>();
-    if (!limits?.room) return apiError(c, 409, "line_full");
-    if (limits.peers >= MAX_PEERS_PER_MEMBER) {
+      .bind(memberId)
+      .first<{ mine: number; everyone: number }>();
+    if ((counts?.mine ?? 0) >= MAX_PEERS_PER_MEMBER) {
       return apiError(c, 429, "rate_limited", `at most ${MAX_PEERS_PER_MEMBER} peers; delete one first`);
     }
-    throw new Error("no free tunnel address");
+    if ((counts?.everyone ?? 0) > LAST_PEER_HOST - FIRST_PEER_HOST) throw new Error("no free tunnel address");
+    if (!("lineId" in target)) return apiError(c, 409, "no_free_line", "no free line there right now");
+    return apiError(c, 409, "line_full");
   }
 
+  const [peerResult, gatewayResult] = await db.batch([
+    db.prepare(peersWithExitSql("p.id = ?2")).bind(Date.now() - CURRENT_SESSION_WINDOW_MS, created.id),
+    db
+      .prepare(
+        `SELECT g.wg_public_key, g.wg_endpoint FROM wireguard_peers p
+           JOIN lines l ON l.id = p.line_id JOIN gateways g ON g.id = l.gateway_id WHERE p.id = ?`,
+      )
+      .bind(created.id),
+  ]);
+  const peer = peerResult?.results[0] as PeerRow | undefined;
+  const gateway = gatewayResult?.results[0] as { wg_public_key: string; wg_endpoint: string } | undefined;
+  if (!peer || !gateway) throw new Error("peer missing after insert");
   return c.json(
     {
       peer: peerBody(peer),
-      config_text: wireguardConfig(
-        { host: peer.address_index },
-        { publicKey: line.wg_public_key, endpoint: line.wg_endpoint },
-      ),
+      config_text: wireguardConfig({ host: peer.address_index }, { publicKey: gateway.wg_public_key, endpoint: gateway.wg_endpoint }),
     },
     201,
   );

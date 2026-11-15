@@ -108,7 +108,7 @@ CI runs it in the `smoke` job of `e2e-ci.yml` on Ubuntu, with `go vet` for the `
 Both are for local runs against `wrangler dev`, and both build without the `e2e` tag.
 
 - **`cmd/wgcurl`** fetches a URL through a WireGuard tunnel in userspace (wireguard-go's netstack), so it needs no root and changes no routes; it can run on the sharing Mac itself. It reads a wg-quick `.conf` with the private key filled in, resolves names through the tunnel's DNS (the agent's resolver), writes the body to stdout or `-o`, and reports the status, the body's SHA-256 and the inner bytes the tunnel carried. The gateway's meter for the peer must match those bytes.
-- **`cmd/member`** does what the app's Use mode will do (P17): `signin EMAIL [-dev]`, `me`, `identity` (Stripe Identity page), `checkout` (Stripe Checkout page), `lines`, `peer LINE_ID` (creates the key pair locally and prints the `.conf` with the private key), and `share KEY_FILE` (registers the agent CLI's key, creates the line, turns sharing on and prints the agent's `HOMEPORT_GATEWAY` and `HOMEPORT_GATEWAY_PIN`). `verify` and `credits N` use the dev routes. Its session file has the app's `session.json` format, so `-session <profile>/session.json` acts as a desktop-app profile's member. `signin` never replaces an existing session file, so it cannot sign a profile out; the file it writes is readable by the user only.
+- **`cmd/member`** does what the app's Use mode will do (P17): `signin EMAIL [-dev]`, `me`, `identity` (Stripe Identity page), `checkout` (Stripe Checkout page), `regions [COUNTRY]` (countries with free lines, or a country's cities), `lines COUNTRY [CITY]`, `peer COUNTRY [CITY]` or `peer LINE_ID` (creates the key pair locally, lets the API pick a line in the region or uses the given line, and prints the `.conf` with the private key), and `share KEY_FILE` (registers the agent CLI's key, creates the line, turns sharing on and prints the agent's `HOMEPORT_GATEWAY` and `HOMEPORT_GATEWAY_PIN`). `verify` and `credits N` use the dev routes. Its session file has the app's `session.json` format, so `-session <profile>/session.json` acts as a desktop-app profile's member. `signin` never replaces an existing session file, so it cannot sign a profile out; the file it writes is readable by the user only.
 
 `internal/memberapi` is the client both the tools and the smoke test use. The smoke test runs `wgcurl`; `cmd/member` has its own tests against a stub API.
 
@@ -211,11 +211,12 @@ member() { go run ./cmd/member -session ../.dev-state/profile-b/session.json "$@
 member identity   # or: member verify, through the dev route
 member checkout
 member me
-member lines
-member peer <A's line_id> > ../.dev-state/b.conf
+member regions             # countries with free lines; member regions DE for a country's cities
+member lines DE            # the lines themselves, one page
+member peer DE Berlin > ../.dev-state/b.conf   # or: member peer <A's line_id>
 ```
 
-Only lines with a known country are listed, in the app and in `member lines`. `wrangler dev` takes the country from Cloudflare's view of the request, so offline there is none. `member peer` still works offline, with the line id from the gateway's log or the database.
+Only lines with a known country are counted, listed or picked, in the app and in `member regions`, `member lines` and `member peer COUNTRY`. `wrangler dev` takes the country from Cloudflare's view of the request, so offline there is none. `member peer <line_id>` still works offline, with the line id from the gateway's log or the database. The region counts are recounted every minute in production; under `wrangler dev`, which runs no cron, a request recounts them once they are 2 minutes old.
 
 ### 5. Traffic
 
@@ -243,7 +244,7 @@ B's `purchased` dropped by ⌊bytes × 10 / 10^6⌋ over all of B's sessions on 
 
 ### 7. Negative checks
 
-- **No self-dealing:** turn Share on in profile B. `member lines` does not list B's own line, and `member peer <B's line_id>` answers `403 line_not_allowed`.
+- **No self-dealing:** turn Share on in profile B. `member regions` and `member lines` leave out B's own line, and `member peer <B's line_id>` answers `403 line_not_allowed`.
 - **A stops sharing:** quit profile A's app or turn Share off. B's flows stop, and `wgcurl` fails until A shares again.
 - **No credits:** sign in a third member, verify them and create a peer on A's line without buying credits. `wgcurl https://example.com/` fails, while `wgcurl https://checkout.stripe.com/` still answers, because Stripe Checkout is a top-up host. After 5 minutes of grace the gateway closes the session.
 
