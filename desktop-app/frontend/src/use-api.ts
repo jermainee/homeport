@@ -26,4 +26,5 @@ export const wailsUse: UseApi = {
   // An empty argument keeps what the device has.
   updateDevice: async (peerId, change) =>
     device(await UseService.UpdateDevice(peerId, change.country ?? "", change.city ?? "", change.failover ?? "")),
+  setHttpsOnly: async (peerId, on) => device(await UseService.SetHTTPSOnly(peerId, on)),
 };

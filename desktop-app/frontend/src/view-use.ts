@@ -8,6 +8,7 @@ import { countryName, esc, formatAbout, useErrorText, whole } from "./text";
 import {
   backupLine,
   FAILOVERS,
+  httpsOnlyOf,
   type AddStep,
   type Checkout,
   type City,
@@ -241,7 +242,28 @@ function deviceRow(d: Device, v: Ready): string {
           aria-label="Remove ${esc(d.name)}">Remove</button>
       </div>
       ${backupNotice(d)}
+      ${httpsOnlySetting(d, v)}
     </li>`;
+}
+
+// HTTPS only, per device: what it blocks while on, and what the line's
+// owner can do to the device's traffic while off.
+function httpsOnlySetting(d: Device, v: Ready): string {
+  const { on, busy, error } = httpsOnlyOf(v, d);
+  const note = on
+    ? "Plain HTTP, SSH and mail apps that start unencrypted won't work. Turning this off lets the line's owner read and change that traffic."
+    : "Unencrypted traffic works, and the line's owner can read and change it.";
+  const id = `https-${esc(d.peerId)}`;
+  return `
+      <div class="device-https">
+        <div class="setting-text">
+          <span class="setting-label" aria-hidden="true">HTTPS only</span>
+          <p id="${id}">${note}</p>
+        </div>
+        <button class="switch" type="button" role="switch" data-action="use-https-only" data-peer="${esc(d.peerId)}"
+          aria-checked="${on}" aria-label="HTTPS only for ${esc(d.name)}" aria-describedby="${id}" ${busyAttrs(busy)}><span class="knob"></span></button>
+        ${alert(error)}
+      </div>`;
 }
 
 // While its own line is offline, the gateway runs a device on another

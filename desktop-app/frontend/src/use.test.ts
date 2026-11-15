@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, Use, type UseView } from "./use";
+import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, httpsOnlyOf, Use, type UseView } from "./use";
 import { serviceError } from "./test/fake-auth";
 import { FakeUse, balance, berlin, france, germany, laptop, lyon, munich, newDevice, portugal } from "./test/fake-use";
 
@@ -871,5 +871,103 @@ describe("removing a device", () => {
 
     expect(ready().removing).toEqual({ peerId: laptop.peerId, busy: false, error: "offline" });
     expect(ready().devices).toEqual([laptop]);
+  });
+});
+
+describe("HTTPS only", () => {
+  it("turns off for one device, and on again", async () => {
+    await open();
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false });
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(api.httpsOnly).toEqual([[laptop.peerId, false]]);
+    expect(ready().devices).toEqual([{ ...laptop, httpsOnly: false }]);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(api.httpsOnly).toEqual([
+      [laptop.peerId, false],
+      [laptop.peerId, true],
+    ]);
+    expect(ready().devices).toEqual([laptop]);
+  });
+
+  it("shows the position asked for while it turns, and ignores a second press", async () => {
+    await open();
+    api.hold();
+
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    void use.toggleHttpsOnly(laptop.peerId);
+    api.release();
+    await turning;
+
+    expect(api.httpsOnly).toEqual([[laptop.peerId, false]]);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+  });
+
+  it("says why it didn't turn, and goes back to where the device is", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("offline");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false, error: "offline" });
+    expect(ready().devices).toEqual([laptop]);
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+  });
+
+  it("drops a device that was removed meanwhile", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("device_gone");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(ready().devices).toEqual([]);
+    expect(ready().httpsOnly?.[laptop.peerId]).toBeUndefined();
+  });
+
+  it("goes to sign-in when the session ended", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("signed_out");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(use.view).toEqual({ kind: "signedOut" });
+  });
+
+  it("keeps a turn that finished while a refresh was on its way", async () => {
+    await open();
+    let answer!: (d: typeof laptop[]) => void;
+    api.devices = () => new Promise((r) => (answer = r));
+    const refreshing = use.refresh();
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    answer([laptop]); // the list from before the turn
+    await refreshing;
+
+    expect(ready().devices).toEqual([{ ...laptop, httpsOnly: false }]);
+  });
+
+  it("turns two devices at once", async () => {
+    const phone = { ...laptop, peerId: "peer-phone", name: "iPhone", httpsOnly: false };
+    api.devicesAnswer = [laptop, phone];
+    await open();
+    api.hold();
+
+    const first = use.toggleHttpsOnly(laptop.peerId);
+    const second = use.toggleHttpsOnly(phone.peerId);
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    expect(httpsOnlyOf(ready(), phone)).toEqual({ on: true, busy: true });
+    api.release();
+    await Promise.all([first, second]);
+
+    expect(ready().devices).toEqual([
+      { ...laptop, httpsOnly: false },
+      { ...phone, httpsOnly: true },
+    ]);
+    expect(ready().httpsOnly).toEqual({});
   });
 });

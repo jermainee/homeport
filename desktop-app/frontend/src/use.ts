@@ -68,6 +68,11 @@ export interface Device {
   city: string;
   isp: string;
   failover: Failover;
+  /**
+   * HTTPS only: the gateway lets through only the device's TCP that opens
+   * with TLS. On for every device until the member turns it off.
+   */
+  httpsOnly: boolean;
   /** The line its session exits through; null without a session. */
   exitLine: ExitLine | null;
   ipv4: string;
@@ -118,6 +123,8 @@ export interface UseApi {
   removeDevice(peerId: string): Promise<void>;
   /** updateDevice moves a device to another line in a region, or changes its failover. */
   updateDevice(peerId: string, change: DeviceChange): Promise<Device>;
+  /** setHttpsOnly turns HTTPS only on or off for one device. */
+  setHttpsOnly(peerId: string, on: boolean): Promise<Device>;
 }
 
 export type Checkout =
@@ -181,6 +188,23 @@ export interface Ready {
   step: Step;
   /** A device the member is removing: asked to confirm, or on its way. */
   removing?: { peerId: string; busy: boolean; error?: ErrorCode };
+  /**
+   * HTTPS only on its way to on or off, by device: the position asked for
+   * while busy, else why the last try failed.
+   */
+  httpsOnly?: Readonly<Record<string, HttpsOnlyTurn>>;
+}
+
+export type HttpsOnlyTurn = { busy: true; on: boolean } | { busy: false; error: ErrorCode };
+
+/**
+ * httpsOnlyOf is what a device's HTTPS only switch shows: the position
+ * asked for while it turns, else the device's own.
+ */
+export function httpsOnlyOf(v: Ready, d: Device): { on: boolean; busy: boolean; error?: ErrorCode } {
+  const t = v.httpsOnly?.[d.peerId];
+  if (t?.busy) return { on: t.on, busy: true };
+  return t ? { on: d.httpsOnly, busy: false, error: t.error } : { on: d.httpsOnly, busy: false };
 }
 
 export type UseView =
@@ -214,6 +238,12 @@ const moving = (step: AddStep | EditStep | undefined) => (step?.kind === "edit" 
 
 /** Whether a step is sending what the member picked, so the pick is fixed. */
 const busy = (step: AddStep | EditStep) => (step.kind === "add" ? step.creating : step.saving);
+
+// without returns turns without the one for peerId.
+function without(turns: Ready["httpsOnly"], peerId: string): Ready["httpsOnly"] {
+  const { [peerId]: _, ...rest } = turns ?? {};
+  return rest;
+}
 
 export class Use {
   #view: UseView = { kind: "loading" };
@@ -749,6 +779,43 @@ export class Use {
     this.#set({ ...v, step: { ...v.step, saving: false, error: code } });
     // The region has no other free line: show where lines are free now.
     if (code === "no_free_line") await this.#loadRegions(undefined, false, code);
+  }
+
+  /** toggleHttpsOnly turns HTTPS only off for one device, or on again. */
+  async toggleHttpsOnly(peerId: string): Promise<void> {
+    const v = this.#ready();
+    const d = v?.devices.find((d) => d.peerId === peerId);
+    if (!v || !d || v.httpsOnly?.[peerId]?.busy) return;
+    const on = !d.httpsOnly;
+    this.#set({ ...v, httpsOnly: { ...v.httpsOnly, [peerId]: { busy: true, on } } });
+    let dev: Device;
+    try {
+      dev = await this.api.setHttpsOnly(peerId, on);
+    } catch (err) {
+      const code = errorCode(err);
+      const now = this.#ready();
+      if (this.#lost(code) || !now) return;
+      if (code === "device_gone") {
+        // Removed elsewhere: there is nothing left to turn.
+        this.#devicesVersion++;
+        this.#set({
+          ...now,
+          devices: now.devices.filter((x) => x.peerId !== peerId),
+          httpsOnly: without(now.httpsOnly, peerId),
+        });
+        return;
+      }
+      this.#set({ ...now, httpsOnly: { ...now.httpsOnly, [peerId]: { busy: false, error: code } } });
+      return;
+    }
+    const now = this.#ready();
+    if (!now) return;
+    this.#devicesVersion++;
+    this.#set({
+      ...now,
+      devices: now.devices.map((x) => (x.peerId === peerId ? dev : x)),
+      httpsOnly: without(now.httpsOnly, peerId),
+    });
   }
 
   askRemove(peerId: string): void {

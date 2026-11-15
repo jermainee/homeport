@@ -274,7 +274,7 @@ describe("the Use tab", () => {
 
   it("says where each device's line is", () => {
     const row = q(`.device[data-peer="${laptop.peerId}"]`)!;
-    expect([...row.querySelectorAll("p")].map((p) => p.textContent)).toEqual(["Berlin, Germany", "Deutsche Telekom line"]);
+    expect([...row.querySelectorAll(".row-text p")].map((p) => p.textContent)).toEqual(["Berlin, Germany", "Deutsche Telekom line"]);
   });
 
   it("asks before removing a device, with focus on Keep", async () => {
@@ -408,7 +408,7 @@ describe("changing a device", () => {
     await vi.waitFor(() => expect(announcer.textContent).toBe("Changes saved."));
     expect(use.updates).toEqual([[laptop.peerId, { country: "DE", city: "Munich", failover: "off" }]]);
     expect(document.activeElement).toBe(q(`[data-action="use-edit"][data-peer="${laptop.peerId}"]`));
-    expect([...q(`.device[data-peer="${laptop.peerId}"]`)!.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
+    expect([...q(`.device[data-peer="${laptop.peerId}"]`)!.querySelectorAll(".row-text p")].map((p) => p.textContent)).toEqual([
       `Munich, ${countryName("DE")}`,
       "M-net line",
     ]);
@@ -461,6 +461,48 @@ describe("changing a device", () => {
 
     await vi.waitFor(() => expect(q('.use-step [role="alert"]')?.textContent).toContain("No free line there right now"));
     expect(q("#edit-title")).not.toBeNull();
+  });
+});
+
+describe("HTTPS only", () => {
+  const httpsSwitch = () => q(`.device[data-peer="${laptop.peerId}"] [role="switch"]`)!;
+  const note = () => document.getElementById(httpsSwitch().getAttribute("aria-describedby") ?? "")?.textContent ?? "";
+
+  beforeEach(async () => {
+    await openHome();
+    await openUse();
+  });
+
+  it("is on for a device, and says what that blocks and what turning it off allows", () => {
+    expect(httpsSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(httpsSwitch().getAttribute("aria-label")).toBe(`HTTPS only for ${laptop.name}`);
+    expect(note()).toContain("Plain HTTP, SSH and mail apps that start unencrypted won't work");
+    expect(note()).toContain("Turning this off lets the line's owner read and change");
+  });
+
+  it("turns off with the switch, keeping focus on it, and says what that allows", async () => {
+    httpsSwitch().focus();
+    httpsSwitch().click();
+
+    expect(httpsSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(httpsSwitch().getAttribute("aria-busy")).toBe("true");
+    await vi.waitFor(() => expect(httpsSwitch().hasAttribute("aria-busy")).toBe(false));
+    expect(httpsSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(use.httpsOnly).toEqual([[laptop.peerId, false]]);
+    expect(document.activeElement).toBe(httpsSwitch());
+    expect(note()).toContain("the line's owner can read and change it");
+  });
+
+  it("says why it didn't turn, and keeps focus on the switch", async () => {
+    use.httpsOnlyAnswer = serviceError("offline");
+    httpsSwitch().focus();
+    httpsSwitch().click();
+
+    await vi.waitFor(() =>
+      expect(q(`.device[data-peer="${laptop.peerId}"] [role="alert"]`)?.textContent).toContain("can't be reached"),
+    );
+    expect(httpsSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(httpsSwitch());
   });
 });
 

@@ -512,6 +512,8 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         return use?.startEditing(peer);
       case "use-cancel-edit":
         return use?.cancelEditing();
+      case "use-https-only":
+        return void use?.toggleHttpsOnly(peer);
     }
   });
 }

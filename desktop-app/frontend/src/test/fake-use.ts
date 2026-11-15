@@ -20,6 +20,7 @@ export const laptop: Device = {
   city: "Berlin",
   isp: "Deutsche Telekom",
   failover: "country",
+  httpsOnly: true,
   exitLine: null,
   ipv4: "10.77.0.2",
   ipv6: "fd77::2",
@@ -37,6 +38,7 @@ export function newDevice(country: string, city: string, name: string, n = 3): N
       city: city || "Somewhere",
       isp: "Vodafone",
       failover: "country",
+      httpsOnly: true,
       exitLine: null,
       ipv4: `10.77.0.${n}`,
       ipv6: `fd77::${n}`,
@@ -67,9 +69,12 @@ export class FakeUse implements UseApi {
   removeAnswer: Error | null = null;
   /** What the next updateDevice answers; by default the device, changed. */
   updateAnswer: Answer<Device> | null = null;
+  /** What the next setHttpsOnly answers; by default the device, changed. */
+  httpsOnlyAnswer: Answer<Device> | null = null;
 
   calls: string[] = [];
   updates: Array<[string, DeviceChange]> = [];
+  httpsOnly: Array<[string, boolean]> = [];
   forgotten: string[] = [];
   removed: string[] = [];
   #hold: Promise<void> | null = null;
@@ -149,6 +154,21 @@ export class FakeUse implements UseApi {
         ? {}
         : { lineId: `line-${change.country}-${change.city || "any"}-2`, country: change.country, city: change.city || "Somewhere", isp: "M-net" };
     const dev: Device = { ...old, ...moved, ...(change.failover ? { failover: change.failover } : {}) };
+    this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
+    return dev;
+  }
+
+  async setHttpsOnly(peerId: string, on: boolean) {
+    this.calls.push(`setHttpsOnly ${peerId}`);
+    this.httpsOnly.push([peerId, on]);
+    await this.#hold;
+    const a = this.httpsOnlyAnswer;
+    this.httpsOnlyAnswer = null;
+    if (a) return settle(a);
+    const devices = settle(this.devicesAnswer);
+    const old = devices.find((d) => d.peerId === peerId);
+    if (!old) throw new Error(`no device ${peerId}`);
+    const dev: Device = { ...old, httpsOnly: on };
     this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
     return dev;
   }
