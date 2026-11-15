@@ -52,8 +52,18 @@ Homeport's edge gateway. It terminates members' WireGuard tunnels in userspace, 
 - **Usage events:** cut per session every 30 s (if bytes were counted), every 50 MB, at a lease switch, and at session end (`final`). Each event takes every byte the meter counted since the last one, so the events add up to the meter exactly. Bytes metered while no session could start (the line offline) go into the next session's first event. Batches hold up to 100 events.
   - A failed batch is sent again with the same event IDs. `rejected` events are not retried.
   - A session's leases, the current one and an unused successor, are returned only after its final event has an answer.
-- **Line events:** `online` when an agent's hello registers it, with the observed IP and the hello's `agent_version` (sent as `0.0.0` when it is not a semantic version, which the API would refuse). `offline` when it disconnects or its line is removed.
+- **Line events:** `online` when an agent's hello registers it, with the observed IP and the hello's `agent_version` (sent as `0.0.0` when it is not a semantic version, which the API would refuse). `offline` when it disconnects or its line is removed. `tampered`, with `check` (`http` or `dns`), when a canary check catches the line (see "Line canaries").
 - **Logs** name peers, lines, sessions, leases and events, never a destination or a server name.
+
+## Line canaries
+
+With `Config.Canary` (`--canary-target`), the gateway checks every online line now and then for tampering: a modified agent, or an ISP's transparent proxy. A line's first check comes within two minutes of its agent connecting, then about every `Interval` (15 minutes by default, at random so lines are not checked in step).
+
+- **HTTP:** the gateway serves a small HTML page over plain HTTP (`--canary-listen`, default `:80`) at `/homeport-canary/<nonce>`. It fetches the page through the line from `--canary-target`, the public IP:port that reaches that listener, with a fresh nonce, and compares status, content type and body with the page.
+- **DNS:** with `--canary-dns-zone`, a zone with a wildcard record (`*.canary.example. A <public IP>`), it looks up `<nonce>.<zone>` through the line's DNS flow and compares the A records with its own lookup.
+- **Control first:** before each check the gateway fetches the page directly and resolves the name itself. If that fails, or the zone resolves to anything but public addresses, the check is skipped and a warning logged at most every 10 minutes, so a misconfiguration never suspends lines.
+- **A changed answer suspends the line:** the gateway reports `tampered`, disconnects the agent and refuses the line, even if the config lists it again, until the gateway restarts. The API pauses the line on the report, so no gateway serves it again until someone reviews it. A line that only fails to answer (refused, timed out, SERVFAIL) is not suspended.
+- Canary flows are not metered: no member pays for them and the seller earns nothing from them.
 
 ## Run
 
@@ -67,6 +77,7 @@ HOMEPORT_GATEWAY_TOKEN=hpgw_<id>.<secret> homeport-gateway \
 
 - The state dir keeps the WireGuard key (`wg.key`) and the relay certificate (`relay.crt`, `relay.key`), created on first start. Members' configs and agents' pins depend on them, so a damaged file stops the gateway instead of being replaced.
 - `--quic-endpoint` defaults to the `--wg-endpoint` host with the `--quic-listen` port.
+- Line canaries need `--canary-target <public IP>:80`, a TCP port the internet reaches, and `--canary-dns-zone` for the DNS check (see "Line canaries"). `--canary-interval` sets the mean time between checks of one line.
 - At start the gateway sends `PUT /v1/gateway/self`, retrying while the API is unreachable (a refused token stops it). On SIGINT or SIGTERM it ends every session and refuses new ones, reports the final usage, returns the leases, disconnects its agents and reports those lines offline.
 
 Still to come: short idle timeouts for DNS flows.
