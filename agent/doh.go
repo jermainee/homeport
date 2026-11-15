@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -63,6 +65,13 @@ const (
 	// alone before the next address is tried alongside it, so a lost SYN
 	// costs a fraction of a second rather than a retransmission timeout.
 	dohDialStagger = 250 * time.Millisecond
+	// dohDialTimeout bounds one connection to a resolver. net/http keeps
+	// dialing after the query that started it gave up, so without it an
+	// address that swallows SYNs would hold a socket until the OS's TCP
+	// timeout, a minute or more.
+	dohDialTimeout = dohAttemptTimeout
+	// dohWarnInterval spaces out the warning that no resolver answered.
+	dohWarnInterval = time.Minute
 	// dohMaxResponse is the largest DNS message there is.
 	dohMaxResponse = 65535
 	// dohPadBlock is the block size queries are padded to (RFC 8467).
@@ -101,9 +110,13 @@ type dohResolver struct {
 	roots          *x509.CertPool
 	clients        []*http.Client
 	attemptTimeout time.Duration
+	dialTimeout    time.Duration
 	preferred      atomic.Int64 // the server that answered last
 	// dialAddr opens a TCP connection to one address. Tests replace it.
 	dialAddr func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
+	// log gets a warning, naming no DNS name, when no resolver answers.
+	log      *slog.Logger
+	lastWarn atomic.Int64 // when it last warned, in Unix nanoseconds
 }
 
 func newDoHResolver(servers []dohServer, roots *x509.CertPool) *dohResolver {
@@ -112,6 +125,8 @@ func newDoHResolver(servers []dohServer, roots *x509.CertPool) *dohResolver {
 		servers:        servers,
 		roots:          roots,
 		attemptTimeout: dohAttemptTimeout,
+		dialTimeout:    dohDialTimeout,
+		log:            slog.New(slog.DiscardHandler),
 		dialAddr: func(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
 			return d.DialContext(ctx, "tcp", addr.String())
 		},
@@ -132,10 +147,21 @@ func (r *dohResolver) transport(s dohServer) *http.Transport {
 		DialContext:       dial,
 		TLSClientConfig:   &tls.Config{RootCAs: r.roots, MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2: true,
-		IdleConnTimeout:   time.Minute,
+		// One HTTP/2 connection carries every query. Queries that find none
+		// wait for the one being dialed instead of each dialing their own.
+		MaxConnsPerHost: 1,
+		IdleConnTimeout: time.Minute,
 		// A connection that went dead, as when the machine changed networks,
-		// is noticed within seconds instead of holding up every lookup.
-		HTTP2: &http.HTTP2Config{SendPingTimeout: 5 * time.Second, PingTimeout: 2 * time.Second},
+		// is noticed and replaced instead of holding up lookups.
+		HTTP2: &http.HTTP2Config{SendPingTimeout: 15 * time.Second, PingTimeout: 5 * time.Second},
+	}
+}
+
+// CloseIdleConnections closes the resolver's connections and ends any
+// connection attempt still running. The agent calls it when Run returns.
+func (r *dohResolver) CloseIdleConnections() {
+	for _, c := range r.clients {
+		c.CloseIdleConnections()
 	}
 }
 
@@ -143,7 +169,7 @@ func (r *dohResolver) transport(s dohServer) *http.Transport {
 // dials them in order, starting the next whenever one fails or has run for
 // dohDialStagger without connecting, and closes the connections that lose.
 func (r *dohResolver) dialFirst(ctx context.Context, addrs []netip.AddrPort) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, r.dialTimeout)
 	defer cancel() // ends the attempts that are still running
 	type result struct {
 		conn net.Conn
@@ -207,7 +233,7 @@ func (r *dohResolver) LookupNetIP(ctx context.Context, network, host string) ([]
 	}
 	name, err := dnsmessage.NewName(host)
 	if err != nil || !strings.HasSuffix(host, ".") {
-		return nil, &net.DNSError{Err: "invalid name", Name: host}
+		return nil, &net.DNSError{Err: "invalid name"}
 	}
 	q := dnsmessage.Question{Name: name, Type: typ, Class: dnsmessage.ClassINET}
 	msg, err := dohQuery(q)
@@ -228,7 +254,22 @@ func (r *dohResolver) LookupNetIP(ctx context.Context, network, host string) ([]
 			break
 		}
 	}
-	return nil, &net.DNSError{Err: fmt.Sprintf("no resolver answered: %v", errors.Join(errs...)), Name: host, IsTemporary: true}
+	err = fmt.Errorf("no resolver answered: %w", errors.Join(errs...))
+	r.warn(err)
+	return nil, &net.DNSError{Err: err.Error(), IsTemporary: true}
+}
+
+// warn logs that no resolver answered, at most once per dohWarnInterval:
+// a network that blocks DNS over HTTPS fails every lookup, and the member
+// should learn why the line resolves nothing. err names the resolvers and
+// the reasons, never the name that was looked up.
+func (r *dohResolver) warn(err error) {
+	now := time.Now().UnixNano()
+	last := r.lastWarn.Load()
+	if now-last < int64(dohWarnInterval) || !r.lastWarn.CompareAndSwap(last, now) {
+		return
+	}
+	r.log.Warn("dns over https: no resolver answered; the network may block it", "error", err)
 }
 
 // ask sends msg to server n and returns the addresses in its answer.
@@ -246,7 +287,7 @@ func (r *dohResolver) ask(ctx context.Context, n int, msg []byte, q dnsmessage.Q
 		return nil, errors.New(redactURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != dnsMessage {
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); resp.StatusCode != http.StatusOK || mt != dnsMessage {
 		return nil, fmt.Errorf("doh: status %d, content type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, dohMaxResponse+1))
@@ -260,7 +301,8 @@ func (r *dohResolver) ask(ctx context.Context, n int, msg []byte, q dnsmessage.Q
 }
 
 // dohQuery builds the query for q: ID 0 (RFC 8484, so answers can be
-// cached), recursion desired, and EDNS(0) padding to a multiple of
+// cached), recursion desired, a UDP size of 65535, which over HTTPS means
+// "no limit" (RFC 8484 section 6), and EDNS(0) padding to a multiple of
 // dohPadBlock bytes (RFC 8467), so the size of the encrypted query does not
 // give the name away.
 func dohQuery(q dnsmessage.Question) ([]byte, error) {
@@ -276,7 +318,7 @@ func dohQuery(q dnsmessage.Question) ([]byte, error) {
 			return nil, err
 		}
 		var rh dnsmessage.ResourceHeader
-		if err := rh.SetEDNS0(dnsMaxUDPSize, dnsmessage.RCodeSuccess, false); err != nil {
+		if err := rh.SetEDNS0(dohMaxResponse, dnsmessage.RCodeSuccess, false); err != nil {
 			return nil, err
 		}
 		opt := dnsmessage.OPTResource{Options: []dnsmessage.Option{{Code: 12, Data: make([]byte, pad)}}}
@@ -302,6 +344,9 @@ func parseDoHAnswer(msg []byte, q dnsmessage.Question) ([]netip.Addr, error) {
 	}
 	if !h.Response || h.ID != 0 {
 		return nil, errors.New("doh: not an answer to the query")
+	}
+	if h.Truncated {
+		return nil, errors.New("doh: truncated answer")
 	}
 	questions, err := p.AllQuestions()
 	if err != nil || len(questions) != 1 || questions[0].Type != q.Type || questions[0].Class != q.Class ||
@@ -350,8 +395,10 @@ func parseDoHAnswer(msg []byte, q dnsmessage.Question) ([]netip.Addr, error) {
 	return addrs, nil
 }
 
-func notFound(q dnsmessage.Question) error {
-	return &net.DNSError{Err: "no such host", Name: q.Name.String(), IsNotFound: true}
+// notFound reports that q has no answer. Like every error from here, it
+// names no DNS name, so it is safe to log.
+func notFound(dnsmessage.Question) error {
+	return &net.DNSError{Err: "no such host", IsNotFound: true}
 }
 
 func isNotFoundErr(err error) bool {
@@ -360,8 +407,8 @@ func isNotFoundErr(err error) bool {
 }
 
 // redactURLError keeps the reason of an HTTP client error but drops the
-// request URL it wraps. The URL names only the resolver, but errors from
-// here end up in DNS failures, which must never carry more than a reason.
+// request URL it wraps, so the error stays short: the reason is what a log
+// needs.
 func redactURLError(err error) string {
 	var uerr *url.Error
 	if errors.As(err, &uerr) {

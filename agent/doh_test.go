@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,20 +33,31 @@ type dohAnswer struct {
 // fakeDoH is a DNS-over-HTTPS server (RFC 8484) answering from a table
 // keyed by "name type", such as "example.org. A".
 type fakeDoH struct {
-	srv     *httptest.Server
-	answers map[string]dohAnswer
-	status  atomic.Int32 // an HTTP status to fail every request with, if set
-	stall   atomic.Bool  // hold every request until it is cancelled
+	srv      *httptest.Server
+	answers  map[string]dohAnswer
+	status   atomic.Int32 // an HTTP status to fail every request with, if set
+	stall    atomic.Bool  // hold every request until it is cancelled
+	truncate atomic.Bool  // set TC on every answer
+	open     atomic.Int32 // client connections open now
 
-	mu      sync.Mutex
-	queries [][]byte
-	headers []http.Header
+	mu          sync.Mutex
+	queries     [][]byte
+	headers     []http.Header
+	contentType string // the answers' media type, if not application/dns-message
 }
 
 func newFakeDoH(t *testing.T, answers map[string]dohAnswer) *fakeDoH {
 	t.Helper()
 	f := &fakeDoH{answers: answers}
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	f.srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			f.open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			f.open.Add(-1)
+		}
+	}
 	f.srv.EnableHTTP2 = true
 	f.srv.StartTLS()
 	t.Cleanup(f.srv.Close)
@@ -107,7 +119,7 @@ func (f *fakeDoH) serve(w http.ResponseWriter, r *http.Request) {
 	if ans.name != "" {
 		q.Name = dnsmessage.MustNewName(ans.name)
 	}
-	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RecursionDesired: true, RecursionAvailable: true, RCode: ans.rcode})
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, Truncated: f.truncate.Load(), RecursionDesired: true, RecursionAvailable: true, RCode: ans.rcode})
 	_ = b.StartQuestions()
 	_ = b.Question(q)
 	_ = b.StartAnswers()
@@ -130,7 +142,13 @@ func (f *fakeDoH) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/dns-message")
+	f.mu.Lock()
+	ct := f.contentType
+	f.mu.Unlock()
+	if ct == "" {
+		ct = "application/dns-message"
+	}
+	w.Header().Set("Content-Type", ct)
 	_, _ = w.Write(msg)
 }
 
@@ -354,5 +372,151 @@ func TestDNSFlowsResolveOverDoHAndStillDropHomeAddresses(t *testing.T) {
 	got := exchange(t, s, query(t, 7, "mixed.homeport.test.", dnsmessage.TypeA))
 	if addrs := answerAddrs(got[7]); !slices.Equal(addrs, []netip.Addr{public4}) {
 		t.Errorf("answers = %v, want only the public address", addrs)
+	}
+}
+
+func TestDoHKeepsOneConnectionAttemptPerResolverAndEndsIt(t *testing.T) {
+	// The resolver's addresses swallow every SYN, as when a firewall drops
+	// DNS over HTTPS. A burst of lookups must not open a connection attempt
+	// each, and the attempts end on their own, not at the OS's TCP timeout.
+	srv := dohServer{URL: "https://example.com/dns-query", Addrs: []netip.AddrPort{
+		netip.MustParseAddrPort("11.22.33.44:443"),
+		netip.MustParseAddrPort("11.22.33.45:443"),
+	}}
+	r := newDoHResolver([]dohServer{srv}, x509.NewCertPool())
+	r.attemptTimeout = 100 * time.Millisecond
+	r.dialTimeout = 300 * time.Millisecond
+	var inFlight, most atomic.Int32
+	r.dialAddr = func(ctx context.Context, _ netip.AddrPort) (net.Conn, error) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			if _, err := resolveWith(t, r, "ip4", "example.org."); err == nil {
+				t.Error("a lookup through a blocked resolver succeeded")
+			}
+		})
+	}
+	wg.Wait()
+	if m := int(most.Load()); m > len(srv.Addrs) {
+		t.Errorf("%d connection attempts ran at once, want at most %d (one per address)", m, len(srv.Addrs))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for inFlight.Load() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connection attempts still running long after their dial timeout", inFlight.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDoHWarnsWhenNoResolverAnswersButNamesNoName(t *testing.T) {
+	answers := map[string]dohAnswer{}
+	a, b := newFakeDoH(t, answers), newFakeDoH(t, answers)
+	a.status.Store(http.StatusServiceUnavailable)
+	b.status.Store(http.StatusServiceUnavailable)
+	roots := a.roots()
+	roots.AddCert(b.srv.Certificate())
+	r := newDoHResolver([]dohServer{a.server(), b.server()}, roots)
+	logs := &syncBuffer{}
+	r.log = slog.New(slog.NewTextHandler(logs, nil))
+
+	for range 3 {
+		_, err := resolveWith(t, r, "ip4", "secret-name.example.")
+		if err == nil || strings.Contains(err.Error(), "secret-name") {
+			t.Fatalf("lookup error %v; want an error that names no name", err)
+		}
+	}
+	out := logs.String()
+	if n := strings.Count(out, "level=WARN"); n != 1 {
+		t.Errorf("logged %d warnings for three failed lookups in a row, want 1:\n%s", n, out)
+	}
+	if strings.Contains(out, "secret-name") {
+		t.Errorf("the log names the looked-up name:\n%s", out)
+	}
+}
+
+func TestDoHErrorsForAMissingNameCarryNoName(t *testing.T) {
+	f := newFakeDoH(t, map[string]dohAnswer{"secret-name.example. A": {rcode: dnsmessage.RCodeNameError}})
+	r := newDoHResolver([]dohServer{f.server()}, f.roots())
+
+	_, err := resolveWith(t, r, "ip4", "secret-name.example.")
+	if !isNotFound(err) || strings.Contains(err.Error(), "secret-name") {
+		t.Errorf("lookup error %v; want not found, naming no name", err)
+	}
+}
+
+func TestDoHAcceptsAMediaTypeWithParameters(t *testing.T) {
+	f := newFakeDoH(t, map[string]dohAnswer{"example.org. A": {addrs: []netip.Addr{public4}}})
+	f.mu.Lock()
+	f.contentType = "Application/DNS-Message; charset=binary"
+	f.mu.Unlock()
+	r := newDoHResolver([]dohServer{f.server()}, f.roots())
+
+	if got, err := resolveWith(t, r, "ip4", "example.org."); err != nil || !slices.Equal(got, []netip.Addr{public4}) {
+		t.Errorf("lookup = %v, %v", got, err)
+	}
+}
+
+func TestDoHAsksForWholeAnswersAndRefusesTruncatedOnes(t *testing.T) {
+	f := newFakeDoH(t, map[string]dohAnswer{"example.org. A": {addrs: []netip.Addr{public4}}})
+	f.truncate.Store(true)
+	r := newDoHResolver([]dohServer{f.server()}, f.roots())
+
+	if got, err := resolveWith(t, r, "ip4", "example.org."); err == nil || isNotFound(err) {
+		t.Errorf("a truncated answer gave %v, %v; want an error", got, err)
+	}
+	var p dnsmessage.Parser
+	if _, err := p.Start(f.received()[0]); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.SkipAllQuestions()
+	_ = p.SkipAllAnswers()
+	_ = p.SkipAllAuthorities()
+	opt, err := p.AdditionalHeader()
+	if err != nil || opt.Type != dnsmessage.TypeOPT || uint16(opt.Class) != 65535 {
+		t.Errorf("the query's OPT record is %+v, %v; want a UDP size of 65535, which means 'no limit' over HTTPS", opt, err)
+	}
+}
+
+func TestTheAgentClosesItsDoHConnectionsWhenItStops(t *testing.T) {
+	f := newFakeDoH(t, map[string]dohAnswer{"example.org. A": {addrs: []netip.Addr{public4}}})
+	g := newFakeGateway(t)
+	a, err := New(Config{
+		GatewayAddr: g.ln.Addr().String(),
+		GatewayPin:  g.pin,
+		Certificate: g.agentCert,
+		Resolver:    newDoHResolver([]dohServer{f.server()}, f.roots()),
+		TunnelCheck: func() (bool, error) { return false, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	s := g.nextConn(t).mustDial(t, relayprotocol.KindDNS, virtualResolver)
+	exchange(t, s, query(t, 1, "example.org.", dnsmessage.TypeA))
+	if f.open.Load() == 0 {
+		t.Fatal("no connection to the resolver was open after a lookup")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	deadline := time.Now().Add(waitFor)
+	for f.open.Load() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the agent left its connection to the resolver open after Run returned")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

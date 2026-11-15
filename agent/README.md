@@ -44,7 +44,9 @@ The agent resolves names over DNS over HTTPS (RFC 8484) through the line: Cloudf
 - **Trust:** the resolver's certificate is verified against the Mozilla roots built into the agent (`golang.org/x/crypto/x509roots/fallback/bundle`), never the machine's trust store. A root installed on the machine, by the member or an intercepting proxy, does not get answers through. Bump that module to keep the roots current.
 - **Privacy:** queries use ID 0 and are padded to a multiple of 128 bytes (RFC 8467), so the size of the encrypted request does not give the name away.
 - **Failover:** a resolver's addresses are dialed Happy Eyeballs style: the next starts after 250 ms, or at once when one fails, so a lost SYN costs little. Each attempt at one resolver gets 2.5 s, enough for a new connection over a satellite line. A resolver that fails or does not answer is skipped for the next, and later lookups start at the one that answered last.
-- **No fallback:** if neither resolver answers, the query gets SERVFAIL. The agent never falls back to the system resolver: whoever blocks DNS over HTTPS could then forge answers again.
+- **One connection per resolver:** queries that find no connection wait for the one being dialed, and a dial ends after 2.5 s, so a network that drops DNS over HTTPS cannot pile up sockets. HTTP/2 pings after 15 s without traffic replace a connection that died, as when the machine changed networks. When `Run` returns, the connections close.
+- **No fallback:** if neither resolver answers, the query gets SERVFAIL, and the agent logs a warning at most once a minute, naming the resolvers' errors but no DNS name. It never falls back to the system resolver: whoever blocks DNS over HTTPS could then forge answers again.
+- Answers must match the query's question, and truncated answers are refused. Queries ask for a UDP size of 65535, which over HTTPS means no limit.
 - A name error, or an answer without records of the asked family, gets an empty NOERROR answer.
 
 ## Pausing

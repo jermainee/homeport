@@ -194,9 +194,6 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Version == "" {
 		cfg.Version = Version
 	}
-	if cfg.Resolver == nil {
-		cfg.Resolver = newDoHResolver(defaultDoHServers, bundledRoots())
-	}
 	if cfg.StatsInterval <= 0 {
 		cfg.StatsInterval = DefaultStatsInterval
 	}
@@ -217,6 +214,11 @@ func New(cfg Config) (*Agent, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if cfg.Resolver == nil {
+		r := newDoHResolver(defaultDoHServers, bundledRoots())
+		r.log = log
+		cfg.Resolver = r
+	}
 	return &Agent{
 		cfg:  cfg,
 		log:  log,
@@ -234,6 +236,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	defer a.running.Store(false)
 	defer a.setState(StateStopped)
+	if c, ok := a.cfg.Resolver.(interface{ CloseIdleConnections() }); ok {
+		defer c.CloseIdleConnections() // after every flow has finished
+	}
 
 	checkFileLimit(a.log)
 	a.checkTunnel()
