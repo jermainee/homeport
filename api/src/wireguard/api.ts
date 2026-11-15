@@ -227,7 +227,7 @@ wireguardApi.post("/peers", verifiedMemberIdempotent, async (c) => {
   }
 
   const [peerResult, gatewayResult] = await db.batch([
-    db.prepare(peersWithExitSql("p.id = ?2")).bind(Date.now() - EXIT_LINE_WINDOW_MS, created.id),
+    db.prepare(peersWithExitSql("p.id = ?2")).bind(Date.now() - CURRENT_SESSION_WINDOW_MS, created.id),
     db
       .prepare(
         `SELECT g.wg_public_key, g.wg_endpoint FROM wireguard_peers p
