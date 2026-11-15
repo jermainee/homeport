@@ -25,7 +25,7 @@ Homeport's edge gateway. It terminates members' WireGuard tunnels in userspace, 
   - the line is offline;
   - the peer's member owns the line (no self-dealing);
   - the agent answers with anything but OK.
-- Flows to port 53 on the virtual resolver (`Config.DNS`, default `10.77.0.1`) become DNS flows: the agent resolves them through the home ISP's resolver. Other UDP is relayed as UDP frames.
+- Flows to port 53 on the virtual resolver (`Config.DNS`, default `10.77.0.1`) become DNS flows: the agent resolves them over DNS over HTTPS through the line. Other UDP is relayed as UDP frames.
 - `Config.Dialer` replaces the relay in tests.
 
 ## Control plane
