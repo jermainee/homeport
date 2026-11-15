@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,11 @@ const offlineHold = 10 * time.Second
 func TestAPeerMovesToAnotherLineWhileItsLineIsOfflineAndBack(t *testing.T) {
 	s := newStack(t, withFallbackLine())
 	fallback := s.startFallbackAgent()
+	t.Cleanup(func() {
+		if t.Failed() {
+			s.logSessions()
+		}
+	})
 
 	// B's peer exits through A's line while it is online.
 	if got := s.get("/blob/100000"); sum(got) != sum(blob(100_000)) {
@@ -82,13 +88,27 @@ func TestAPeerMovesToAnotherLineWhileItsLineIsOfflineAndBack(t *testing.T) {
 	}
 }
 
-// getEventually fetches path through the tunnel, retrying until it arrives
-// or timeout passes. Flows fail while the peer's line is offline.
+// logSessions logs the gateway's session, lease and line lines, to tell
+// why a failover test failed. They never name a destination.
+func (s *stack) logSessions() {
+	for line := range strings.SplitSeq(s.gwLogs.String(), "\n") {
+		if strings.Contains(line, `"session `) || strings.Contains(line, "lease") || strings.Contains(line, "line") {
+			s.t.Log(line)
+		}
+	}
+}
+
+// getEventually fetches path through the tunnel, retrying while flows
+// fail, as they do while the peer's line is offline, and starting no new
+// attempt after timeout. Flows to an offline line are reset at once, so an
+// attempt that connects is let finish within transferTimeout: the race
+// detector slows the tunnel down to a few hundred kB/s, less on a slow
+// runner.
 func (s *stack) getEventually(path string, timeout time.Duration) []byte {
 	s.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		body, err := s.tryGet("http://"+tcpDst.String()+contentPath+path, 5*time.Second)
+		body, err := s.tryGet("http://"+tcpDst.String()+contentPath+path, transferTimeout)
 		if err == nil {
 			return body
 		}
