@@ -111,13 +111,15 @@ type PeerCreated struct {
 
 // CreatePeer creates a WireGuard peer for the device whose public key
 // (standard base64) is given, on a free line the API picks in country, and
-// in city unless it is empty. The private key never leaves the app.
-func (c *Client) CreatePeer(ctx context.Context, sessionToken, requestID, country, city, name, publicKey string) (PeerCreated, error) {
-	body := map[string]string{
+// in city unless it is empty, with HTTPS only on or off. The private key
+// never leaves the app.
+func (c *Client) CreatePeer(ctx context.Context, sessionToken, requestID, country, city, name, publicKey string, httpsOnly bool) (PeerCreated, error) {
+	body := map[string]any{
 		"request_id": requestID,
 		"country":    country,
 		"name":       name,
 		"public_key": publicKey,
+		"https_only": httpsOnly,
 	}
 	if city != "" {
 		body["city"] = city
@@ -137,12 +139,13 @@ func (c *Client) Peers(ctx context.Context, sessionToken string) ([]Peer, error)
 }
 
 // UpdatePeer moves a WireGuard peer to a free line the API picks in
-// country (and city unless it is empty), or changes its failover, or both;
-// an empty argument keeps what the peer has. The peer keeps its .conf
-// file. A peer that doesn't exist is an *Error with status 404; a region
-// without another free line on the peer's gateway is 409 no_free_line.
-func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, country, city, failover string) (Peer, error) {
-	body := map[string]string{}
+// country (and city unless it is empty), or changes its failover or HTTPS
+// only, in one PATCH; an empty argument, or a nil httpsOnly, keeps what the
+// peer has. The peer keeps its .conf file. A peer that doesn't exist is an
+// *Error with status 404; a region without another free line on the peer's
+// gateway is 409 no_free_line.
+func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, country, city, failover string, httpsOnly *bool) (Peer, error) {
+	body := map[string]any{}
 	if country != "" {
 		body["country"] = country
 		if city != "" {
@@ -152,16 +155,9 @@ func (c *Client) UpdatePeer(ctx context.Context, sessionToken, peerID, country, 
 	if failover != "" {
 		body["failover"] = failover
 	}
-	var out Peer
-	err := c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), sessionToken, body, &out, http.StatusOK)
-	return out, err
-}
-
-// SetPeerHTTPSOnly turns HTTPS only on or off for a WireGuard peer, and
-// changes nothing else. A peer that doesn't exist is an *Error with status
-// 404.
-func (c *Client) SetPeerHTTPSOnly(ctx context.Context, sessionToken, peerID string, on bool) (Peer, error) {
-	body := map[string]bool{"https_only": on}
+	if httpsOnly != nil {
+		body["https_only"] = *httpsOnly
+	}
 	var out Peer
 	err := c.do(ctx, http.MethodPatch, "/v1/wireguard/peers/"+url.PathEscape(peerID), sessionToken, body, &out, http.StatusOK)
 	return out, err

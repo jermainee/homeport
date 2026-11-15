@@ -324,6 +324,7 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		City      *string `json:"city"`
 		Name      string  `json:"name"`
 		PublicKey string  `json:"public_key"`
+		HTTPSOnly *bool   `json:"https_only"`
 	}
 	raw, ok := decodeStrict(w, r, &body)
 	// The contract's oneOf: one line, or a region (a country, maybe a city).
@@ -362,7 +363,7 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		LineID:    line.LineID,
 		Line:      LinePlace{Country: &line.Country, City: line.City, ISP: line.ISP},
 		Failover:  "country",
-		HTTPSOnly: true,
+		HTTPSOnly: body.HTTPSOnly == nil || *body.HTTPSOnly, // on unless asked
 		PublicKey: body.PublicKey,
 		IPv4:      fmt.Sprintf("10.77.%d.%d", host/256, host%256),
 		IPv6:      fmt.Sprintf("fd77::%x", host),
