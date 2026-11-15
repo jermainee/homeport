@@ -34,12 +34,13 @@ type stubAPI struct {
 	mu       sync.Mutex
 	requests []string // "METHOD /path"
 	bodies   map[string]map[string]any
+	queries  map[string]string
 	auth     map[string]string
 }
 
 func newStubAPI(t *testing.T) (*stubAPI, string) {
 	t.Helper()
-	s := &stubAPI{bodies: map[string]map[string]any{}, auth: map[string]string{}}
+	s := &stubAPI{bodies: map[string]map[string]any{}, queries: map[string]string{}, auth: map[string]string{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
 		var body map[string]any
@@ -47,6 +48,7 @@ func newStubAPI(t *testing.T) (*stubAPI, string) {
 		s.mu.Lock()
 		s.requests = append(s.requests, key)
 		s.bodies[key] = body
+		s.queries[key] = r.URL.RawQuery
 		s.auth[key] = r.Header.Get("Authorization")
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -66,6 +68,13 @@ func newStubAPI(t *testing.T) (*stubAPI, string) {
 			_, _ = w.Write([]byte(`{"line_id":"` + exampleLineID + `","gateway":{"quic_endpoint":"fra1.gw.homeport.example:443","server_name":"fra1.gw.homeport.example","spki_sha256":"` + examplePinHex + `"}}`))
 		case "PATCH /v1/lines/" + exampleLineID:
 			_, _ = w.Write([]byte(`{"line_id":"` + exampleLineID + `","sharing_enabled":true}`))
+		case "GET /v1/lines/regions":
+			_, _ = w.Write(memberExample(t, "line-regions-country.json"))
+		case "GET /v1/lines/available":
+			_, _ = w.Write(memberExample(t, "lines-available.json"))
+		case "POST /v1/wireguard/peers":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write(memberExample(t, "wireguard-peer-created.json"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not_found"}`))
@@ -73,6 +82,16 @@ func newStubAPI(t *testing.T) (*stubAPI, string) {
 	}))
 	t.Cleanup(srv.Close)
 	return s, srv.URL
+}
+
+// memberExample reads a JSON example from contracts/examples/member.
+func memberExample(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "examples", "member", name)) // #nosec G304 -- the contract's examples
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func (s *stubAPI) sent() []string {
@@ -199,4 +218,71 @@ func envValue(t *testing.T, out, name string) string {
 	}
 	t.Fatalf("no %s in:\n%s", name, out)
 	return ""
+}
+
+func TestPeerInARegionLetsTheAPIPickTheLine(t *testing.T) {
+	api, url := newStubAPI(t)
+	dir := t.TempDir()
+	writeSession(t, filepath.Join(dir, "a.json"))
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"-api", url, "-session", filepath.Join(dir, "a.json"), "peer", "DE", "Berlin"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	body := api.bodies["POST /v1/wireguard/peers"]
+	if body["country"] != "DE" || body["city"] != "Berlin" {
+		t.Errorf("body %v, want country DE and city Berlin", body)
+	}
+	if _, ok := body["line_id"]; ok {
+		t.Errorf("body %v names a line_id", body)
+	}
+	if strings.Contains(stdout.String(), "{{PRIVATE_KEY}}") || !strings.Contains(stdout.String(), "PrivateKey = ") {
+		t.Errorf("printed config has no private key:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Berlin, DE") {
+		t.Errorf("stderr %q does not say where the line is", stderr.String())
+	}
+}
+
+func TestPeerOnALineSendsItsID(t *testing.T) {
+	api, url := newStubAPI(t)
+	dir := t.TempDir()
+	writeSession(t, filepath.Join(dir, "a.json"))
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"-api", url, "-session", filepath.Join(dir, "a.json"), "peer", exampleLineID}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	body := api.bodies["POST /v1/wireguard/peers"]
+	if body["line_id"] != exampleLineID {
+		t.Errorf("body %v, want line_id %s", body, exampleLineID)
+	}
+	if _, ok := body["country"]; ok {
+		t.Errorf("body %v names a country", body)
+	}
+}
+
+func TestRegionsAndLinesAskForTheRegion(t *testing.T) {
+	api, url := newStubAPI(t)
+	dir := t.TempDir()
+	writeSession(t, filepath.Join(dir, "a.json"))
+	session := filepath.Join(dir, "a.json")
+
+	for _, args := range [][]string{{"regions", "DE"}, {"lines", "DE", "Frankfurt am Main"}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(append([]string{"-api", url, "-session", session}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, code, stderr.String())
+		}
+	}
+
+	if got := api.queries["GET /v1/lines/regions"]; got != "country=DE" {
+		t.Errorf("regions query %q", got)
+	}
+	if got := api.queries["GET /v1/lines/available"]; got != "city=Frankfurt+am+Main&country=DE" {
+		t.Errorf("lines query %q", got)
+	}
 }
