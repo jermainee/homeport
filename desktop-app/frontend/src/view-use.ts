@@ -5,7 +5,7 @@
 import type { IdentityView } from "./identity";
 import type { ErrorCode } from "./signin";
 import { countryName, esc, formatAbout, useErrorText, whole } from "./text";
-import type { Checkout, Device, Line, Ready, UseView } from "./use";
+import { backupLine, FAILOVERS, type Checkout, type Device, type ExitLine, type Failover, type Line, type Ready, type UseView } from "./use";
 
 const busyAttrs = (busy: boolean) => (busy ? 'aria-disabled="true" aria-busy="true"' : "");
 
@@ -108,6 +108,11 @@ export function linePlace(l: Pick<Line, "city" | "country">): string {
   return l.city ? `${l.city}, ${country}` : country;
 }
 
+/** Where a backup line is, as far as Homeport knows: "Potsdam, Germany", or "". */
+function exitPlace(e: ExitLine): string {
+  return [e.city, e.country ? countryName(e.country) : ""].filter(Boolean).join(", ");
+}
+
 /** usePanel renders the Use state machine; identity fills in while it asks to verify. */
 export function usePanel(v: UseView, identity: IdentityView | undefined): string {
   switch (v.kind) {
@@ -144,6 +149,8 @@ export function usePanel(v: UseView, identity: IdentityView | undefined): string
           return addStep(v, v.step);
         case "config":
           return configStep(v, v.step);
+        case "edit":
+          return editStep(v, v.step);
         default:
           return overview(v);
       }
@@ -208,9 +215,26 @@ function deviceRow(d: Device, v: Ready): string {
         <h3>${esc(d.name)}</h3>
         <p>${esc(where)}</p>
       </div>
-      <button class="button quiet" type="button" data-action="use-remove" data-peer="${esc(d.peerId)}"
-        aria-label="Remove ${esc(d.name)}">Remove</button>
+      <div class="row-actions">
+        <button class="button quiet" type="button" data-action="use-edit" data-peer="${esc(d.peerId)}"
+          aria-label="Change ${esc(d.name)}">Change</button>
+        <button class="button quiet" type="button" data-action="use-remove" data-peer="${esc(d.peerId)}"
+          aria-label="Remove ${esc(d.name)}">Remove</button>
+      </div>
+      ${backupNotice(d)}
     </li>`;
+}
+
+// While its own line is offline, the gateway runs a device on another
+// member's line: a window lit in another house.
+function backupNotice(d: Device): string {
+  const backup = backupLine(d);
+  if (!backup) return "";
+  const place = exitPlace(backup);
+  const text = place
+    ? `Its line went offline, so it's using a backup line in ${place}.`
+    : "Its line went offline, so it's using a backup line.";
+  return `<p class="device-backup"><span class="house-window is-tiny" data-light="on" aria-hidden="true"><i></i><i></i><i></i><i></i></span>${esc(text)}</p>`;
 }
 
 function overview(v: Ready): string {
@@ -254,6 +278,14 @@ function lineOption(l: Line, picked: boolean): string {
     </label>`;
 }
 
+// The lines to pick from, for a new device or one that changes its line.
+function linePicker(lines: Line[], picked: string | null): string {
+  return `<fieldset class="lines">
+        <legend class="label">Line</legend>
+        <div class="group line-list">${lines.map((l) => lineOption(l, l.lineId === picked)).join("")}</div>
+      </fieldset>`;
+}
+
 function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
   if (v.lines.length === 0) {
     return `
@@ -268,10 +300,7 @@ function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
     </section>`;
   }
   const nameError = s.error === "invalid_name";
-  const lines = `<fieldset class="lines">
-        <legend class="label">Line</legend>
-        <div class="group line-list">${v.lines.map((l) => lineOption(l, l.lineId === s.lineId)).join("")}</div>
-      </fieldset>`;
+  const lines = linePicker(v.lines, s.lineId);
   return `
     <section class="panel use-step" aria-labelledby="add-title">
       <div class="step-head">
@@ -291,6 +320,66 @@ function addStep(v: Ready, s: Extract<Ready["step"], { kind: "add" }>): string {
             ${s.creating ? "Creating config…" : "Create config"}
           </button>
           <button class="button quiet" type="button" data-action="use-cancel-add" ${s.creating ? "disabled" : ""}>Cancel</button>
+        </div>
+      </form>
+    </section>`;
+}
+
+/**
+ * What each failover does, named after the picked line's city and country
+ * when Homeport knows them: "Use another line in Lyon only".
+ */
+export function failoverLabel(f: Failover, line: Pick<Line, "city" | "country"> | undefined): string {
+  const city = line?.city ?? "";
+  const country = line?.country ? countryName(line.country) : "";
+  switch (f) {
+    case "country":
+      if (city && country) return `Use another line in ${city}, or else in ${country}`;
+      if (country) return `Use another line in ${country}`;
+      return "Use another line in the same city, or else the same country";
+    case "city":
+      return city ? `Use another line in ${city} only` : "Use another line in the same city only";
+    case "off":
+      return "Wait until its line is back";
+  }
+}
+
+function failoverOption(f: Failover, picked: boolean, line: Line | undefined): string {
+  return `
+    <label class="failover-option">
+      <input type="radio" name="failover" value="${f}" ${picked ? "checked" : ""} />
+      <span class="failover-text">${esc(failoverLabel(f, line))}${
+        f === "off" ? `<span class="failover-meta">It has no connection meanwhile.</span>` : ""
+      }</span>
+    </label>`;
+}
+
+function editStep(v: Ready, s: Extract<Ready["step"], { kind: "edit" }>): string {
+  const d = v.devices.find((d) => d.peerId === s.peerId);
+  const name = d?.name ?? "device";
+  const picked = v.lines.find((l) => l.lineId === s.lineId);
+  const lines = v.lines.length
+    ? linePicker(v.lines, s.lineId)
+    : `<p class="panel-line empty">Nobody shares another line you can use right now.</p>`;
+  return `
+    <section class="panel use-step" aria-labelledby="edit-title">
+      <div class="step-head">
+        <h2 id="edit-title" tabindex="-1">Change ${esc(name)}</h2>
+        <p class="panel-line">It keeps its config, so there's nothing to scan or import again.</p>
+      </div>
+      <form class="add-form" data-form="edit-device" novalidate>
+        ${lines}
+        ${alert(s.error)}
+        <fieldset class="failover">
+          <legend class="label">If its line goes offline</legend>
+          <div class="group failover-list">${FAILOVERS.map((f) => failoverOption(f, f === s.failover, picked)).join("")}</div>
+          <p class="panel-hint">It moves back once its own line has been online for 5 minutes.</p>
+        </fieldset>
+        <div class="panel-actions">
+          <button class="button primary" type="submit" data-focus="use-save-device" data-peer="${esc(s.peerId)}" ${busyAttrs(s.saving)}>
+            ${s.saving ? "Saving…" : "Save changes"}
+          </button>
+          <button class="button quiet" type="button" data-action="use-cancel-edit" data-peer="${esc(s.peerId)}" ${s.saving ? "disabled" : ""}>Cancel</button>
         </div>
       </form>
     </section>`;

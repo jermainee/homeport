@@ -115,6 +115,52 @@ describe("opening Use", () => {
     expect(ready().balance).toEqual(bought);
   });
 
+  it("follows the devices alone, to show where each one exits", async () => {
+    await open();
+    const backup = { ...laptop, exitLine: { lineId: porto.lineId, country: "PT", city: "", since: "2026-11-14T13:02:10Z" } };
+    api.devicesAnswer = [backup];
+    const calls = api.calls.length;
+
+    await use.refreshDevices();
+
+    expect(ready().devices).toEqual([backup]);
+    expect(api.calls.slice(calls)).toEqual(["devices"]);
+  });
+
+  it("keeps the devices on screen when following them fails for a moment", async () => {
+    await open();
+    api.devicesAnswer = serviceError("offline");
+
+    await use.refreshDevices();
+
+    expect(ready().devices).toEqual([laptop]);
+  });
+
+  it("goes to sign-in when following the devices finds the session ended", async () => {
+    await open();
+    api.devicesAnswer = serviceError("signed_out");
+
+    await use.refreshDevices();
+
+    expect(use.view).toEqual({ kind: "signedOut" });
+  });
+
+  it("keeps a change that finished while the devices were followed", async () => {
+    await open();
+    let answer!: (d: typeof laptop[]) => void;
+    api.devices = () => new Promise((r) => (answer = r));
+    const following = use.refreshDevices();
+
+    use.startEditing(laptop.peerId);
+    use.pickFailover("off");
+    api.devices = FakeUse.prototype.devices;
+    await use.saveDevice();
+    answer([laptop]); // the list from before the change
+    await following;
+
+    expect(ready().devices).toEqual([{ ...laptop, failover: "off" }]);
+  });
+
   it("refreshes in place, keeping what is on screen", async () => {
     await open();
     api.balanceAnswer = bought;
@@ -373,6 +419,166 @@ describe("the new device's config", () => {
     use.dispose();
 
     expect(api.forgotten).toEqual([dev.device.peerId]);
+  });
+});
+
+describe("changing a device", () => {
+  it("starts from the device's line and failover", async () => {
+    api.devicesAnswer = [{ ...laptop, lineId: lyon.lineId, failover: "city" }];
+    await open();
+
+    use.startEditing(laptop.peerId);
+
+    expect(ready().step).toEqual({ kind: "edit", peerId: laptop.peerId, lineId: lyon.lineId, failover: "city", saving: false });
+  });
+
+  it("moves the device to the line the member picked, and keeps its failover", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { lineId: lyon.lineId }]]);
+    expect(ready().step).toEqual({ kind: "list" });
+    expect(ready().devices).toEqual([{ ...laptop, lineId: lyon.lineId }]);
+  });
+
+  it("changes only the failover when the line stays", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickFailover("off");
+
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "off" }]]);
+    expect(ready().devices).toEqual([{ ...laptop, failover: "off" }]);
+  });
+
+  it("goes back without asking Homeport when nothing changed", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+    use.pickLine(berlin.lineId);
+
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([]);
+    expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it("is busy while it saves, and ignores a second press and Cancel", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickFailover("city");
+    api.hold();
+
+    const pending = use.saveDevice();
+    expect(ready().step).toMatchObject({ kind: "edit", saving: true });
+    await use.saveDevice();
+    use.cancelEditing();
+    use.pickLine(lyon.lineId);
+    expect(ready().step).toMatchObject({ kind: "edit", lineId: berlin.lineId, saving: true });
+    api.release();
+    await pending;
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "city" }]]);
+    expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it.each(["line_full", "line_on_other_gateway", "line_not_allowed", "offline"] as const)(
+    "keeps the form and says why on %s",
+    async (code) => {
+      await open();
+      use.startEditing(laptop.peerId);
+      use.pickLine(lyon.lineId);
+      api.updateAnswer = serviceError(code);
+
+      await use.saveDevice();
+
+      expect(ready().step).toEqual({
+        kind: "edit",
+        peerId: laptop.peerId,
+        lineId: lyon.lineId,
+        failover: "country",
+        saving: false,
+        error: code,
+      });
+      expect(ready().devices).toEqual([laptop]);
+    },
+  );
+
+  it("reloads the lines when the picked one is gone, and picks the device's own again", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+    api.updateAnswer = serviceError("line_unavailable");
+    api.linesAnswer = [berlin, porto];
+
+    await use.saveDevice();
+
+    expect(ready().lines).toEqual([berlin, porto]);
+    expect(ready().step).toMatchObject({ kind: "edit", lineId: berlin.lineId, error: "line_unavailable" });
+  });
+
+  it("drops a device that was removed meanwhile, and goes back to the list", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickFailover("off");
+    api.updateAnswer = serviceError("device_gone");
+
+    await use.saveDevice();
+
+    expect(ready().devices).toEqual([]);
+    expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it("goes to sign-in when the session ended", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickFailover("off");
+    api.updateAnswer = serviceError("signed_out");
+
+    await use.saveDevice();
+
+    expect(use.view).toEqual({ kind: "signedOut" });
+  });
+
+  it("goes back to the list on Cancel", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+
+    use.cancelEditing();
+
+    expect(ready().step).toEqual({ kind: "list" });
+    expect(api.updates).toEqual([]);
+  });
+
+  it("opens only from the list, for a device the member has", async () => {
+    await open();
+
+    use.startEditing("peer-unknown");
+    expect(ready().step).toEqual({ kind: "list" });
+
+    use.startAdding();
+    use.startEditing(laptop.peerId);
+    expect(ready().step).toMatchObject({ kind: "add" });
+  });
+
+  it("keeps a change that finished while a refresh was on its way", async () => {
+    await open();
+    let answer!: (d: typeof laptop[]) => void;
+    api.devices = () => new Promise((r) => (answer = r));
+    const refreshing = use.refresh();
+
+    use.startEditing(laptop.peerId);
+    use.pickLine(lyon.lineId);
+    await use.saveDevice();
+    answer([laptop]); // the list from before the change
+    await refreshing;
+
+    expect(ready().devices).toEqual([{ ...laptop, lineId: lyon.lineId }]);
   });
 });
 

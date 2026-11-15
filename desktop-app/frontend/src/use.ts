@@ -32,14 +32,55 @@ export interface Line {
   online: boolean;
 }
 
+/**
+ * Where a device goes while its line is offline (services.Failover* in Go):
+ * another line in the same city, else in the same country; in the same
+ * city only; or nowhere until its line is back.
+ */
+export type Failover = "country" | "city" | "off";
+
+export const FAILOVERS: readonly Failover[] = ["country", "city", "off"];
+
+/** asFailover reads Go's failover, taking anything unknown as the default. */
+export function asFailover(s: string): Failover {
+  return (FAILOVERS as readonly string[]).includes(s) ? (s as Failover) : "country";
+}
+
+/** services.ExitLine in Go: the line a device's session exits through. */
+export interface ExitLine {
+  lineId: string;
+  /** ISO 3166-1 alpha-2, or "" when unknown. */
+  country: string;
+  city: string;
+  since: string;
+}
+
 /** services.Device in Go. */
 export interface Device {
   peerId: string;
   name: string;
+  /** The line the member chose. */
   lineId: string;
+  failover: Failover;
+  /** The line its session exits through; null without a session. */
+  exitLine: ExitLine | null;
   ipv4: string;
   ipv6: string;
   createdAt: string;
+}
+
+/**
+ * backupLine is the line a device runs on while its own is offline, or
+ * undefined while it runs on its own line or has no session.
+ */
+export function backupLine(d: Device): ExitLine | undefined {
+  return d.exitLine && d.exitLine.lineId !== d.lineId ? d.exitLine : undefined;
+}
+
+/** What UpdateDevice changes; what is left out stays. */
+export interface DeviceChange {
+  lineId?: string;
+  failover?: Failover;
 }
 
 /** services.NewDevice in Go: a device just added, with its config's QR code. */
@@ -62,6 +103,8 @@ export interface UseApi {
   saveConfig(peerId: string): Promise<boolean>;
   forgetConfig(peerId: string): Promise<void>;
   removeDevice(peerId: string): Promise<void>;
+  /** updateDevice moves a device to another line, or changes its failover. */
+  updateDevice(peerId: string, change: DeviceChange): Promise<Device>;
 }
 
 export type Checkout =
@@ -78,7 +121,9 @@ export type Step =
   | { kind: "list" }
   | { kind: "add"; lineId: string | null; name: string; creating: boolean; error?: ErrorCode }
   // The new device's config, shown once.
-  | { kind: "config"; device: NewDevice; saving: boolean; saved: boolean; error?: ErrorCode };
+  | { kind: "config"; device: NewDevice; saving: boolean; saved: boolean; error?: ErrorCode }
+  // A device's line and failover, being changed. It keeps its config.
+  | { kind: "edit"; peerId: string; lineId: string; failover: Failover; saving: boolean; error?: ErrorCode };
 
 export interface Ready {
   kind: "ready";
@@ -103,6 +148,13 @@ export type UseView =
 /** How often to ask whether a purchase's credits arrived, and for how long. */
 export const CHECKOUT_POLL_MS = 3000;
 export const CHECKOUT_GIVE_UP_MS = 10 * 60_000;
+
+/**
+ * How often the device list follows the gateway while Use is open, so a
+ * device moving to a backup line shows. The API keeps a session's line for
+ * 3 minutes after the gateway last reported it.
+ */
+export const DEVICES_REFRESH_MS = 30_000;
 
 /** The contract's limit on a device name. */
 export const MAX_DEVICE_NAME = 64;
@@ -173,6 +225,25 @@ export class Use {
       balance: balanceVersion === this.#balanceVersion ? balance : v.balance,
       devices: devicesVersion === this.#devicesVersion ? devices : v.devices,
     });
+  }
+
+  /**
+   * refreshDevices reloads only the devices, to follow the line each one
+   * exits through. A failure is left for the next try, unless it takes
+   * Use away.
+   */
+  async refreshDevices(): Promise<void> {
+    if (this.#view.kind !== "ready") return;
+    const version = this.#devicesVersion;
+    let devices: Device[];
+    try {
+      devices = await this.api.devices();
+    } catch (err) {
+      this.#lost(errorCode(err));
+      return;
+    }
+    const v = this.#ready();
+    if (v && version === this.#devicesVersion) this.#set({ ...v, devices });
   }
 
   async #load(): Promise<void> {
@@ -293,11 +364,14 @@ export class Use {
     this.#set({ ...v, step: { kind: "add", lineId: line?.lineId ?? null, name: "", creating: false } });
   }
 
-  /** pickLine picks the line the new device will use. */
+  /** pickLine picks the line the new or changed device will use. */
   pickLine(lineId: string): void {
     const v = this.#ready();
-    if (!v || v.step.kind !== "add" || v.step.creating) return;
-    this.#set({ ...v, step: { ...v.step, lineId, error: undefined } });
+    if (v?.step.kind === "add" && !v.step.creating) {
+      this.#set({ ...v, step: { ...v.step, lineId, error: undefined } });
+    } else if (v?.step.kind === "edit" && !v.step.saving) {
+      this.#set({ ...v, step: { ...v.step, lineId, error: undefined } });
+    }
   }
 
   /**
@@ -410,6 +484,93 @@ export class Use {
     } catch {
       // See above.
     }
+  }
+
+  /** startEditing opens a device's line and failover, to change them. */
+  startEditing(peerId: string): void {
+    const v = this.#ready();
+    if (!v || v.step.kind !== "list") return;
+    const d = v.devices.find((d) => d.peerId === peerId);
+    if (!d) return;
+    this.#set({
+      ...v,
+      removing: undefined,
+      step: { kind: "edit", peerId, lineId: d.lineId, failover: d.failover, saving: false },
+    });
+  }
+
+  /** pickFailover picks where the device goes while its line is offline. */
+  pickFailover(failover: Failover): void {
+    const v = this.#ready();
+    if (!v || v.step.kind !== "edit" || v.step.saving) return;
+    this.#set({ ...v, step: { ...v.step, failover, error: undefined } });
+  }
+
+  cancelEditing(): void {
+    const v = this.#ready();
+    if (!v || v.step.kind !== "edit" || v.step.saving) return;
+    this.#set({ ...v, step: { kind: "list" } });
+  }
+
+  /**
+   * saveDevice sends what the member changed, and only that, so a change
+   * made elsewhere to the other setting survives.
+   */
+  async saveDevice(): Promise<void> {
+    const v = this.#ready();
+    if (!v || v.step.kind !== "edit" || v.step.saving) return;
+    const step = v.step;
+    const d = v.devices.find((d) => d.peerId === step.peerId);
+    const change: DeviceChange = {};
+    if (d && step.lineId !== d.lineId) change.lineId = step.lineId;
+    if (d && step.failover !== d.failover) change.failover = step.failover;
+    if (!d || Object.keys(change).length === 0) {
+      this.#set({ ...v, step: { kind: "list" } });
+      return;
+    }
+    this.#set({ ...v, step: { ...step, saving: true, error: undefined } });
+    let dev: Device;
+    try {
+      dev = await this.api.updateDevice(step.peerId, change);
+    } catch (err) {
+      await this.#saveFailed(step, d, errorCode(err));
+      return;
+    }
+    const now = this.#ready();
+    if (!now) return;
+    this.#devicesVersion++;
+    this.#set({
+      ...now,
+      devices: now.devices.map((d) => (d.peerId === dev.peerId ? dev : d)),
+      step: { kind: "list" },
+    });
+  }
+
+  async #saveFailed(step: Extract<Step, { kind: "edit" }>, d: Device, code: ErrorCode): Promise<void> {
+    if (this.#lost(code)) return;
+    if (code === "device_gone") {
+      // Removed elsewhere: there is nothing left to change.
+      const v = this.#ready();
+      if (!v) return;
+      this.#devicesVersion++;
+      this.#set({ ...v, devices: v.devices.filter((x) => x.peerId !== step.peerId), step: { kind: "list" } });
+      return;
+    }
+    let lines: Line[] | undefined;
+    let lineId = step.lineId;
+    if (code === "line_unavailable") {
+      // The picked line stopped sharing: show the lines there are now,
+      // with the device's own line picked again.
+      try {
+        lines = await this.api.lines();
+      } catch {
+        // The old list stays; the error already says what happened.
+      }
+      lineId = d.lineId;
+    }
+    const v = this.#ready();
+    if (!v) return;
+    this.#set({ ...v, lines: lines ?? v.lines, step: { ...step, lineId, saving: false, error: code } });
   }
 
   askRemove(peerId: string): void {

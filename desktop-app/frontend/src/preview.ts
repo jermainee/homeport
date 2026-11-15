@@ -3,12 +3,13 @@
 // starting screen; the flow then runs with fake answers. On home,
 // &share=off|connecting|online|paused|offline|gateway|error picks Share's
 // state, &share=unverified|processing|requires_input the identity, and
-// &use=ready|empty|broke|unreachable how Use starts; &tab=use opens Use.
+// &use=ready|empty|broke|backup|unreachable how Use starts; &tab=use opens
+// Use.
 
 import type { IdentityApi } from "./identity";
 import type { ShareApi, ShareStatus } from "./share";
 import type { AuthApi, LoginStatus, Member } from "./signin";
-import type { Balance, Device, Line, UseApi } from "./use";
+import type { Balance, Device, ExitLine, Line, UseApi } from "./use";
 
 const identities = ["unverified", "processing", "requires_input"];
 
@@ -128,13 +129,31 @@ const previewLines: Line[] = [
   { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", ipv6: true, online: true },
   { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", ipv6: false, online: true },
   { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e8", country: "FR", city: "Lyon", isp: "Orange", ipv6: true, online: false },
+  { lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e9", country: "FR", city: "Villeurbanne", isp: "Free", ipv6: true, online: true },
 ];
+
+// Where a device's session exits, as the gateway reports it: its own line
+// while that is online, else a backup line as its failover allows.
+function exitOf(d: Pick<Device, "lineId" | "failover">, since: string): ExitLine | null {
+  const own = previewLines.find((l) => l.lineId === d.lineId);
+  if (!own) return null;
+  const backup =
+    d.failover === "off"
+      ? undefined
+      : previewLines.find(
+          (l) => l.online && l.lineId !== own.lineId && l.country === own.country && (d.failover === "country" || l.city === own.city),
+        );
+  const line = own.online ? own : backup;
+  return line ? { lineId: line.lineId, country: line.country, city: line.city, since } : null;
+}
 
 // A real config's QR code, made by go-qrcode as UseService makes it, for a
 // throwaway key: it scans in the WireGuard app, and connects nowhere.
 const previewQR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAATQAAAE0AQMAAACYT13cAAAABlBMVEX///8AAABVwtN+AAADZElEQVR42uzay3HzPBYG4c7gzT/LzqCnCMq/P29mCy98RBEgzsMqwuJFgMxf/MXdqJzbSrdo2PYU5pO+6gRXiANaDUC2QLjsUtfG834KmRu4xPwVrpliA4jJBH+HE9d4XiXJ2NnzvgODOUiQMjTKn+fLDVf5f+LH9XbDAdgcDOlZLAbIz7jhLGHAnD6breWI+V83brkIJzF8FofxornmVTeTT0at6cyGRMZVR2wbJ40ytwLUlt51qTNwjCSYlLQEvOoWG5s0HE89hyxryFWnc7g2nvbUsAmnpbuuBsxFsYGTUBvu+356xw16j3us9+Nnm346B1ddQiYxWQpz2wxk86oz6s3GyCJIPP0Q7jrbu3ah+9yHtq1lt124tCLRwL1vJLzrto2FarL2dkOGxPKqS5wtlfwes6icPbjqcGt+3SLHKQxWw7zrkkYpWrIkvgZXrrtO2+fbDbENILflCLnriGLMpRsm2lp41lfdSSbsvYTAkk1kbt51GxkzV59xwFIXfcNb7j3WaOjAIKWvp4x3XeAoYE9UMgVZJlx1ThoHHAJzAmd7ddfxgGUbNJ7c2mwnJ5cdIigKJpGyKUi3nRrWrFJtp9KG5mU3UdFAkWieCFGvulm+/djs2QrWPgNmuetaA80jp6MQkK/iogNMNoYFO6tNRNi46jY3oowtl+B21pZ3XaVjYzX1qW1TAPdjnvWCk2ZoJxe6Yi6Z6F23PJG0CTO3F+eUq67nVYBDmdpgY5HddiPIEHr/wgzDoN1261lkow0zmnOnJnnXURoCaw2kwsSG3HWnKeIz8THHgkXbL3ALkaHUiLlygxledU1QEYKxoeFnXLXLDjpBDkDQt3eAK666gg1kVrZ81kxY3XanLuZGyWhC8HOm4ZKrBqRzsFpzxJSBdx0VYxJbMEbme3awf07TG84x2wqJr7N0YK3Iqy729XuIhdA4LXP++zy/5M4H//nlgW0EDkH24/8ArjitDXpgc/hU32v+2R53HcDT7kLkqQIQTeZl9x4yjhqWcMoFZXcdQLK2BpM4yzBE7rpK8onYW/B52HxarzpBPTxmom6w9Sa869JeZ+pTjtX3HMlvcOLXF1coDt0iue8WowS1tx+Tp7rbDlyTNpw41Hc3d939N2X5vEQWxNq2N3PV/cVfXIv/DQCyuTTms+uOSgAAAABJRU5ErkJggg==";
 
-// &use=ready|empty|broke|unreachable picks how Use starts.
+// &use=ready|empty|broke|backup|unreachable picks how Use starts. On
+// backup, the travel router's line in Lyon is offline, so it runs on a
+// backup line nearby.
 export function previewUse(start: string): UseApi {
   let balance: Balance =
     start === "empty" || start === "broke"
@@ -144,9 +163,11 @@ export function previewUse(start: string): UseApi {
     start === "empty" || start === "broke"
       ? []
       : [
-          { peerId: "p-router", name: "Travel router", lineId: previewLines[0]!.lineId, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
-          { peerId: "p-laptop", name: "Laptop", lineId: previewLines[1]!.lineId, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
+          { peerId: "p-router", name: "Travel router", lineId: previewLines[start === "backup" ? 2 : 0]!.lineId, failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
+          { peerId: "p-laptop", name: "Laptop", lineId: previewLines[1]!.lineId, failover: "country", exitLine: null, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
         ];
+  const now = new Date().toISOString();
+  devices = devices.map((d) => ({ ...d, exitLine: exitOf(d, now) }));
   let checkoutPolls = 0;
   let n = 4;
   return {
@@ -172,7 +193,7 @@ export function previewUse(start: string): UseApi {
     },
     async addDevice(lineId, name) {
       await sleep(700);
-      const device: Device = { peerId: `p-${n}`, name, lineId, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: new Date().toISOString() };
+      const device: Device = { peerId: `p-${n}`, name, lineId, failover: "country", exitLine: null, ipv4: `10.77.0.${n}`, ipv6: `fd77::${n}`, createdAt: new Date().toISOString() };
       n++;
       devices = [device, ...devices];
       return { device, qrCode: previewQR, fileName: `Homeport-${name.replace(/[^A-Za-z0-9]+/g, "-")}.conf`.slice(0, 20) };
@@ -185,6 +206,15 @@ export function previewUse(start: string): UseApi {
     async removeDevice(peerId) {
       await sleep(500);
       devices = devices.filter((d) => d.peerId !== peerId);
+    },
+    async updateDevice(peerId, change) {
+      await sleep(500);
+      const old = devices.find((d) => d.peerId === peerId);
+      if (!old) throw fail("device_gone");
+      const moved = { ...old, ...change };
+      const device: Device = { ...moved, exitLine: exitOf(moved, new Date().toISOString()) };
+      devices = devices.map((d) => (d.peerId === peerId ? device : d));
+      return device;
     },
   };
 }
