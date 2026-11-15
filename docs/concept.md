@@ -158,7 +158,7 @@ flowchart LR
     buyer["Buyer device<br/>WireGuard app or travel router;<br/>SOCKS5 for one app"]
     gw["Edge gateway<br/>Ends WireGuard and SOCKS5,<br/>meters bytes, routes flows to line"]
     agent["Seller agent<br/>At the seller's home; opens real<br/>sockets, blocks LAN and abuse"]
-    web["Website<br/>Sees home IP, home DNS resolver<br/>and TCP stack"]
+    web["Website<br/>Sees home IP, DNS from the home<br/>line and the home TCP stack"]
   end
   subgraph control["Control plane"]
     api["API and matching<br/>Accounts, lines, matching,<br/>configs, trust and safety"]
@@ -183,7 +183,7 @@ Both the buyer and the seller agent connect out to the gateway, so the seller's 
 
 ## Data plane and connection fidelity
 
-The gateway ends the buyer's tunnel, and the seller agent opens real sockets from the home network. Websites therefore see a genuine home connection: home IP, home ISP DNS resolver and a home operating system's TCP stack.
+The gateway ends the buyer's tunnel, and the seller agent opens real sockets from the home network. Websites therefore see a genuine home connection: home IP, DNS resolved from the home line and a home operating system's TCP stack.
 
 **Path of one connection**
 
@@ -192,7 +192,7 @@ The gateway ends the buyer's tunnel, and the seller agent opens real sockets fro
 3. For WireGuard, the gateway runs a userspace network stack (wireguard-go with gVisor netstack, as Tailscale does) that turns the buyer's packets into TCP streams and UDP flows.
 4. Each flow becomes a stream on the seller's QUIC connection, for example "open TCP to 203.0.113.7:443".
 5. The agent opens a normal socket on the home machine and pipes bytes both ways.
-6. DNS goes the same way: the gateway answers on a virtual DNS address and the agent resolves through the home router, so the ISP's resolver appears. SOCKS5 clients use remote hostname resolution (socks5h).
+6. DNS goes the same way: the gateway answers on a virtual DNS address, and the agent resolves each name over DNS over HTTPS (Cloudflare, then Quad9) through the home line. The resolver sees the home IP and answers for the home's region. Neither the seller's network nor their ISP can read or forge the answers, because the agent checks the resolver's certificate against root certificates built into the agent, not the machine's trust store. The agent never falls back to the seller's own resolver, which would let anyone who blocks DNS over HTTPS forge answers again. SOCKS5 clients use remote hostname resolution (socks5h).
 
 Gateways sit in the seller's region (Frankfurt for German lines). The buyer's long leg is unavoidable, and the seller leg stays short and stable. The seller's upload is the speed limit: a 100/40 Mbit/s line shared at 50% gives the buyer about 20 Mbit/s down.
 
@@ -209,7 +209,7 @@ Gateways sit in the seller's region (Frankfurt for German lines). The buyer's lo
 | --- | --- | --- |
 | IP type and ISP | Real residential line | None |
 | Proxy and VPN databases | Dedicated lines, verified buyers, low volume; daily reputation checks; flagged lines retired | Detection vendors may still find lines over time |
-| DNS resolver | Resolved through the seller's ISP | None |
+| DNS resolver | Resolved from the home line over DNS over HTTPS, by a public resolver near the home | A check that expects the home ISP's own resolver sees Cloudflare or Quad9, as it does for the many home users whose browser uses DNS over HTTPS |
 | IPv6 | Routed through the seller's IPv6 when available, otherwise blocked inside the tunnel | None if the WireGuard config captures all IPv6 |
 | WebRTC | Full-tunnel WireGuard carries UDP, so WebRTC shows the home IP | SOCKS5 users must turn off WebRTC in the browser |
 | Video calls, QUIC | UDP flows are supported | Higher latency than a direct connection |
@@ -328,8 +328,8 @@ A buyer's traffic passes three parties besides the website. What each can see an
 | Party | Sees | Could change | What protects the buyer |
 | --- | --- | --- | --- |
 | Homeport's gateway | Everything inside the tunnel, as any VPN provider does: destinations, DNS names, unencrypted content | Unencrypted traffic | It logs session metadata only, never destinations or content. HTTPS stays end to end between the buyer's device and the website. |
-| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | DNS answers and unencrypted traffic | HTTPS stays end to end. Sellers are identity-verified and bound by terms. |
-| The seller's ISP and home network | The same as the seller's machine | DNS answers and unencrypted traffic | HTTPS stays end to end. |
+| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | Unencrypted traffic, and DNS answers only by modifying the agent | HTTPS stays end to end. DNS goes over HTTPS from inside the agent, verified against its own roots. Sellers are identity-verified and bound by terms. |
+| The seller's ISP and home network | Destination IPs and ports, the server name in TLS, unencrypted content; not DNS names, which travel encrypted | Unencrypted traffic | HTTPS stays end to end. DNS over HTTPS keeps names and answers out of reach. |
 | Other members | Nothing | Nothing | Isolation between members (above) |
 
 Buyers are told this up front. A tampered agent or a byte-count mismatch leads to a ban and forfeiture of pending earnings.

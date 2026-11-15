@@ -15,19 +15,16 @@ import (
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
 )
 
-// Resolver looks up a host's IP addresses. *net.Resolver implements it.
+// Resolver looks up a host's IP addresses, as *net.Resolver does: a name
+// without records of the network's family is a *net.DNSError with
+// IsNotFound.
 type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// systemResolver is the machine's own resolver. On macOS it goes through the
-// system's DNS service, which also spares the agent the Local Network
-// permission prompt that querying the home router directly would cause.
-var systemResolver Resolver = net.DefaultResolver
-
 const (
-	// dnsTTL is the TTL of every answer. The system resolver does not
-	// report real TTLs, so answers are kept short-lived.
+	// dnsTTL is the TTL of every answer. Answers are kept short-lived, so a
+	// client asks again soon rather than caching past a change.
 	dnsTTL = 60
 	// dnsQueryTimeout bounds one lookup.
 	dnsQueryTimeout = 5 * time.Second
@@ -154,9 +151,10 @@ var homeZones = []string{
 
 // homeOnlyName reports whether name can only resolve inside the home
 // network: a single label, which routers answer for LAN hosts, or a name in
-// one of homeZones. The agent answers these with NXDOMAIN without a lookup,
-// because a lookup would send mDNS or router queries into the home network,
-// and how fast it came back would reveal which devices exist there.
+// one of homeZones. The agent answers these with NXDOMAIN without a lookup.
+// No public resolver knows them, and a resolver on the machine would send
+// mDNS or router queries into the home network, whose timing would reveal
+// which devices exist there.
 func homeOnlyName(name string) bool {
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
 	if !strings.Contains(name, ".") {

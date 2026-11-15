@@ -58,8 +58,10 @@ type Config struct {
 	// Version is the release sent in Hello. Empty means [Version].
 	Version string
 
-	// Resolver answers DNS flows. Nil means net.DefaultResolver, the
-	// system resolver, so websites see the home ISP's resolver.
+	// Resolver answers DNS flows. Nil means DNS over HTTPS to Cloudflare,
+	// then Quad9, through the line, verified against the roots built into
+	// the agent, so neither the member's network nor their ISP can read or
+	// change the answers. Tests pass their own.
 	Resolver Resolver
 	// Logger receives session metadata only. Nil discards logs.
 	Logger *slog.Logger
@@ -192,9 +194,6 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Version == "" {
 		cfg.Version = Version
 	}
-	if cfg.Resolver == nil {
-		cfg.Resolver = systemResolver
-	}
 	if cfg.StatsInterval <= 0 {
 		cfg.StatsInterval = DefaultStatsInterval
 	}
@@ -215,6 +214,11 @@ func New(cfg Config) (*Agent, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if cfg.Resolver == nil {
+		r := newDoHResolver(defaultDoHServers, bundledRoots())
+		r.log = log
+		cfg.Resolver = r
+	}
 	return &Agent{
 		cfg:  cfg,
 		log:  log,
@@ -232,6 +236,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	defer a.running.Store(false)
 	defer a.setState(StateStopped)
+	if c, ok := a.cfg.Resolver.(interface{ CloseIdleConnections() }); ok {
+		defer c.CloseIdleConnections() // after every flow has finished
+	}
 
 	checkFileLimit(a.log)
 	a.checkTunnel()

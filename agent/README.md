@@ -11,7 +11,7 @@ The wire format is [`relay-protocol/`](../relay-protocol/README.md).
 - **Flows:** the gateway opens one stream per flow, and the agent answers each `FlowOpen` with a `FlowResult`:
   - **TCP:** the agent connects and relays the byte stream. A FIN becomes a half-close on the other side, and a reset (`FLOW_RESET`) becomes a reset.
   - **UDP:** the agent connects a UDP socket and relays one frame per datagram. A UDP flow idle for 2 minutes ends with `FLOW_CANCELLED`.
-  - **DNS:** each frame is a query, answered through the system resolver, so websites see the home ISP's resolver. The agent answers A and AAAA queries, answers HTTPS and SVCB queries with no records, and returns NOTIMP for other types. It never dials the virtual resolver address in the header.
+  - **DNS:** each frame is a query. The agent answers A and AAAA queries, answers HTTPS and SVCB queries with no records, and returns NOTIMP for other types. It never dials the virtual resolver address in the header. See "DNS over HTTPS" below.
   - **Gateway close:** STOP_SENDING from the gateway on a TCP flow means the client is gone. The agent stops reading the socket but still delivers the gateway's remaining bytes up to its FIN; with `FLOW_RESET` it resets the socket.
   - A malformed header resets the stream with `PROTOCOL_ERROR`, or `UNSUPPORTED_VERSION` for an unknown version.
 - **Reconnects:** after a failure the agent retries after 1 s, doubling up to 1 minute, with jitter. After `UNAUTHORIZED` (for example, a removed device) it waits the full minute. When the gateway refuses its certificate in the handshake (`bad_certificate`), its config may not list the line yet, as right after the member turned Share on. The refusal makes the gateway fetch its config at once (at most every 2 s), so the agent retries after 1 s (jittered to 0.5 to 1 s) up to five times in a row before the usual backoff takes over.
@@ -33,9 +33,21 @@ The policy reads the machine's interface networks again at every connection, so 
 Builds with the `e2e` build tag have two test hooks for the end-to-end tests in `e2e/`:
 
 - `AllowTestOrigin` lets the agent dial a loopback test server.
-- `RouteTestOrigin` sends flows for a public-looking destination, such as `203.0.113.10:80`, to a loopback test server. A real gateway drops packets addressed to loopback, so tests that run through it need this. A route covers TCP and UDP alike and skips the policy for its own port; DNS answers may name the routed address, and its other ports get the normal policy.
+- `RouteTestOrigin` sends flows for a public-looking destination, such as `11.22.33.44:80`, to a loopback test server. A real gateway drops packets addressed to loopback, so tests that run through it need this. A route covers TCP and UDP alike and skips the policy for its own port; DNS answers may name the routed address, and its other ports get the normal policy.
 
 `cmd/homeport-agent` does not compile with that tag, and CI checks that. The tag guard covers this command only: a program that embeds the library, such as the desktop app, must refuse the tag in its own release build too.
+
+## DNS over HTTPS
+
+The agent resolves names over DNS over HTTPS (RFC 8484) through the line: Cloudflare (`cloudflare-dns.com` at `1.1.1.1`, `1.0.0.1` and their IPv6 addresses), then Quad9 (`dns.quad9.net` at `9.9.9.9`, `149.112.112.112` and their IPv6 addresses). It dials those addresses directly, so finding the resolver needs no DNS, and uses one HTTP/2 connection per resolver for all queries.
+
+- **Trust:** the resolver's certificate is verified against the Mozilla roots built into the agent (`golang.org/x/crypto/x509roots/fallback/bundle`), never the machine's trust store. A root installed on the machine, by the member or an intercepting proxy, does not get answers through. Bump that module to keep the roots current.
+- **Privacy:** queries use ID 0 and are padded to a multiple of 128 bytes (RFC 8467), so the size of the encrypted request does not give the name away.
+- **Failover:** a resolver's addresses are dialed Happy Eyeballs style: the next starts after 250 ms, or at once when one fails, so a lost SYN costs little. Each attempt at one resolver gets 2.5 s, enough for a new connection over a satellite line. A resolver that fails or does not answer is skipped for the next, and later lookups start at the one that answered last.
+- **One connection per resolver:** queries that find no connection wait for the one being dialed, and a dial ends after 2.5 s, so a network that drops DNS over HTTPS cannot pile up sockets. HTTP/2 pings after 15 s without traffic replace a connection that died, as when the machine changed networks. When `Run` returns, the connections close.
+- **No fallback:** if neither resolver answers, the query gets SERVFAIL, and the agent logs a warning at most once a minute, naming the resolvers' errors but no DNS name. It never falls back to the system resolver: whoever blocks DNS over HTTPS could then forge answers again.
+- Answers must match the query's question, and truncated answers are refused. Queries ask for a UDP size of 65535, which over HTTPS means no limit.
+- A name error, or an answer without records of the asked family, gets an empty NOERROR answer.
 
 ## Pausing
 

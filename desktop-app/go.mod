@@ -9,6 +9,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/quic-go/quic-go v0.65.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261113174652-9ccaac6145fb // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect

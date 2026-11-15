@@ -621,7 +621,7 @@ func sum(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// fakeResolver stands in for the home ISP's resolver behind the agent.
+// fakeResolver stands in for the agent's DNS-over-HTTPS resolvers.
 type fakeResolver struct {
 	answers map[string][]netip.Addr // "ip4 name." → addresses
 

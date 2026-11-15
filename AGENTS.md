@@ -60,6 +60,7 @@ These are the current values. Keep them in one pricing module, and have all othe
 - **Metering:** the gateway is the meter of record and counts usage per WireGuard peer or SOCKS5 login. That way, a stock WireGuard client on a travel router is metered the same as the app.
 - **No self-dealing:** a member's traffic always exits through someone else's line. It never exits through their own line, or through a line linked to them by household, device, card or Connect account.
 - **Isolation:** a member's flows never reach another member's device, the gateway (except DNS on the virtual resolver) or a private or other special-purpose range. The gateway refuses them before any agent sees them, and the agent refuses them again, together with the seller's own IP and home networks.
+- **DNS:** the agent resolves members' names over DNS over HTTPS through the line, verifying the resolver against root certificates built into the agent. It never falls back to the seller's system resolver.
 - **Logging:** logs hold only session metadata (member, line, start, end, bytes). Destinations and content are never logged.
 
 ## Language
