@@ -64,6 +64,10 @@ type Config struct {
 	// disconnects. It must return quickly and must not call the Server.
 	OnLineEvent func(LineEvent)
 
+	// Canary, if set, checks every online line now and then for tampering
+	// (see CanaryConfig). It needs the relay (QUICListen).
+	Canary *CanaryConfig
+
 	// OnUnknownAgent, if set, is called during the handshake of an agent
 	// whose certificate pin belongs to no line, before the gateway refuses
 	// it. The line may be newer than the gateway's config, so the callback
@@ -116,12 +120,18 @@ type AccessControl interface {
 	TopUpHost(host string) bool
 }
 
-// LineEvent tells that a line's agent connected (Online) or disconnected.
+// LineEvent tells that a line's agent connected (Online) or disconnected,
+// or that the gateway suspended the line because a canary check caught it
+// changing a response (Tampered).
 type LineEvent struct {
 	LineID       string
 	Online       bool
 	ObservedIP   netip.Addr // the agent's public IP as the gateway sees it
 	AgentVersion string     // from the agent's hello
+	// Tampered names the check that caught the line, "http" or "dns". The
+	// line is suspended: its agent is disconnected, and the line cannot be
+	// added again while the gateway runs. An offline event follows.
+	Tampered string
 }
 
 // Line is a member's shared line, served by the agent with AgentPin.
@@ -147,12 +157,15 @@ type Server struct {
 	meter  *wgstack.Meter
 	stack  *wgstack.Stack
 	relay  *relay.Relay // nil when Config.Dialer replaces it
+	canary *canary      // nil without Config.Canary
 	port   uint16
 	mu     sync.Mutex
 	peers  map[Key]Peer
 	byAddr map[netip.Addr]Key
 	lines  map[string]Line
 	closed bool
+	// suspended are lines a canary check caught tampering.
+	suspended map[string]bool
 
 	unknown *unknownPeers // watches handshakes for Config.OnUnknownPeer; nil without one
 }
@@ -174,12 +187,14 @@ func New(cfg Config) (*Server, error) {
 	if !cfg.DNS.IsValid() {
 		cfg.DNS = netip.MustParseAddr("10.77.0.1")
 	}
-	s := &Server{cfg: cfg, peers: make(map[Key]Peer), byAddr: make(map[netip.Addr]Key), lines: make(map[string]Line)}
+	s := &Server{cfg: cfg, peers: make(map[Key]Peer), byAddr: make(map[netip.Addr]Key), lines: make(map[string]Line), suspended: make(map[string]bool)}
 	dialer := cfg.Dialer
 	if dialer == nil {
 		onEvent := func(relay.Event) {}
 		if cfg.OnLineEvent != nil {
-			onEvent = func(e relay.Event) { cfg.OnLineEvent(LineEvent(e)) }
+			onEvent = func(e relay.Event) {
+				cfg.OnLineEvent(LineEvent{LineID: e.LineID, Online: e.Online, ObservedIP: e.ObservedIP, AgentVersion: e.AgentVersion})
+			}
 		}
 		r, err := relay.Listen(cfg.QUICListen, cfg.Certificate, netip.AddrPortFrom(cfg.DNS, 53), onEvent, cfg.OnUnknownAgent)
 		if err != nil {
@@ -217,11 +232,45 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return fail(fmt.Errorf("gateway: %w", err))
 	}
+	if cfg.Canary != nil {
+		if s.canary, err = startCanary(s, *cfg.Canary); err != nil {
+			return fail(fmt.Errorf("gateway: %w", err))
+		}
+	}
 	s.dev, s.port = dev, port
 	if s.unknown != nil {
 		go s.unknown.run()
 	}
 	return s, nil
+}
+
+// CanaryAddr is the address the canary page listens on, or the zero
+// AddrPort without Config.Canary.
+func (s *Server) CanaryAddr() netip.AddrPort {
+	if s.canary == nil {
+		return netip.AddrPort{}
+	}
+	return netip.MustParseAddrPort(s.canary.ln.Addr().String())
+}
+
+// suspendLine stops serving a line that a canary check caught changing a
+// response: it reports the line tampered, disconnects its agent and keeps
+// it from being added again while the gateway runs. The control API pauses
+// the line on the report, so the next config no longer lists it.
+func (s *Server) suspendLine(id, check string) {
+	s.mu.Lock()
+	if s.suspended[id] || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.suspended[id] = true
+	delete(s.lines, id)
+	ip, version, _ := s.relay.Agent(id)
+	s.mu.Unlock()
+	if s.cfg.OnLineEvent != nil {
+		s.cfg.OnLineEvent(LineEvent{LineID: id, ObservedIP: ip, AgentVersion: version, Tampered: check})
+	}
+	s.relay.RemoveLine(id)
 }
 
 // QUICAddr is the UDP address agents dial, or nil without a relay.
@@ -251,6 +300,9 @@ func (s *Server) AddLine(l Line) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.suspended[l.ID] {
+		return fmt.Errorf("gateway: line %s is suspended: a canary check caught it tampering", l.ID)
+	}
 	if err := s.relay.SetLine(relay.Line{ID: l.ID, Pin: l.AgentPin}); err != nil {
 		return fmt.Errorf("gateway: %w", err)
 	}
@@ -496,6 +548,11 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.mu.Unlock()
+	if s.canary != nil {
+		s.canary.close() // outside mu: a running check may suspend a line
+	}
+	s.mu.Lock()
 	s.dev.Close()
 	s.closeRelay()
 	s.mu.Unlock()
