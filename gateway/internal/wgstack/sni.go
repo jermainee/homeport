@@ -16,8 +16,9 @@ const maxHello = 64 << 10
 var errHelloRead = errors.New("wgstack: ClientHello read")
 
 // peekServerName reads a TLS ClientHello from conn and returns the server
-// name it names (SNI) and every byte read, which must be passed on before
-// anything else. Nothing is written to conn.
+// name it names (SNI), or "" if it names none, and every byte read, which
+// must be passed on before anything else. Bytes that are not a ClientHello
+// are an error. Nothing is written to conn.
 func peekServerName(conn net.Conn, deadline time.Time) (string, []byte, error) {
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		return "", nil, err
@@ -33,9 +34,9 @@ func peekServerName(conn net.Conn, deadline time.Time) (string, []byte, error) {
 		},
 	})
 	err := srv.Handshake()
-	if name == "" || !errors.Is(err, errHelloRead) {
-		if err == nil || errors.Is(err, errHelloRead) {
-			err = errors.New("wgstack: ClientHello names no server")
+	if !errors.Is(err, errHelloRead) {
+		if err == nil {
+			err = errors.New("wgstack: no ClientHello")
 		}
 		return "", nil, err
 	}

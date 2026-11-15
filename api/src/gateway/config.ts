@@ -20,6 +20,7 @@ export interface GatewayConfig {
     ipv6: string;
     line_id: string;
     fallback_line_ids: string[];
+    https_only: boolean;
   }[];
   lines: { line_id: string; owner_member_id: string; device_spki_sha256: string }[];
 }
@@ -37,7 +38,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
   const [peers, lines, users, links, sessions] = await db.batch([
     db
       .prepare(
-        `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id, p.failover, l.country, l.city
+        `SELECT p.id AS peer_id, p.member_id, p.public_key, p.address_index, p.line_id, p.failover, p.https_only, l.country, l.city
            FROM ${PEER_JOINS}
           WHERE l.gateway_id = ?1 AND ${SERVED_PEER_SQL}
           ORDER BY p.id`,
@@ -100,6 +101,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
       ipv6: tunnelIpv6(peer.address_index),
       line_id: peer.line_id,
       fallback_line_ids: fallbackIds.get(peer.peer_id) ?? [],
+      https_only: peer.https_only === 1,
     })),
     lines: lineRows.map((line) => ({
       line_id: line.line_id,
@@ -114,6 +116,7 @@ export async function gatewayConfig(db: D1Database, env: Env, gatewayId: string)
 interface PeerRow extends FailoverPeer {
   public_key: string;
   address_index: number;
+  https_only: number;
 }
 
 interface LineRow extends FailoverLine {

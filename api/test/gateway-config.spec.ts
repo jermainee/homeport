@@ -29,6 +29,7 @@ interface Config {
     ipv6: string;
     line_id: string;
     fallback_line_ids: string[];
+    https_only: boolean;
   }[];
   lines: { line_id: string; owner_member_id: string; device_spki_sha256: string }[];
 }
@@ -65,8 +66,24 @@ describe("GET /v1/gateway/config", () => {
         ipv6: peer.ipv6,
         line_id: lineId,
         fallback_line_ids: [],
+        https_only: true,
       },
     ]);
+  });
+
+  it("sends each peer's HTTPS only setting, with a new etag when it changes", async () => {
+    const { gatewayId, token } = await announcedGateway();
+    const { lineId } = await lineOn(gatewayId);
+    const { user, peer } = await peerOn(lineId);
+    const before = await configBody(token);
+
+    const response = await send("PATCH", `/v1/wireguard/peers/${peer.peer_id}`, user.sessionToken, { https_only: false });
+    expect(response.status).toBe(200);
+    const after = await configBody(token);
+
+    expect(before.peers.map((p) => p.https_only)).toEqual([true]);
+    expect(after.peers.map((p) => p.https_only)).toEqual([false]);
+    expect(after.etag).not.toBe(before.etag);
   });
 
   it("tells the gateway how long a peer's own line must be back online before the peer moves back to it", async () => {

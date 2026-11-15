@@ -29,6 +29,7 @@ type Gateway interface {
 	AddPeer(gateway.Peer) error
 	RemovePeer(gateway.Key) (gateway.Usage, error)
 	SetPeerLine(key gateway.Key, lineID string)
+	SetPeerHTTPSOnly(key gateway.Key, on bool)
 	AddLine(gateway.Line) error
 	RemoveLine(id string)
 	PeerUsage(addr netip.Addr) gateway.Usage
@@ -206,7 +207,13 @@ func (c *Controller) applyLocked(cfg Config) error {
 		}
 		// The same device on other lines stays on the gateway, WireGuard
 		// session included. Step moves its session if its line is no
-		// longer one of them.
+		// longer one of them. A changed HTTPS only applies in place; the
+		// gateway resets the device's flows, so no unencrypted one
+		// outlives turning it on.
+		if want.HTTPSOnly != ps.cfg.HTTPSOnly {
+			c.gw.SetPeerHTTPSOnly(ps.peer.PublicKey, want.HTTPSOnly)
+			ps.peer.HTTPSOnly = want.HTTPSOnly
+		}
 		ps.cfg, ps.peer.LineID = want, want.LineID
 	}
 	for id, old := range c.lines {
@@ -279,7 +286,7 @@ func parsePeer(p ConfigPeer) (gateway.Peer, error) {
 	if err != nil {
 		return gateway.Peer{}, err
 	}
-	peer := gateway.Peer{ID: p.PeerID, PublicKey: key, MemberID: p.MemberID, LineID: p.LineID}
+	peer := gateway.Peer{ID: p.PeerID, PublicKey: key, MemberID: p.MemberID, LineID: p.LineID, HTTPSOnly: p.HTTPSOnly}
 	if peer.IPv4, err = netip.ParseAddr(p.IPv4); err != nil || !peer.IPv4.Is4() {
 		return gateway.Peer{}, fmt.Errorf("invalid IPv4 tunnel address %q", p.IPv4)
 	}

@@ -62,6 +62,7 @@ type Peer struct {
 	IPv6            string   `json:"ipv6"`
 	LineID          string   `json:"line_id"`
 	FallbackLineIDs []string `json:"fallback_line_ids"`
+	HTTPSOnly       bool     `json:"https_only"`
 }
 
 // Line is a shared line whose agent may connect.

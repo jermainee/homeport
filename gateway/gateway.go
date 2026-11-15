@@ -92,6 +92,10 @@ type Peer struct {
 	IPv4, IPv6 netip.Addr // tunnel addresses; at least one is required
 	MemberID   string     // the member who owns the device
 	LineID     string     // the line its traffic exits through
+	// HTTPSOnly admits a TCP flow only if it opens with TLS, so the line's
+	// owner and their ISP can neither read nor change it. DNS through the
+	// virtual resolver and UDP are not affected.
+	HTTPSOnly bool
 }
 
 // Access is what a peer may reach with a new flow.
@@ -358,24 +362,27 @@ func (p policy) Admit(ctx context.Context, f Flow) wgstack.Admission {
 	if !destinationAllowed(s.cfg.DNS, f.Dst) {
 		return wgstack.Admission{}
 	}
-	if s.cfg.Access == nil {
-		return wgstack.Admission{Allow: true}
-	}
+	dns := f.Dst == netip.AddrPortFrom(s.cfg.DNS, 53)
 	s.mu.Lock()
 	peer, ok := s.peers[s.byAddr[f.Peer]]
 	s.mu.Unlock()
+	full := wgstack.Admission{Allow: true, TLSOnly: ok && peer.HTTPSOnly && !dns}
+	if s.cfg.Access == nil {
+		return full // an unknown peer has no line, so the dialer refuses it
+	}
 	if !ok {
 		return wgstack.Admission{}
 	}
 	switch s.cfg.Access.Access(ctx, peer) {
 	case AccessFull:
-		return wgstack.Admission{Allow: true}
+		return full
 	case AccessTopUp:
-		if f.Dst == netip.AddrPortFrom(s.cfg.DNS, 53) {
+		if dns {
 			return wgstack.Admission{Allow: true}
 		}
 		if f.Dst.Port() == 443 {
-			return wgstack.Admission{Allow: true, ServerName: s.cfg.Access.TopUpHost}
+			topUp := func(name string) bool { return name != "" && s.cfg.Access.TopUpHost(name) }
+			return wgstack.Admission{Allow: true, ServerName: topUp}
 		}
 	}
 	return wgstack.Admission{}
@@ -512,6 +519,22 @@ func (s *Server) SetPeerLine(publicKey Key, lineID string) {
 	if p, ok := s.peers[publicKey]; ok {
 		p.LineID = lineID
 		s.peers[publicKey] = p
+	}
+}
+
+// SetPeerHTTPSOnly turns HTTPS only on or off for a peer, keeping its
+// WireGuard session. Its open flows are reset, so no unencrypted flow
+// outlives turning it on. A peer that is not on the gateway is ignored.
+func (s *Server) SetPeerHTTPSOnly(publicKey Key, on bool) {
+	s.mu.Lock()
+	p, ok := s.peers[publicKey]
+	if ok {
+		p.HTTPSOnly = on
+		s.peers[publicKey] = p
+	}
+	s.mu.Unlock()
+	if ok {
+		s.stack.ResetFlows(p.IPv4, p.IPv6)
 	}
 }
 

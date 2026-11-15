@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -111,6 +112,7 @@ type stackOptions struct {
 	shareLater bool
 	peerLater  bool
 	fallback   bool
+	httpsOnly  bool
 	canary     *canaryOptions
 }
 
@@ -156,6 +158,12 @@ func withPeerLater() func(*stackOptions) {
 // over B's peer while A's line is offline, and B's peer moves back once A's
 // line has been online for failbackSeconds. C's agent starts with
 // startFallbackAgent.
+// withHTTPSOnly gives member B's device HTTPS only, as the API does by
+// default. The other tests turn it off: their origin speaks plain HTTP.
+func withHTTPSOnly() func(*stackOptions) {
+	return func(o *stackOptions) { o.httpsOnly = true }
+}
+
 func withFallbackLine() func(*stackOptions) {
 	return func(o *stackOptions) { o.fallback = true }
 }
@@ -195,6 +203,7 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 			IPv4:      peerIP.String(),
 			IPv6:      "fd77:6870::2",
 			LineID:    lineID,
+			HTTPSOnly: o.httpsOnly,
 		}},
 		Lines: []fakeapi.Line{{
 			LineID:           lineID,
@@ -641,6 +650,7 @@ const contentPath = "/homeport-e2e-content"
 // loopback.
 type origin struct {
 	tcp, udp netip.AddrPort
+	requests atomic.Int64 // HTTP requests the origin has received
 }
 
 func startOrigin(t *testing.T) *origin {
@@ -686,7 +696,11 @@ func startOrigin(t *testing.T) *origin {
 			time.Sleep(time.Until(next))
 		}
 	})
-	srv := httptest.NewUnstartedServer(mux)
+	o := &origin{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.requests.Add(1)
+		mux.ServeHTTP(w, r)
+	}))
 	srv.Start()
 	t.Cleanup(srv.Close)
 
@@ -705,10 +719,9 @@ func startOrigin(t *testing.T) *origin {
 			_, _ = pc.WriteToUDPAddrPort(buf[:n], from)
 		}
 	}()
-	return &origin{
-		tcp: srv.Listener.Addr().(*net.TCPAddr).AddrPort(),
-		udp: pc.LocalAddr().(*net.UDPAddr).AddrPort(),
-	}
+	o.tcp = srv.Listener.Addr().(*net.TCPAddr).AddrPort()
+	o.udp = pc.LocalAddr().(*net.UDPAddr).AddrPort()
+	return o
 }
 
 // blob is n pseudo-random bytes, the same for the same n.

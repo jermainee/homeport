@@ -340,11 +340,17 @@ A buyer's traffic passes three parties besides the website. What each can see an
 | Party | Sees | Could change | What protects the buyer |
 | --- | --- | --- | --- |
 | Homeport's gateway | Everything inside the tunnel, as any VPN provider does: destinations, DNS names, unencrypted content | Unencrypted traffic | It logs session metadata only, never destinations or content. HTTPS stays end to end between the buyer's device and the website. |
-| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | Unencrypted traffic, and DNS answers only by modifying the agent | HTTPS stays end to end. DNS goes over HTTPS from inside the agent, verified against its own roots. Line canaries catch a line that changes pages or answers. Sellers are identity-verified and bound by terms. |
-| The seller's ISP and home network | Destination IPs and ports, the server name in TLS, unencrypted content; not DNS names, which travel encrypted | Unencrypted traffic | HTTPS stays end to end. DNS over HTTPS keeps names and answers out of reach. Line canaries catch a transparent proxy that changes pages. |
+| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content of a device without HTTPS only | Unencrypted traffic of a device without HTTPS only, and DNS answers only by modifying the agent | HTTPS stays end to end, and HTTPS only (on by default) leaves no unencrypted TCP to read or change. DNS goes over HTTPS from inside the agent, verified against its own roots. Line canaries catch a line that changes pages or answers. Sellers are identity-verified and bound by terms. |
+| The seller's ISP and home network | Destination IPs and ports, the server name in TLS, unencrypted content of a device without HTTPS only; not DNS names, which travel encrypted | Unencrypted traffic of a device without HTTPS only | HTTPS stays end to end, and HTTPS only leaves no unencrypted TCP. DNS over HTTPS keeps names and answers out of reach. Line canaries catch a transparent proxy that changes pages. |
 | Other members | Nothing | Nothing | Isolation between members (above) |
 
 Buyers are told this up front. A tampered agent or a byte-count mismatch leads to a ban and forfeiture of pending earnings.
+
+**HTTPS only, per device, on by default**
+
+- Every WireGuard device has HTTPS only on, from the start; existing devices got it too (decided 2026-11-15). The gateway then opens a TCP flow from the device only if it starts with TLS, so neither the seller nor their ISP can read or change it.
+- Plain HTTP, SSH, mail and chat with STARTTLS, and many games stop working on that device. A member who needs them turns HTTPS only off for that one device, and accepts that its unencrypted traffic can be read and changed on the stranger's line.
+- DNS through Homeport's virtual resolver (over HTTPS from the agent) and UDP, including QUIC for HTTP/3, are not affected. UDP to other servers, such as plain DNS to a resolver the device picked itself, is not protected.
 
 **Line canaries: catching a line that tampers**
 
