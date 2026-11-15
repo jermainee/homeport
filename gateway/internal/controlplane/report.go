@@ -28,7 +28,10 @@ func (c *Controller) OnLineEvent(e gateway.LineEvent) {
 		AgentVersion: e.AgentVersion,
 		At:           timestamp(now),
 	}
-	if e.Online {
+	switch {
+	case e.Tampered != "":
+		ev.Type, ev.Check = "tampered", e.Tampered
+	case e.Online:
 		ev.Type = "online"
 	}
 	if !semver.MatchString(ev.AgentVersion) {
@@ -37,7 +40,8 @@ func (c *Controller) OnLineEvent(e gateway.LineEvent) {
 	}
 	c.lineMu.Lock()
 	defer c.lineMu.Unlock()
-	if e.Online {
+	switch {
+	case e.Online:
 		c.lineIPs[e.LineID] = e.ObservedIP
 		if _, up := c.lineUp[e.LineID]; !up {
 			// An agent's new connection replaces its old one with a second
@@ -45,7 +49,9 @@ func (c *Controller) OnLineEvent(e gateway.LineEvent) {
 			c.lineUp[e.LineID] = now
 		}
 		delete(c.lineDown, e.LineID)
-	} else {
+	case e.Tampered == "":
+		// Offline. A tampered event leaves this to the offline event that
+		// follows it.
 		delete(c.lineIPs, e.LineID)
 		delete(c.lineUp, e.LineID)
 		c.lineDown[e.LineID] = now

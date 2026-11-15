@@ -84,12 +84,12 @@ linesApi.post("/", verifiedMemberIdempotent, async (c) => {
 });
 
 linesApi.get("/available", requireVerifiedMember, async (c) => {
-  // A line needs a known country to be listed (the contract requires one)
-  // and an owner who is not suspended.
+  // A line needs a known country to be listed (the contract requires one),
+  // an owner who is not suspended, and no pause for tampering.
   const { results } = await c.env.DB.prepare(
     `SELECT l.id, l.country, l.city, l.isp, l.ipv6, l.online
        FROM lines l JOIN members owner ON owner.id = l.member_id AND owner.status = 'active'
-      WHERE l.sharing_enabled = 1 AND l.country IS NOT NULL
+      WHERE l.sharing_enabled = 1 AND l.paused_at IS NULL AND l.country IS NOT NULL
         AND NOT ${ownerIsLinkedSql("?1", "l.member_id")}
         AND ${lineHasRoomSql("l.id", "?1")}
       ORDER BY l.created_at`,

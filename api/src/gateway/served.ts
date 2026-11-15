@@ -2,11 +2,12 @@ import { ownerIsLinkedSql } from "../lines/rules";
 
 /**
  * SQL condition, with `line` a line and `owner` its owner (members): the
- * line is shared and its owner may share. Such lines are in a gateway's
- * config.
+ * line is shared, not paused (a canary caught it tampering), and its owner
+ * may share. Such lines are in a gateway's config.
  */
 export function servedLineSql(line: string, owner: string): string {
-  return `${line}.sharing_enabled = 1 AND ${owner}.status = 'active' AND ${owner}.identity_status = 'verified'`;
+  return `${line}.sharing_enabled = 1 AND ${line}.paused_at IS NULL
+    AND ${owner}.status = 'active' AND ${owner}.identity_status = 'verified'`;
 }
 
 /** servedLineSql for the line `l` and its owner `o`. */

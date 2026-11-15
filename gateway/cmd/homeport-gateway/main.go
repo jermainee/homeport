@@ -12,13 +12,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/jermainee/homeport/gateway"
 	"github.com/jermainee/homeport/gateway/service"
+	relayprotocol "github.com/jermainee/homeport/relay-protocol"
 )
 
 // version is the gateway's release version, set at build time with
@@ -43,6 +46,7 @@ type options struct {
 	quicListen   string
 	quicEndpoint string
 	stateDir     string
+	canary       *gateway.CanaryConfig // nil without --canary-target
 }
 
 func parseFlags(args []string) (options, error) {
@@ -54,6 +58,10 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.quicListen, "quic-listen", ":4433", "UDP address sharing agents connect to")
 	fs.StringVar(&o.quicEndpoint, "quic-endpoint", "", "public host:port agents connect to (default: the --wg-endpoint host with the --quic-listen port)")
 	fs.StringVar(&o.stateDir, "state-dir", "/var/lib/homeport-gateway", "directory for the gateway's WireGuard key and relay certificate")
+	canaryListen := fs.String("canary-listen", ":80", "TCP address the canary page listens on, over plain HTTP")
+	canaryTarget := fs.String("canary-target", "", "public IP:port that reaches the canary page; turns line checks on")
+	canaryZone := fs.String("canary-dns-zone", "", "zone with a wildcard record that the canary looks up random names in")
+	canaryInterval := fs.Duration("canary-interval", gateway.DefaultCanaryInterval, "mean time between checks of one line")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -62,6 +70,19 @@ func parseFlags(args []string) (options, error) {
 	}
 	if _, _, err := net.SplitHostPort(o.wgEndpoint); err != nil {
 		return options{}, fmt.Errorf("--wg-endpoint: %w", err)
+	}
+	switch {
+	case *canaryTarget != "":
+		target, err := netip.ParseAddrPort(*canaryTarget)
+		if err != nil || relayprotocol.SpecialPurpose(target.Addr()) || target.Addr().Is4In6() {
+			return options{}, errors.New("--canary-target must be a public IP:port: the check reaches it through members' lines")
+		}
+		if *canaryInterval <= 0 {
+			return options{}, errors.New("--canary-interval must be positive")
+		}
+		o.canary = &gateway.CanaryConfig{HTTPListen: *canaryListen, HTTPTarget: target, DNSZone: *canaryZone, Interval: *canaryInterval}
+	case *canaryZone != "":
+		return options{}, errors.New("--canary-dns-zone needs --canary-target")
 	}
 	return o, nil
 }
@@ -92,6 +113,7 @@ func run(log *slog.Logger, args []string) error {
 		QUICListen:   o.quicListen,
 		QUICEndpoint: o.quicEndpoint,
 		Certificate:  st.cert,
+		Canary:       o.canary,
 		Version:      version,
 		Logger:       log,
 	})

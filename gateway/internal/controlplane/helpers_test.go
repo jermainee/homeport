@@ -119,6 +119,7 @@ type lineEvent struct {
 	ObservedIP   string `json:"observed_ip"`
 	AgentVersion string `json:"agent_version"`
 	At           string `json:"at"`
+	Check        string `json:"check,omitempty"`
 }
 
 // apiCall is one request the fake API received, in order.
@@ -317,8 +318,13 @@ func (a *fakeAPI) checkLineEvent(e lineEvent) {
 	if !uuidV7Pattern.MatchString(e.EventID) || !idPattern.MatchString(e.LineID) {
 		a.t.Errorf("line event IDs are malformed: %+v", e)
 	}
-	if e.Type != "online" && e.Type != "offline" {
+	switch {
+	case e.Type != "online" && e.Type != "offline" && e.Type != "tampered":
 		a.t.Errorf("line event type %q", e.Type)
+	case e.Type == "tampered" && e.Check != "http" && e.Check != "dns":
+		a.t.Errorf("tampered line event with check %q, want http or dns", e.Check)
+	case e.Type != "tampered" && e.Check != "":
+		a.t.Errorf("%s line event with a check, which only tampered events have", e.Type)
 	}
 	if _, err := netip.ParseAddr(e.ObservedIP); err != nil {
 		a.t.Errorf("line event observed_ip %q: %v", e.ObservedIP, err)

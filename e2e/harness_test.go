@@ -78,6 +78,7 @@ const transferTimeout = 3 * time.Minute
 // internet, the control API, a gateway, member A's agent and member B's
 // WireGuard client.
 type stack struct {
+	canary   *canaryOptions // nil without withCanary
 	t        *testing.T
 	origin   *origin
 	api      *fakeapi.API
@@ -109,6 +110,27 @@ type stackOptions struct {
 	shareLater bool
 	peerLater  bool
 	fallback   bool
+	canary     *canaryOptions
+}
+
+// canaryOptions runs the gateway's line canary every 100 ms. proxy, if
+// set, is the address of a proxy in front of the canary page, as an ISP's
+// transparent proxy would be: the agent's connection to the page goes
+// there instead.
+type canaryOptions struct {
+	proxy func(page netip.AddrPort) netip.AddrPort
+}
+
+// canaryZone is the zone the canary looks up random names in, and
+// canaryAnswer what every name in it resolves to.
+const canaryZone = "canary.homeport.test."
+
+var canaryAnswer = []netip.Addr{netip.MustParseAddr("11.22.33.60")}
+
+// withCanary runs the gateway's line canary every 100 ms. With proxy, the
+// agent reaches the canary page through the proxy it returns.
+func withCanary(proxy func(page netip.AddrPort) netip.AddrPort) func(*stackOptions) {
+	return func(o *stackOptions) { o.canary = &canaryOptions{proxy: proxy} }
 }
 
 func withLeases(p fakeapi.LeasePolicy) func(*stackOptions) {
@@ -147,8 +169,11 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	s := &stack{t: t, origin: startOrigin(t), gwLogs: &syncBuffer{}, agentLogs: &syncBuffer{}}
-	s.resolver = &fakeResolver{answers: map[string][]netip.Addr{"ip4 " + originName + ".": {tcpDst.Addr()}}}
+	s := &stack{t: t, origin: startOrigin(t), gwLogs: &syncBuffer{}, agentLogs: &syncBuffer{}, canary: o.canary}
+	s.resolver = &fakeResolver{
+		answers: map[string][]netip.Addr{"ip4 " + originName + ".": {tcpDst.Addr()}},
+		zones:   map[string][]netip.Addr{canaryZone: canaryAnswer},
+	}
 
 	agentCert, err := relayprotocol.GenerateSelfSigned("homeport-agent")
 	if err != nil {
@@ -231,7 +256,19 @@ func newStack(t *testing.T, opts ...func(*stackOptions)) *stack {
 		return s
 	}
 
-	s.startAgent(quickReconnect)
+	s.startAgent(func(cfg *agent.Config) {
+		quickReconnect(cfg)
+		if o.canary != nil {
+			// The canary page listens on loopback, which the agent reaches
+			// only as a test origin, or through the proxy in front of it.
+			page := s.gw.Server().CanaryAddr()
+			if o.canary.proxy != nil {
+				agent.RouteTestOrigin(cfg, page, o.canary.proxy(page))
+			} else {
+				agent.AllowTestOrigin(cfg, page)
+			}
+		}
+	})
 	s.waitLineOnline()
 	if !o.peerLater {
 		s.newClient()
@@ -390,7 +427,17 @@ func (s *stack) startGateway() {
 }
 
 func (s *stack) newGateway() (*service.Service, error) {
+	var canary *gateway.CanaryConfig
+	if s.canary != nil {
+		canary = &gateway.CanaryConfig{
+			HTTPListen: "127.0.0.1:0",
+			DNSZone:    canaryZone,
+			Resolver:   &fakeResolver{zones: map[string][]netip.Addr{canaryZone: canaryAnswer}},
+			Interval:   100 * time.Millisecond,
+		}
+	}
 	return service.New(service.Config{
+		Canary:       canary,
 		API:          s.apiURL,
 		Token:        gatewayToken,
 		PrivateKey:   s.gwKey,
@@ -682,9 +729,11 @@ func sum(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// fakeResolver stands in for the agent's DNS-over-HTTPS resolvers.
+// fakeResolver stands in for the agent's DNS-over-HTTPS resolvers, and
+// for the gateway's own resolver.
 type fakeResolver struct {
 	answers map[string][]netip.Addr // "ip4 name." → addresses
+	zones   map[string][]netip.Addr // "zone." → what every IPv4 name under it resolves to
 
 	mu      sync.Mutex
 	lookups []string
@@ -697,6 +746,11 @@ func (r *fakeResolver) LookupNetIP(_ context.Context, network, host string) ([]n
 	r.mu.Unlock()
 	if addrs, ok := r.answers[key]; ok {
 		return addrs, nil
+	}
+	for zone, addrs := range r.zones {
+		if network == "ip4" && strings.HasSuffix(host, "."+zone) {
+			return addrs, nil
+		}
 	}
 	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 }

@@ -340,11 +340,19 @@ A buyer's traffic passes three parties besides the website. What each can see an
 | Party | Sees | Could change | What protects the buyer |
 | --- | --- | --- | --- |
 | Homeport's gateway | Everything inside the tunnel, as any VPN provider does: destinations, DNS names, unencrypted content | Unencrypted traffic | It logs session metadata only, never destinations or content. HTTPS stays end to end between the buyer's device and the website. |
-| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | Unencrypted traffic, and DNS answers only by modifying the agent | HTTPS stays end to end. DNS goes over HTTPS from inside the agent, verified against its own roots. Sellers are identity-verified and bound by terms. |
-| The seller's ISP and home network | Destination IPs and ports, the server name in TLS, unencrypted content; not DNS names, which travel encrypted | Unencrypted traffic | HTTPS stays end to end. DNS over HTTPS keeps names and answers out of reach. |
+| The seller's machine and agent | Destination IPs and ports, DNS names, the server name in TLS, unencrypted content | Unencrypted traffic, and DNS answers only by modifying the agent | HTTPS stays end to end. DNS goes over HTTPS from inside the agent, verified against its own roots. Line canaries catch a line that changes pages or answers. Sellers are identity-verified and bound by terms. |
+| The seller's ISP and home network | Destination IPs and ports, the server name in TLS, unencrypted content; not DNS names, which travel encrypted | Unencrypted traffic | HTTPS stays end to end. DNS over HTTPS keeps names and answers out of reach. Line canaries catch a transparent proxy that changes pages. |
 | Other members | Nothing | Nothing | Isolation between members (above) |
 
 Buyers are told this up front. A tampered agent or a byte-count mismatch leads to a ban and forfeiture of pending earnings.
+
+**Line canaries: catching a line that tampers**
+
+- Every 15 minutes or so (at random), the gateway checks each online line twice. It fetches its own canary page over plain HTTP through the line, with a fresh random path, and looks up a random name in a Homeport zone through the line's DNS. Both have known answers: the page is a small HTML page, and every name in the zone has the same addresses.
+- An answer that differs, such as a page with an injected script or a name that resolves elsewhere or not at all, is checked again at once with a new nonce. If the second answer differs too, the line is paused: the gateway disconnects its agent and refuses it, and reports the line tampered. If the second check cannot run (the agent left, say), the line stays suspect for an hour and its next differing answer pauses it. The API then takes the line out of every gateway's config and the available lines until someone reviews it. Devices on the line stop working, as when its owner stops sharing, until their member moves them to another line.
+- A gateway pauses at most 5 lines in 10 minutes. More lines failing at once points at Homeport (a changed zone, a broken page), so the rest are logged for a person to look at instead.
+- A line that only fails to answer is left alone: it is broken, not proven to tamper. Before it trusts a line's answer, the gateway checks the page and the zone directly. If those checks fail (a misconfiguration), it skips the line's check, so a mistake on Homeport's side never pauses lines.
+- Canaries catch an ISP's transparent proxy and an agent that changes traffic for everyone. A modified agent that leaves the canary alone and changes only some traffic gets past them; HTTPS, and the byte-count comparison, are the protection there.
 
 ## Legal and compliance (Germany and EU)
 

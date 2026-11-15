@@ -48,6 +48,10 @@ type Config struct {
 	// Certificate is the relay certificate; agents pin its key.
 	Certificate tls.Certificate
 
+	// Canary, if set, checks every online line now and then for
+	// tampering, and reports a line it catches (gateway.CanaryConfig).
+	Canary *gateway.CanaryConfig
+
 	Version string       // the gateway's release, sent to the API
 	Logger  *slog.Logger // nil means slog.Default()
 }
@@ -78,7 +82,16 @@ func New(cfg Config) (*Service, error) {
 	}
 	api := controlplane.NewClient(cfg.API, cfg.Token)
 	ctl := controlplane.New(api, controlplane.Options{Logger: log})
+	var canary *gateway.CanaryConfig
+	if cfg.Canary != nil {
+		c := *cfg.Canary
+		if c.Logger == nil {
+			c.Logger = log
+		}
+		canary = &c
+	}
 	srv, err := gateway.New(gateway.Config{
+		Canary:      canary,
 		PrivateKey:  cfg.PrivateKey,
 		ListenPort:  cfg.WGListenPort,
 		QUICListen:  cfg.QUICListen,

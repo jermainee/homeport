@@ -147,6 +147,27 @@ func (r *Relay) Online(id string) bool {
 	return r.agents[id] != nil
 }
 
+// OnlineLines returns the IDs of the lines whose agents are connected.
+func (r *Relay) OnlineLines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]string, 0, len(r.agents))
+	for id := range r.agents {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// Agent returns the public IP and release of the line's connected agent.
+func (r *Relay) Agent(id string) (ip netip.Addr, version string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a := r.agents[id]; a != nil {
+		return a.ip, a.version, true
+	}
+	return netip.Addr{}, "", false
+}
+
 // DialTCP opens a TCP flow (or DNS over TCP to the virtual resolver) through
 // the line's agent. It returns once the agent has answered.
 func (r *Relay) DialTCP(ctx context.Context, lineID string, dst netip.AddrPort) (net.Conn, error) {

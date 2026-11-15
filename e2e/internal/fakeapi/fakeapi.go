@@ -129,6 +129,7 @@ type LineEvent struct {
 	ObservedIP   string `json:"observed_ip"`
 	AgentVersion string `json:"agent_version"`
 	At           string `json:"at"`
+	Check        string `json:"check,omitempty"` // "http" or "dns", for type "tampered" only
 }
 
 // LeaseAnswer is how the API answers a lease request.
@@ -713,8 +714,14 @@ func (a *API) reportLineEvents(body []byte, call *Call) (int, []byte, error) {
 	}
 	for i, e := range events {
 		err := firstErr(match("event_id", e.EventID, uuidV7), match("line_id", e.LineID, id), match("agent_version", e.AgentVersion, semver))
-		if err == nil && e.Type != "online" && e.Type != "offline" {
-			err = errors.New("type must be online or offline")
+		switch {
+		case err != nil:
+		case e.Type != "online" && e.Type != "offline" && e.Type != "tampered":
+			err = errors.New("type must be online, offline or tampered")
+		case e.Type == "tampered" && e.Check != "http" && e.Check != "dns":
+			err = errors.New("check must be http or dns for a tampered event")
+		case e.Type != "tampered" && e.Check != "":
+			err = errors.New("check is only for tampered events")
 		}
 		if _, perr := netip.ParseAddr(e.ObservedIP); err == nil && perr != nil {
 			err = errors.New("observed_ip is not an IP address")
