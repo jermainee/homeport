@@ -9,21 +9,6 @@ import (
 	"testing"
 )
 
-func loopbackInterface(t *testing.T) Interface {
-	t.Helper()
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, ifc := range ifaces {
-		if ifc.Flags&net.FlagLoopback != 0 {
-			return Interface{Index: ifc.Index, Name: ifc.Name}
-		}
-	}
-	t.Skip("no loopback interface")
-	return Interface{}
-}
-
 // boundDialer binds every socket it opens to ifc.
 func boundDialer(ifc Interface) *net.Dialer {
 	return &net.Dialer{Control: func(network, address string, c syscall.RawConn) error {

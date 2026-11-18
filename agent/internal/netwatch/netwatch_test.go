@@ -131,3 +131,15 @@ func TestRoutedLeavesOutProbesWithoutARoute(t *testing.T) {
 		t.Fatal("routed found a route offline")
 	}
 }
+
+func TestCheckReadsTheRouteTableOnlyBehindAVPN(t *testing.T) {
+	route := func(netip.AddrPort) (string, error) { return "en0", nil }
+	defaults := func() ([]string, error) {
+		t.Error("check read the route table although no VPN carries the route")
+		return nil, nil
+	}
+	isTunnel := func(name string) bool { return strings.HasPrefix(name, "utun") }
+	if home, vpn, err := check("", route, defaults, isTunnel); home != "en0" || vpn || err != nil {
+		t.Fatalf("check = %q, %v, %v; want en0 without a VPN", home, vpn, err)
+	}
+}

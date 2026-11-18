@@ -66,7 +66,7 @@ Every member has one account, one identity check and one credit balance. In this
 - A ban, a chargeback or a failed re-check applies to both modes.
 - A member never uses their own line, or a line linked to them by household, device, card or Connect account (see Trust).
 - A line is a network, not a device. If a sharing device moves to another network (new ISP, IP range or country), Share pauses until that network passes the line test.
-- One device can Share and Use at once. Shared traffic always leaves through the home line: the agent binds its sockets to the interface that holds the home network's default route, even while the member's own Use tunnel or any other VPN carries the device's traffic. Only when nothing but a VPN reaches the internet (a VPN with a kill switch) does Share pause.
+- One device can Share and Use at once. Shared traffic always leaves through the home line: the agent binds its sockets to the interface that holds the home network's default route, even while the member's own Use tunnel or any other VPN carries the device's traffic. A VPN whose kill switch blocks the home line stops Share: it pauses, or stays offline on macOS, where such a VPN keeps the home network's route in the table, until the VPN lets the line through. macOS and Linux bind their sockets; Windows does not yet.
 
 **Line types**
 

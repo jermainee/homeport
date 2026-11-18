@@ -192,10 +192,86 @@ func TestTheAgentReconnectsThroughANewHomeInterface(t *testing.T) {
 	g.nextConn(t)
 	waitState(t, a.Agent, StateConnected)
 
+	// Retries may add sockets; the first was bound to en0, the last to en10.
 	gw := netip.MustParseAddrPort(g.ln.Addr().String()).Addr()
-	if got, want := binds.homesFor(gw), []string{"en0", "en10"}; !slices.Equal(got, want) {
-		t.Fatalf("gateway sockets bound to %v, want %v", got, want)
+	if got := binds.homesFor(gw); len(got) < 2 || got[0] != "en0" || got[len(got)-1] != "en10" {
+		t.Fatalf("gateway sockets bound to %v, want en0 first and en10 last", got)
 	}
+}
+
+func TestTheHomeInterfaceOutlastsAPauseForAVPN(t *testing.T) {
+	route := newFakeRoute(Route{Home: homeEn10, Tunneled: true})
+	var mu sync.Mutex
+	var lastPrev string
+	g := newFakeGateway(t)
+	a := startAgent(t, g, func(c *Config) {
+		route.configure(c)
+		check := c.RouteCheck
+		c.RouteCheck = func(prev string) (Route, error) {
+			mu.Lock()
+			lastPrev = prev
+			mu.Unlock()
+			return check(prev)
+		}
+	})
+	g.nextConn(t)
+
+	// A kill switch, then the VPN lets the line through again: the check
+	// must still be told en10 was home, so it keeps the line there.
+	route.set(Route{Tunneled: true})
+	waitState(t, a.Agent, StatePaused)
+	time.Sleep(quietPeriod / 3) // several checks while paused
+	mu.Lock()
+	defer mu.Unlock()
+	if lastPrev != "en10" {
+		t.Fatalf("while paused the route check is told the last home was %q, want en10", lastPrev)
+	}
+}
+
+func TestANewHomeInterfaceAlsoMovesTheResolversConnections(t *testing.T) {
+	doh := newFakeDoH(t, map[string]dohAnswer{"example.org. A": {addrs: []netip.Addr{public4}}})
+	route := newFakeRoute(Route{Home: homeEn0})
+	g := newFakeGateway(t)
+	startAgent(t, g, both(route.configure, func(c *Config) {
+		c.Resolver = newDoHResolver([]dohServer{doh.server()}, doh.roots())
+	}))
+	c := g.nextConn(t)
+
+	// A lookup is in flight when the machine moves to another network.
+	doh.stall.Store(true)
+	s := c.mustDial(t, relayprotocol.KindDNS, virtualResolver)
+	if err := relayprotocol.WriteUDPFrame(s, query(t, 1, "example.org.", dnsmessage.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(waitFor)
+	for len(doh.received()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the lookup never reached the resolver")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	route.set(Route{Home: homeEn10, Tunneled: true})
+	g.nextConn(t)
+
+	// The connection bound to en0 must not serve the new session.
+	deadline = time.Now().Add(waitFor)
+	for doh.open.Load() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the resolver kept its connection from the old home interface")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTheAgentDialsAGatewayNameOverIPv4First(t *testing.T) {
+	g := newFakeGateway(t) // listens on 127.0.0.1 only
+	_, port, err := net.SplitHostPort(g.ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := startAgent(t, g, func(c *Config) { c.GatewayAddr = net.JoinHostPort("localhost", port) })
+	g.nextConn(t)
+	waitState(t, a.Agent, StateConnected)
 }
 
 func TestEverySocketTheAgentOpensIsBoundToTheHomeInterface(t *testing.T) {

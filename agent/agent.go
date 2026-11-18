@@ -184,6 +184,7 @@ type Agent struct {
 	paused     bool
 	otherVPN   bool
 	home       Interface // the interface new sockets are bound to
+	lastHome   string    // the last home's name, kept while only a VPN reaches the internet
 	lastErr    error
 	endSession context.CancelCauseFunc // ends the current connection, or nil
 	past       counterValues           // counters of finished connections
@@ -289,6 +290,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		} else {
 			refused = 0
 		}
+		if errors.Is(res.err, errHomeChanged) {
+			// The session's lookups have ended, so the resolver's
+			// connections from the old interface are idle now.
+			a.closeResolverIdle()
+		}
 		if errors.Is(res.err, errPaused) || errors.Is(res.err, errHomeChanged) || !a.retrying(res.err) {
 			// Paused, and maybe resumed already, or moved to another
 			// network: not a failure, and the agent reconnects right
@@ -368,15 +374,20 @@ func (a *Agent) setPaused(paused bool) {
 // setRoute records a route check's answer. Sharing pauses while only a VPN
 // reaches the internet. A new home interface ends the connection, whose
 // sockets are bound to the old one, so the agent reconnects through the new
-// one; the resolver's idle connections close for the same reason.
+// one; the resolver's idle connections close for the same reason, and Run
+// closes the rest once the connection's lookups have ended.
 func (a *Agent) setRoute(r Route) {
 	vpnOnly := r.Tunneled && r.Home.Index == 0
 	a.mu.Lock()
 	vpnChanged := a.otherVPN != vpnOnly
 	homeChanged := a.home != r.Home
+	first := a.lastHome == ""
 	old := a.home
 	a.otherVPN = vpnOnly
 	a.home = r.Home
+	if r.Home.Name != "" {
+		a.lastHome = r.Home.Name
+	}
 	end := a.endSession
 	a.mu.Unlock()
 	if vpnChanged {
@@ -386,17 +397,26 @@ func (a *Agent) setRoute(r Route) {
 			a.log.Info("the home line reaches the internet again; sharing resumes")
 		}
 	}
-	if homeChanged {
+	switch {
+	case homeChanged && first:
+		a.log.Info("home interface", "interface", r.Home.Name, "vpn", r.Tunneled)
+	case homeChanged:
 		a.log.Info("home interface changed", "from", old.Name, "to", r.Home.Name, "vpn", r.Tunneled)
 		if end != nil && !vpnOnly {
 			end(errHomeChanged)
 		}
-		if c, ok := a.cfg.Resolver.(interface{ CloseIdleConnections() }); ok {
-			c.CloseIdleConnections()
-		}
+		a.closeResolverIdle()
 	}
 	if vpnChanged || homeChanged {
 		a.update()
+	}
+}
+
+// closeResolverIdle closes the resolver's idle connections, which are bound
+// to the home interface they were opened through.
+func (a *Agent) closeResolverIdle() {
+	if c, ok := a.cfg.Resolver.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
 	}
 }
 
@@ -474,7 +494,10 @@ func (a *Agent) setState(s State) {
 // checkRoute runs RouteCheck once. An error keeps the last answer and is
 // logged once until a check succeeds again; offline, every check fails.
 func (a *Agent) checkRoute() {
-	r, err := a.cfg.RouteCheck(a.homeNow().Name)
+	a.mu.Lock()
+	prev := a.lastHome // the home before a pause for a VPN, too
+	a.mu.Unlock()
+	r, err := a.cfg.RouteCheck(prev)
 	if err != nil {
 		if !a.routeCheckFailing {
 			a.log.Debug("route check failed", "error", err)

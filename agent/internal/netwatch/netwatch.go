@@ -51,15 +51,18 @@ func lookup(name string, tunneled bool, err error) (Route, error) {
 // interface's name and whether a VPN carries the internet route.
 func check(prev string, route func(netip.AddrPort) (string, error), defaults func() ([]string, error), isTunnel func(string) bool) (string, bool, error) {
 	names, routeErr := routed(probes, route)
-	defs, defErr := defaults()
-	if len(names) == 0 && len(defs) == 0 {
-		return "", false, errors.Join(routeErr, defErr)
-	}
 	tunneled := false
 	for _, name := range names {
 		if isTunnel(name) {
 			tunneled = true
 		}
+	}
+	if name := home(names, nil, prev, isTunnel); name != "" {
+		return name, tunneled, nil // the system's own choice; no table needed
+	}
+	defs, defErr := defaults()
+	if len(names) == 0 && len(defs) == 0 {
+		return "", false, errors.Join(routeErr, defErr)
 	}
 	return home(names, defs, prev, isTunnel), tunneled, nil
 }

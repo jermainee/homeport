@@ -8,6 +8,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func loopbackInterface(t *testing.T) Interface {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			return Interface{Index: ifc.Index, Name: ifc.Name}
+		}
+	}
+	t.Skip("no loopback interface")
+	return Interface{}
+}
+
 // boundTo returns the interface the socket is bound to, or "".
 func boundTo(t *testing.T, c syscall.Conn, network string) string {
 	t.Helper()

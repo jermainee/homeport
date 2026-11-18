@@ -136,11 +136,21 @@ func (a *Agent) dialGateway(ctx context.Context, bind func(syscall.RawConn, stri
 	if err != nil {
 		return nil, err
 	}
+	// IPv4 first, as net.ResolveUDPAddr picks: the resolver orders the
+	// addresses by the system's routes, which may be a VPN's, not by what
+	// the home interface reaches.
+	ip := addrs[0].Unmap()
+	for _, addr := range addrs {
+		if addr.Unmap().Is4() {
+			ip = addr.Unmap()
+			break
+		}
+	}
 	portNum, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("gateway port %q: %w", port, err)
 	}
-	dst := netip.AddrPortFrom(addrs[0].Unmap(), uint16(portNum))
+	dst := netip.AddrPortFrom(ip, uint16(portNum))
 	network := "udp4"
 	if dst.Addr().Is6() {
 		network = "udp6"
