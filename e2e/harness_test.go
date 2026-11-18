@@ -353,7 +353,7 @@ func (s *stack) runAgent(cert tls.Certificate, configure func(*agent.Config)) (*
 		Resolver:      s.resolver,
 		Logger:        slog.New(slog.NewJSONHandler(s.agentLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		StatsInterval: 200 * time.Millisecond,
-		TunnelCheck:   func() (bool, error) { return false, nil },
+		RouteCheck:    func(string) (agent.Route, error) { return agent.Route{}, nil },
 	}
 	if configure != nil {
 		configure(&cfg)

@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"runtime"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -23,6 +27,10 @@ const (
 
 // errPaused ends a connection because sharing paused.
 var errPaused = errors.New("agent: sharing paused")
+
+// errHomeChanged ends a connection because the home interface changed: its
+// sockets are bound to the old one.
+var errHomeChanged = errors.New("agent: home interface changed")
 
 // sessionResult is how one connection attempt ended.
 type sessionResult struct {
@@ -53,14 +61,19 @@ func (r sessionResult) unauthorized() bool {
 func (a *Agent) runSession(ctx context.Context) sessionResult {
 	ctx, end := context.WithCancelCause(ctx)
 	defer end(nil)
-	if !a.startSession(end) {
+	home, ok := a.startSession(end)
+	if !ok {
 		return sessionResult{err: errPaused}
 	}
 	defer a.finishSession()
+	// Every socket of the session is bound to the home interface it
+	// started with; a new one ends the session.
+	bind := func(c syscall.RawConn, network string, dst netip.Addr) error {
+		return a.cfg.bind(c, network, dst, home)
+	}
 
-	tlsConf := relayprotocol.AgentTLSConfig(a.cfg.Certificate, relayprotocol.AllowPins(a.cfg.GatewayPin))
 	a.log.Debug("dialing gateway", "gateway", a.cfg.GatewayAddr)
-	conn, err := quic.DialAddr(ctx, a.cfg.GatewayAddr, tlsConf, relayprotocol.AgentQUICConfig())
+	conn, err := a.dialGateway(ctx, bind)
 	if err != nil {
 		return sessionResult{err: sessionError(ctx, fmt.Errorf("dial gateway: %w", err))}
 	}
@@ -86,6 +99,7 @@ func (a *Agent) runSession(ctx context.Context) sessionResult {
 	a.log.Info("connected to gateway", "gateway", a.cfg.GatewayAddr, "line_id", ack.LineID)
 
 	pol := newPolicy(ack.ObservedIP, a.cfg.testOrigins, a.cfg.testRoutes)
+	pol.bind = bind
 	var wg sync.WaitGroup
 	wg.Go(func() { a.readControl(ctx, end, ctl) })
 	wg.Go(func() { a.sendStats(ctx, end, ctl, cnt) })
@@ -111,6 +125,58 @@ func (a *Agent) runSession(ctx context.Context) sessionResult {
 	return res
 }
 
+// dialGateway opens a QUIC connection to the gateway from a UDP socket of
+// its own, bound with bind. The connection closes the socket when it ends.
+func (a *Agent) dialGateway(ctx context.Context, bind func(syscall.RawConn, string, netip.Addr) error) (*quic.Conn, error) {
+	host, port, err := net.SplitHostPort(a.cfg.GatewayAddr)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	// IPv4 first, as net.ResolveUDPAddr picks: the resolver orders the
+	// addresses by the system's routes, which may be a VPN's, not by what
+	// the home interface reaches.
+	ip := addrs[0].Unmap()
+	for _, addr := range addrs {
+		if addr.Unmap().Is4() {
+			ip = addr.Unmap()
+			break
+		}
+	}
+	portNum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("gateway port %q: %w", port, err)
+	}
+	dst := netip.AddrPortFrom(ip, uint16(portNum))
+	network := "udp4"
+	if dst.Addr().Is6() {
+		network = "udp6"
+	}
+	lc := net.ListenConfig{Control: func(network, _ string, c syscall.RawConn) error {
+		return bind(c, network, dst.Addr())
+	}}
+	pc, err := lc.ListenPacket(ctx, network, ":0")
+	if err != nil {
+		return nil, err
+	}
+	tr := &quic.Transport{Conn: pc}
+	tlsConf := relayprotocol.AgentTLSConfig(a.cfg.Certificate, relayprotocol.AllowPins(a.cfg.GatewayPin))
+	conn, err := tr.Dial(ctx, net.UDPAddrFromAddrPort(dst), tlsConf, relayprotocol.AgentQUICConfig())
+	if err != nil {
+		_ = tr.Close()
+		_ = pc.Close()
+		return nil, err
+	}
+	context.AfterFunc(conn.Context(), func() {
+		_ = tr.Close()
+		_ = pc.Close()
+	})
+	return conn, nil
+}
+
 // sessionError is why the session ended: the cause of ctx if it ended,
 // else err.
 func sessionError(ctx context.Context, err error) error {
@@ -129,6 +195,8 @@ func closeCode(cause error) (relayprotocol.Code, string) {
 		return relayprotocol.CodeProtocolError, ""
 	case errors.Is(cause, errPaused):
 		return relayprotocol.CodeGoingAway, "paused"
+	case errors.Is(cause, errHomeChanged):
+		return relayprotocol.CodeGoingAway, "network changed"
 	case errors.Is(cause, context.Canceled):
 		return relayprotocol.CodeGoingAway, "shutting down"
 	default:
@@ -213,14 +281,14 @@ func (a *Agent) sendStats(ctx context.Context, end context.CancelCauseFunc, ctl 
 
 // startSession registers end as the way to stop the coming connection. It
 // reports false if sharing paused in the meantime.
-func (a *Agent) startSession(end context.CancelCauseFunc) bool {
+func (a *Agent) startSession(end context.CancelCauseFunc) (Interface, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.activeLocked() {
-		return false
+		return Interface{}, false
 	}
 	a.endSession = end
-	return true
+	return a.home, true
 }
 
 // connected records the gateway's hello_ack and returns fresh counters for

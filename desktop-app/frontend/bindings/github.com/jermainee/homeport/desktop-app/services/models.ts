@@ -343,8 +343,9 @@ export enum ShareState {
     ShareOnline = "online",
 
     /**
-     * SharePaused: another VPN carries this computer's default route, so the
-     * agent stays away until it is gone.
+     * SharePaused: only a VPN reaches the internet (its kill switch blocks
+     * the home line), so the agent stays away until the line is reachable.
+     * A VPN that leaves the home line reachable does not pause Share.
      */
     SharePaused = "paused",
 

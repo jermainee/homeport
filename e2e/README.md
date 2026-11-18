@@ -248,6 +248,19 @@ B's `purchased` dropped by ⌊bytes × 10 / 10^6⌋ over all of B's sessions on 
 - **A stops sharing:** quit profile A's app or turn Share off. B's flows stop, and `wgcurl` fails until A shares again.
 - **No credits:** sign in a third member, verify them and create a peer on A's line without buying credits. `wgcurl https://example.com/` fails, while `wgcurl https://checkout.stripe.com/` still answers, because Stripe Checkout is a top-up host. After 5 minutes of grace the gateway closes the session.
 
+### 8. Share under a VPN (Linux, in Docker)
+
+A member's own tunnel must not carry what their line shares. This check runs the agent CLI in a Linux container whose default route is a real `wg-quick` tunnel: member C's own WireGuard device on B's line.
+
+1. As C: `member verify`, `member credits 1000000`, `member peer <B's line_id> > c.conf`, then the agent key and `member share` as in step 3 (`c-agent.env`).
+2. Build an image from `alpine` with `wireguard-tools iproute2 iptables bash`. Docker's `/proc/sys` is read-only, so make wg-quick skip its `src_valid_mark` sysctl when the value is already 1 (`sed` on `/usr/bin/wg-quick`), and start the container with `--cap-add NET_ADMIN --sysctl net.ipv4.conf.all.src_valid_mark=1 --env-file c-agent.env`.
+3. In the container, point `c.conf` at the gateway through `host.docker.internal` (Docker Desktop does not forward UDP to the Mac's LAN address), drop its `DNS` line and IPv6, and run `wg-quick up`. `ip route get 1.1.1.1` and the route to the gateway now name `wg0`.
+4. Cross-compile the agent CLI (`GOOS=linux`), run it with `HOMEPORT_GATEWAY=<host.docker.internal's address>:4433`, and check its log: `home interface changed … to=eth0 vpn=true`, then `connected to gateway`.
+5. As A: `member peer <C's line_id>`, then download through it with `wgcurl`. The container's `wg0` byte counters (`/sys/class/net/wg0/statistics`) stay put, while `eth0`'s grow by the download in both directions.
+
+Before the agent bound its sockets, its QUIC connection went into the tunnel; the gateway refuses private destinations, so the agent never got online.
+
 ## Not done yet
 
 - The smoke test's agent runs in-process with the `e2e` tag; the agent CLI is covered only by the manual run.
+- The Docker check under a VPN (step 8) is manual.

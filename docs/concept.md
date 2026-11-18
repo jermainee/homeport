@@ -66,7 +66,7 @@ Every member has one account, one identity check and one credit balance. In this
 - A ban, a chargeback or a failed re-check applies to both modes.
 - A member never uses their own line, or a line linked to them by household, device, card or Connect account (see Trust).
 - A line is a network, not a device. If a sharing device moves to another network (new ISP, IP range or country), Share pauses until that network passes the line test.
-- One device does one job at a time. The desktop app pauses Share while its own Use tunnel is on, so shared traffic never leaves through someone else's line.
+- One device can Share and Use at once. Shared traffic always leaves through the home line: the agent binds its sockets to the interface that holds the home network's default route, even while the member's own Use tunnel or any other VPN carries the device's traffic. A VPN whose kill switch blocks the home line stops Share: it pauses, or stays offline on macOS, where such a VPN keeps the home network's route in the table, until the VPN lets the line through. macOS and Linux bind their sockets; Windows does not yet.
 
 **Line types**
 
@@ -322,7 +322,7 @@ Every session ties a verified buyer to a verified seller, the exit refuses the t
 - The gateway and the agent both refuse all private, local and special ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, multicast, fc00::/7, fe80::/10 and the other ranges that are not globally reachable. The gateway refuses them before any agent sees the flow; the agent refuses them again, so a bug on either side alone opens nothing. One list in `relay-protocol` serves both.
 - The agent also refuses the seller's own public IP and the networks of the seller's own machine. On an IPv6 home network every device has a global address, so it treats each of the machine's global IPv6 addresses as the /56 around it, the prefix most ISPs delegate to a home. That covers the home's other /64s, such as a guest or IoT network. A home with a larger delegation (a /48) keeps the /56 around the machine out of reach, but not the rest.
 - Its DNS answers never point into the home network, and it does not look up names that exist only there, such as `.local` and single-label names. Buyers cannot map the seller's devices through DNS.
-- It pauses sharing while another VPN carries the seller's default route, so buyers' traffic never leaves through someone else's tunnel.
+- It sends buyers' traffic out through the home line only. Its sockets are bound to the home network's interface, so a VPN on the seller's machine, their own Use tunnel included, never carries buyers' traffic, and sharing pauses while only a VPN reaches the internet.
 - It runs without admin rights in socket mode, updates itself from signed releases, and is open source so sellers can audit it.
 - Upload share and monthly GB caps protect the household's own internet.
 

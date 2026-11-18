@@ -67,7 +67,7 @@ cd frontend && npm test
 ```
 
 - `services/auth_test.go` tests `AuthService` against `internal/fakeapi`, an in-memory stand-in for the API's member and share endpoints.
-- `services/share_test.go` tests `ShareService` against the same fake API, with a fake agent behind the `services.Agent` interface: enrollment, the line and its gateway pin, the switch, retries while the API or a gateway is unavailable, another VPN, today's count, sign-out and restarts.
+- `services/share_test.go` tests `ShareService` against the same fake API, with a fake agent behind the `services.Agent` interface: enrollment, the line and its gateway pin, the switch, retries while the API or a gateway is unavailable, a VPN that blocks the line, today's count, sign-out and restarts.
 - `services/identity_test.go` tests `IdentityService`: the check's page opens in the browser, a retry reuses the request, and polling reports each step, including a new check after a failed one.
 - `services/use_test.go` tests `UseService`: the balance in credits and bytes, Checkout and waiting for the credits, the lines, and new devices. It decodes each QR code with gozxing, checks that the config's private key belongs to the public key the API got and is stored nowhere, and covers the save path, the file's permissions and the config's single showing. It also covers each device's exit line, moving a device or changing its failover, and turning HTTPS only off and on, with the API's refusals.
 - `frontend/src/signin.test.ts`, `share.test.ts`, `identity.test.ts` and `use.test.ts` test the state machines against fakes of the Go services (`src/test/`), with fake timers for polling.
@@ -104,7 +104,7 @@ Turning Share on runs these steps, and the switch shows the outcome of the first
 3. `POST /v1/lines` returns the device's line and its gateway. The contract sends the gateway's pin as the hex SHA-256 of its SPKI; the app turns it into relay-protocol's `Pin`, whose text form is base64. The agent pins it, so the gateway's `server_name` is not needed.
 4. `PATCH /v1/lines/{id}` turns sharing on, and the agent dials the gateway.
 
-While the API or a gateway can't be reached, Share stays on and tries again, from 1 s doubling to 1 minute, or later if the API's `Retry-After` asks for it. An error that retrying won't fix turns Share off and says why. The screen and the tray show the agent's state: connecting, online, paused while another VPN carries the default route, or offline.
+While the API or a gateway can't be reached, Share stays on and tries again, from 1 s doubling to 1 minute, or later if the API's `Retry-After` asks for it. An error that retrying won't fix turns Share off and says why. The screen and the tray show the agent's state: connecting, online, paused while only a VPN reaches the internet, or offline. Share keeps running while a VPN, such as a Homeport Use tunnel, carries this computer's default route: the agent binds its sockets to the home line's interface (see `agent/README.md`).
 
 "Shared today" is the agent's own count of payload bytes, kept per day in `members/<id>/share.json` across restarts. Credits follow the gateway's count, which includes packet headers.
 

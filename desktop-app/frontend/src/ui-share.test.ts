@@ -69,13 +69,13 @@ describe("the Share panel", () => {
     expect(count?.textContent).toBe("3.4 MB");
   });
 
-  it("says when another VPN pauses Share", () => {
+  it("says when a VPN blocking the line pauses Share", () => {
     share.emit({ state: "online", sharing: true });
 
     share.emit({ state: "paused" });
 
-    expect(announcer.textContent).toContain("Paused while another VPN is on");
-    expect(app.querySelector("#share-line")?.textContent).toContain("Paused while another VPN is on");
+    expect(announcer.textContent).toContain("Paused while a VPN blocks all traffic outside it");
+    expect(app.querySelector("#share-line")?.textContent).toContain("Paused while a VPN blocks all traffic outside it");
   });
 
   it("goes back to sign-in when the session is gone", async () => {

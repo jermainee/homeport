@@ -150,7 +150,7 @@ export function shareLine(st: ShareStatus): string {
     case "online":
       return "Online. Members can use this Mac's line.";
     case "paused":
-      return "Paused while another VPN is on. Share carries on once it's off.";
+      return "Paused while a VPN blocks all traffic outside it. Share carries on once that VPN lets your line through or is off.";
     case "offline":
       if (st.error === "gateway_unavailable") return "Waiting for a Homeport gateway. Trying again…";
       if (st.error === "offline") return "Can't reach Homeport. Trying again…";

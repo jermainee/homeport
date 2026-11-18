@@ -36,8 +36,9 @@ const (
 	ShareConnecting ShareState = "connecting"
 	// ShareOnline: the gateway accepted the agent; members can use the line.
 	ShareOnline ShareState = "online"
-	// SharePaused: another VPN carries this computer's default route, so the
-	// agent stays away until it is gone.
+	// SharePaused: only a VPN reaches the internet (its kill switch blocks
+	// the home line), so the agent stays away until the line is reachable.
+	// A VPN that leaves the home line reachable does not pause Share.
 	SharePaused ShareState = "paused"
 	// ShareOffline: Share is on, but the API or the gateway can't be reached
 	// (Error says which); it keeps trying.

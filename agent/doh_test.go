@@ -494,7 +494,7 @@ func TestTheAgentClosesItsDoHConnectionsWhenItStops(t *testing.T) {
 		GatewayPin:  g.pin,
 		Certificate: g.agentCert,
 		Resolver:    newDoHResolver([]dohServer{f.server()}, f.roots()),
-		TunnelCheck: func() (bool, error) { return false, nil },
+		RouteCheck:  func(string) (Route, error) { return Route{}, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
