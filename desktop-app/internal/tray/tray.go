@@ -113,7 +113,7 @@ func Label(st services.ShareStatus) string {
 	case services.ShareOnline:
 		return "Share: online"
 	case services.SharePaused:
-		return "Share: paused while another VPN is on"
+		return "Share: paused while a VPN blocks your line"
 	case services.ShareOffline:
 		if st.Error == services.ErrGatewayUnavailable {
 			return "Share: waiting for a gateway…"

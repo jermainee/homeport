@@ -350,7 +350,7 @@ func TestShareFollowsTheAgent(t *testing.T) {
 	}{
 		{"dialing the gateway", agent.Stats{State: agent.StateConnecting}, services.ShareConnecting, ""},
 		{"accepted by the gateway", agent.Stats{State: agent.StateConnected, FlowsActive: 3}, services.ShareOnline, ""},
-		{"another VPN holds the default route", agent.Stats{State: agent.StatePaused, OtherVPN: true}, services.SharePaused, ""},
+		{"only a VPN reaches the internet", agent.Stats{State: agent.StatePaused, OtherVPN: true}, services.SharePaused, ""},
 		{"gateway unreachable", agent.Stats{State: agent.StateConnecting, LastError: errors.New("timeout")}, services.ShareOffline, services.ErrOffline},
 	}
 	for _, tc := range cases {
