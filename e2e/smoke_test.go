@@ -153,7 +153,7 @@ func TestFullStackSmoke(t *testing.T) {
 		Logger:       slog.New(slog.NewJSONHandler(agentLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		ReconnectMin: 100 * time.Millisecond,
 		ReconnectMax: time.Second,
-		TunnelCheck:  func() (bool, error) { return false, nil },
+		RouteCheck:   func(string) (agent.Route, error) { return agent.Route{}, nil },
 	}
 	agent.RouteTestOrigin(&cfg, tcpDst, origin.tcp)
 	ag, err := agent.New(cfg)

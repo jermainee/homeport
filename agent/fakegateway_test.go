@@ -262,8 +262,8 @@ type testAgent struct {
 	logs *syncBuffer
 }
 
-// startAgent runs an agent against g until the test ends. The agent never
-// sees another VPN unless configure says so.
+// startAgent runs an agent against g until the test ends. The agent sees
+// no VPN and binds no socket unless configure says so.
 func startAgent(t *testing.T, g *fakeGateway, configure func(*Config)) *testAgent {
 	t.Helper()
 	logs := &syncBuffer{}
@@ -275,7 +275,7 @@ func startAgent(t *testing.T, g *fakeGateway, configure func(*Config)) *testAgen
 		StatsInterval: 20 * time.Millisecond,
 		ReconnectMin:  10 * time.Millisecond,
 		ReconnectMax:  50 * time.Millisecond,
-		TunnelCheck:   func() (bool, error) { return false, nil },
+		RouteCheck:    func(string) (Route, error) { return Route{}, nil },
 	}
 	if configure != nil {
 		configure(&cfg)

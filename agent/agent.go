@@ -3,9 +3,12 @@
 // the member's line for every flow the gateway relays to it.
 //
 // The wire format is relay-protocol (see its README). The agent refuses flows
-// into the member's home network and to mail ports (see policy.go), pauses
-// while another VPN carries the machine's default route, and logs session
-// metadata only: never a destination, a DNS name or content.
+// into the member's home network and to mail ports (see policy.go). It binds
+// every socket it opens to the home line's interface, so shared traffic
+// leaves through the member's line even while a VPN carries the machine's
+// default route, and pauses only while no interface but a VPN's reaches the
+// internet. It logs session metadata only: never a destination, a DNS name or
+// content.
 package agent
 
 import (
@@ -18,6 +21,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	relayprotocol "github.com/jermainee/homeport/relay-protocol"
@@ -31,10 +35,10 @@ const Version = "0.1.0"
 
 // Defaults for the zero values in Config.
 const (
-	DefaultStatsInterval       = 30 * time.Second
-	DefaultReconnectMin        = time.Second
-	DefaultReconnectMax        = time.Minute
-	DefaultTunnelCheckInterval = time.Second
+	DefaultStatsInterval      = 30 * time.Second
+	DefaultReconnectMin       = time.Second
+	DefaultReconnectMax       = time.Minute
+	DefaultRouteCheckInterval = time.Second
 )
 
 // certificateRetries is how many times in a row the agent retries after
@@ -74,14 +78,23 @@ type Config struct {
 	// means DefaultReconnectMin and DefaultReconnectMax.
 	ReconnectMin, ReconnectMax time.Duration
 
-	// TunnelCheck reports whether another VPN carries the machine's
-	// default route, in which case sharing pauses so shared traffic never
-	// leaves through someone else's tunnel. Nil means the OS check: a
-	// default route through utun on macOS, and none yet elsewhere.
-	TunnelCheck func() (bool, error)
-	// TunnelCheckInterval is how often TunnelCheck runs. Zero means
-	// DefaultTunnelCheckInterval.
-	TunnelCheckInterval time.Duration
+	// RouteCheck reports how the machine reaches the internet; prev is the
+	// home interface it reported last. The agent binds every socket it
+	// opens, to the gateway, to destinations and to its DNS resolvers, to
+	// the home interface, so shared traffic leaves through the member's own
+	// line even while a VPN, such as their own Use tunnel, carries the
+	// default route. Sharing pauses while only a VPN reaches the internet,
+	// and reconnects when the home interface changes. Nil means the
+	// system's check on macOS and Linux; elsewhere it reports nothing, and
+	// sockets follow the system's routes.
+	RouteCheck func(prev string) (Route, error)
+	// RouteCheckInterval is how often RouteCheck runs. Zero means
+	// DefaultRouteCheckInterval.
+	RouteCheckInterval time.Duration
+
+	// bind ties a socket to the home interface before it connects. Tests
+	// record the calls instead; nil means netwatch.Bind.
+	bind func(c syscall.RawConn, network string, dst netip.Addr, home Interface) error
 
 	// testOrigins are loopback addresses the policy lets through, and
 	// testRoutes send a flow's destination to one of them instead. Only
@@ -89,6 +102,13 @@ type Config struct {
 	testOrigins []netip.AddrPort
 	testRoutes  map[netip.AddrPort]netip.AddrPort
 }
+
+// Route is how the machine reaches the internet: its home interface, and
+// whether a VPN carries the default route.
+type Route = netwatch.Route
+
+// Interface names a network interface by index and name.
+type Interface = netwatch.Interface
 
 // State is what the agent is doing.
 type State int
@@ -102,8 +122,8 @@ const (
 	// StateConnected means the gateway acknowledged the agent and may
 	// relay flows to it.
 	StateConnected
-	// StatePaused means sharing is paused, by Pause or because another
-	// VPN carries the default route. The agent holds no connection.
+	// StatePaused means sharing is paused, by Pause or because only
+	// another VPN reaches the internet. The agent holds no connection.
 	StatePaused
 )
 
@@ -131,7 +151,9 @@ type Stats struct {
 	LineID string
 	// Paused reports a Pause without a later Resume.
 	Paused bool
-	// OtherVPN reports that another VPN carries the default route.
+	// OtherVPN reports that sharing paused because only another VPN
+	// reaches the internet: no interface but the VPN's has a default
+	// route, as with a VPN's kill switch.
 	OtherVPN bool
 	// LastError is why the last connection attempt or connection ended,
 	// or nil. It never names a destination.
@@ -152,15 +174,16 @@ type Agent struct {
 	log *slog.Logger
 
 	running atomic.Bool
-	wake    chan struct{} // nudges Run after Pause, Resume or a VPN change
+	wake    chan struct{} // nudges Run after Pause, Resume or a route change
 
-	routeCheckFailing bool // only the goroutine running checkTunnel uses it
+	routeCheckFailing bool // only the goroutine running checkRoute uses it
 
 	mu         sync.Mutex
 	state      State
 	lineID     string
 	paused     bool
 	otherVPN   bool
+	home       Interface // the interface new sockets are bound to
 	lastErr    error
 	endSession context.CancelCauseFunc // ends the current connection, or nil
 	past       counterValues           // counters of finished connections
@@ -204,26 +227,31 @@ func New(cfg Config) (*Agent, error) {
 		cfg.ReconnectMax = DefaultReconnectMax
 	}
 	cfg.ReconnectMax = max(cfg.ReconnectMax, cfg.ReconnectMin)
-	if cfg.TunnelCheck == nil {
-		cfg.TunnelCheck = netwatch.Tunneled
+	if cfg.RouteCheck == nil {
+		cfg.RouteCheck = netwatch.Check
 	}
-	if cfg.TunnelCheckInterval <= 0 {
-		cfg.TunnelCheckInterval = DefaultTunnelCheckInterval
+	if cfg.RouteCheckInterval <= 0 {
+		cfg.RouteCheckInterval = DefaultRouteCheckInterval
+	}
+	if cfg.bind == nil {
+		cfg.bind = netwatch.Bind
 	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	a := &Agent{log: log, wake: make(chan struct{}, 1)}
 	if cfg.Resolver == nil {
 		r := newDoHResolver(defaultDoHServers, bundledRoots())
 		r.log = log
 		cfg.Resolver = r
 	}
-	return &Agent{
-		cfg:  cfg,
-		log:  log,
-		wake: make(chan struct{}, 1),
-	}, nil
+	if r, ok := cfg.Resolver.(*dohResolver); ok {
+		// Lookups go through the line, as the member's own flows do.
+		r.bind = a.bindHome
+	}
+	a.cfg = cfg
+	return a, nil
 }
 
 // Run shares the line until ctx ends, then closes the connection and waits
@@ -241,10 +269,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	checkFileLimit(a.log)
-	a.checkTunnel()
+	a.checkRoute()
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() { a.watchTunnel(ctx) })
+	wg.Go(func() { a.watchRoute(ctx) })
 
 	retry := newBackoff(a.cfg.ReconnectMin, a.cfg.ReconnectMax)
 	refused := 0 // certificate refusals in a row
@@ -261,9 +289,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		} else {
 			refused = 0
 		}
-		if errors.Is(res.err, errPaused) || !a.retrying(res.err) {
-			// Paused, and maybe resumed already: not a failure, and
-			// Resume reconnects right away.
+		if errors.Is(res.err, errPaused) || errors.Is(res.err, errHomeChanged) || !a.retrying(res.err) {
+			// Paused, and maybe resumed already, or moved to another
+			// network: not a failure, and the agent reconnects right
+			// away once sharing is active.
 			retry.reset()
 			continue
 		}
@@ -295,8 +324,8 @@ func (a *Agent) Run(ctx context.Context) error {
 // flow, and does not reconnect until Resume.
 func (a *Agent) Pause() { a.setPaused(true) }
 
-// Resume undoes Pause. Sharing restarts unless another VPN carries the
-// default route.
+// Resume undoes Pause. Sharing restarts unless only another VPN reaches the
+// internet.
 func (a *Agent) Resume() { a.setPaused(false) }
 
 // Stats returns a snapshot of the agent's state and counters.
@@ -336,20 +365,51 @@ func (a *Agent) setPaused(paused bool) {
 	a.update()
 }
 
-func (a *Agent) setOtherVPN(on bool) {
+// setRoute records a route check's answer. Sharing pauses while only a VPN
+// reaches the internet. A new home interface ends the connection, whose
+// sockets are bound to the old one, so the agent reconnects through the new
+// one; the resolver's idle connections close for the same reason.
+func (a *Agent) setRoute(r Route) {
+	vpnOnly := r.Tunneled && r.Home.Index == 0
 	a.mu.Lock()
-	changed := a.otherVPN != on
-	a.otherVPN = on
+	vpnChanged := a.otherVPN != vpnOnly
+	homeChanged := a.home != r.Home
+	old := a.home
+	a.otherVPN = vpnOnly
+	a.home = r.Home
+	end := a.endSession
 	a.mu.Unlock()
-	if !changed {
-		return
+	if vpnChanged {
+		if vpnOnly {
+			a.log.Warn("only another VPN reaches the internet; sharing paused")
+		} else {
+			a.log.Info("the home line reaches the internet again; sharing resumes")
+		}
 	}
-	if on {
-		a.log.Warn("another VPN carries the default route; sharing paused")
-	} else {
-		a.log.Info("no other VPN carries the default route; sharing resumes")
+	if homeChanged {
+		a.log.Info("home interface changed", "from", old.Name, "to", r.Home.Name, "vpn", r.Tunneled)
+		if end != nil && !vpnOnly {
+			end(errHomeChanged)
+		}
+		if c, ok := a.cfg.Resolver.(interface{ CloseIdleConnections() }); ok {
+			c.CloseIdleConnections()
+		}
 	}
-	a.update()
+	if vpnChanged || homeChanged {
+		a.update()
+	}
+}
+
+// homeNow returns the interface new sockets are bound to.
+func (a *Agent) homeNow() Interface {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.home
+}
+
+// bindHome binds a socket to the current home interface.
+func (a *Agent) bindHome(c syscall.RawConn, network string, dst netip.Addr) error {
+	return a.cfg.bind(c, network, dst, a.homeNow())
 }
 
 // update ends the current connection if sharing is no longer active, and
@@ -411,10 +471,10 @@ func (a *Agent) setState(s State) {
 	a.state = s
 }
 
-// checkTunnel runs TunnelCheck once. An error keeps the last answer and is
+// checkRoute runs RouteCheck once. An error keeps the last answer and is
 // logged once until a check succeeds again; offline, every check fails.
-func (a *Agent) checkTunnel() {
-	on, err := a.cfg.TunnelCheck()
+func (a *Agent) checkRoute() {
+	r, err := a.cfg.RouteCheck(a.homeNow().Name)
 	if err != nil {
 		if !a.routeCheckFailing {
 			a.log.Debug("route check failed", "error", err)
@@ -423,16 +483,16 @@ func (a *Agent) checkTunnel() {
 		return
 	}
 	a.routeCheckFailing = false
-	a.setOtherVPN(on)
+	a.setRoute(r)
 }
 
-func (a *Agent) watchTunnel(ctx context.Context) {
-	t := time.NewTicker(a.cfg.TunnelCheckInterval)
+func (a *Agent) watchRoute(ctx context.Context) {
+	t := time.NewTicker(a.cfg.RouteCheckInterval)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
-			a.checkTunnel()
+			a.checkRoute()
 		case <-ctx.Done():
 			return
 		}

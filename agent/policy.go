@@ -25,6 +25,9 @@ type policy struct {
 	// testRoutes send a destination to one of them.
 	testOrigins []netip.AddrPort
 	testRoutes  map[netip.AddrPort]netip.AddrPort
+	// bind ties a socket the policy allowed to the home interface. Nil
+	// leaves it alone.
+	bind func(c syscall.RawConn, network string, dst netip.Addr) error
 }
 
 // newPolicy returns the policy for one connection. It drops the cached
@@ -124,17 +127,24 @@ func (p *policy) allowsAnswer(addr netip.Addr) bool {
 }
 
 // dialer returns a dialer that applies the policy in its Control hook, which
-// runs on the resolved address right before connect.
+// runs on the resolved address right before connect, and binds the sockets
+// it allows.
 func (p *policy) dialer() *net.Dialer {
 	return &net.Dialer{Timeout: dialTimeout, Control: p.control}
 }
 
-func (p *policy) control(_, address string, _ syscall.RawConn) error {
+func (p *policy) control(network, address string, c syscall.RawConn) error {
 	dst, err := netip.ParseAddrPort(address)
 	if err != nil {
 		return &policyError{rule: ruleUnparsable}
 	}
-	return p.check(dst)
+	if err := p.check(dst); err != nil {
+		return err
+	}
+	if p.bind != nil {
+		return p.bind(c, network, dst.Addr())
+	}
+	return nil
 }
 
 // interfaceNetsTTL is how long interfaceNets reuses its answer. Addresses

@@ -49,10 +49,21 @@ The agent resolves names over DNS over HTTPS (RFC 8484) through the line: Cloudf
 - Answers must match the query's question, and truncated answers are refused. Queries ask for a UDP size of 65535, which over HTTPS means no limit.
 - A name error, or an answer without records of the asked family, gets an empty NOERROR answer.
 
+## The home line under a VPN
+
+A member can share and use at once on one machine: their Use tunnel, or any other VPN, carries the machine's own traffic, while shared traffic still leaves through their home line.
+
+- **Home interface:** every second, `internal/netwatch` finds the interface that reaches the internet when VPNs are set aside. Without a VPN it is the system's own choice. While a VPN carries the default route, it is an interface that still holds a default route of its own and is not a tunnel: the last home if it still has one, so a VPN coming up never moves the line, or else the first. On macOS the LAN's route stays in the table as a route scoped to its interface; on Linux it stays in the main table, whether the VPN routes through `0.0.0.0/1` and `128.0.0.0/1` (OpenVPN) or a table of its own picked by a policy rule (wg-quick).
+- **Tunnels:** on macOS, `utun` and `ipsec` interfaces (WireGuard, OpenVPN and Network Extension VPNs, and macOS's own IKEv2 client). On Linux, devices without a link layer (`type` 65534 in `/sys/class/net`: WireGuard, tun) and tun/tap devices; a PPP device is a DSL line, not a tunnel.
+- **Binding:** every socket the agent opens is bound to the home interface before it connects: the QUIC socket to the gateway, each flow's socket and the DNS over HTTPS connections. macOS uses `IP_BOUND_IF` and `IPV6_BOUND_IF`, so the kernel routes the socket through that interface's routes only; Linux uses `SO_BINDTODEVICE`, which an unprivileged process may set on Linux 5.7 and later. Loopback destinations stay unbound. The gateway thus sees the home line's address, and destinations and resolvers see it too.
+- **A new home** (the machine moved from Wi-Fi to Ethernet, say) ends the connection with `GOING_AWAY`, and the agent reconnects at once through the new interface. The resolver's idle connections close, so lookups follow.
+- **Only a VPN reaches the internet:** when no interface but a tunnel holds a default route, as with a VPN's kill switch, sharing pauses, so shared traffic never leaves through someone else's tunnel. `Stats().OtherVPN` says so.
+- **Elsewhere:** Windows has no route check yet, so its sockets follow the system's routes.
+
 ## Pausing
 
 - `Pause()` closes the connection with `GOING_AWAY`, which ends every flow, and the agent stays away until `Resume()`.
-- **Another VPN:** while another VPN carries the default route, sharing pauses the same way, so shared traffic never leaves through someone else's tunnel. On macOS, `internal/netwatch` checks every second whether traffic to the internet leaves through a `utun` or `ipsec` interface (WireGuard, OpenVPN and Network Extension VPNs, and macOS's own IKEv2 client). Linux and Windows have no check yet.
+- Sharing also pauses while only a VPN reaches the internet (above).
 - `Stats()` reports the state, the line, why sharing is paused, the last connection error, and the flow and byte counts since the agent was created.
 
 ## Logging
@@ -97,6 +108,8 @@ CI (`.github/workflows/agent-ci.yml`) runs on Ubuntu and macOS: `go mod verify`,
 
 ## Not done yet
 
-- The route check polls once a second. Reacting to route changes as they happen would close the gap between a VPN coming up and sharing pausing.
+- The route check polls once a second. Reacting to route changes as they happen would close the gap between a network change and the reconnect through the new home interface.
+- Windows has no route check or binding yet (`IP_UNICAST_IF` would do it), so a VPN on a Windows machine would carry shared traffic.
+- A VPN with a kill switch on macOS (Network Extension's "include all networks") blocks bound sockets too; then sharing pauses only if no interface but the tunnel holds a default route, and otherwise retries with connection errors.
 - `hello_ack` carries one public IP, from the address family the agent used to reach the gateway. A line reached over IPv6 does not learn its public IPv4 address, so the own-IP rule covers only one family.
 - Upload share and monthly caps (docs/concept.md) are not enforced yet.

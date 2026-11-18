@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/x509roots/fallback/bundle"
@@ -114,22 +115,34 @@ type dohResolver struct {
 	preferred      atomic.Int64 // the server that answered last
 	// dialAddr opens a TCP connection to one address. Tests replace it.
 	dialAddr func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
+	// bind ties each connection to the home interface before it connects.
+	// The agent sets it; nil leaves connections alone.
+	bind func(c syscall.RawConn, network string, dst netip.Addr) error
 	// log gets a warning, naming no DNS name, when no resolver answers.
 	log      *slog.Logger
 	lastWarn atomic.Int64 // when it last warned, in Unix nanoseconds
 }
 
 func newDoHResolver(servers []dohServer, roots *x509.CertPool) *dohResolver {
-	var d net.Dialer
 	r := &dohResolver{
 		servers:        servers,
 		roots:          roots,
 		attemptTimeout: dohAttemptTimeout,
 		dialTimeout:    dohDialTimeout,
 		log:            slog.New(slog.DiscardHandler),
-		dialAddr: func(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
-			return d.DialContext(ctx, "tcp", addr.String())
-		},
+	}
+	d := net.Dialer{Control: func(network, address string, c syscall.RawConn) error {
+		if r.bind == nil {
+			return nil
+		}
+		dst, err := netip.ParseAddrPort(address)
+		if err != nil {
+			return err
+		}
+		return r.bind(c, network, dst.Addr())
+	}}
+	r.dialAddr = func(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
+		return d.DialContext(ctx, "tcp", addr.String())
 	}
 	for _, s := range servers {
 		r.clients = append(r.clients, &http.Client{Transport: r.transport(s)})
