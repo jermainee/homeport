@@ -29,6 +29,7 @@ type Peer struct {
 	LineID    string    `json:"line_id"`
 	Line      LinePlace `json:"line"`
 	Failover  string    `json:"failover"`
+	HTTPSOnly bool      `json:"https_only"`
 	ExitLine  *ExitLine `json:"exit_line"`
 	PublicKey string    `json:"public_key"`
 	IPv4      string    `json:"ipv4"`
@@ -323,6 +324,7 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		City      *string `json:"city"`
 		Name      string  `json:"name"`
 		PublicKey string  `json:"public_key"`
+		HTTPSOnly *bool   `json:"https_only"`
 	}
 	raw, ok := decodeStrict(w, r, &body)
 	// The contract's oneOf: one line, or a region (a country, maybe a city).
@@ -361,6 +363,7 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		LineID:    line.LineID,
 		Line:      LinePlace{Country: &line.Country, City: line.City, ISP: line.ISP},
 		Failover:  "country",
+		HTTPSOnly: body.HTTPSOnly == nil || *body.HTTPSOnly, // on unless asked
 		PublicKey: body.PublicKey,
 		IPv4:      fmt.Sprintf("10.77.%d.%d", host/256, host%256),
 		IPv6:      fmt.Sprintf("fd77::%x", host),
@@ -439,7 +442,8 @@ func (s *Server) listPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"peers": out})
 }
 
-// updatePeer moves a peer to another line, or changes its failover. Unlike
+// updatePeer moves a peer to another line, or changes its failover or
+// HTTPS only. Unlike
 // the API, it knows only one gateway, so it never answers
 // line_on_other_gateway or line_full; FailNext stands in for those.
 func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
@@ -453,13 +457,14 @@ func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		LineID   *string `json:"line_id"`
-		Country  *string `json:"country"`
-		City     *string `json:"city"`
-		Failover *string `json:"failover"`
+		LineID    *string `json:"line_id"`
+		Country   *string `json:"country"`
+		City      *string `json:"city"`
+		Failover  *string `json:"failover"`
+		HTTPSOnly *bool   `json:"https_only"`
 	}
 	if _, ok := decodeStrict(w, r, &body); !ok ||
-		(body.LineID == nil && body.Country == nil && body.Failover == nil) ||
+		(body.LineID == nil && body.Country == nil && body.Failover == nil && body.HTTPSOnly == nil) ||
 		(body.LineID != nil && (*body.LineID == "" || body.Country != nil)) ||
 		(body.Country != nil && *body.Country == "") || (body.City != nil && (body.Country == nil || *body.City == "")) ||
 		(body.Failover != nil && !slices.Contains([]string{"country", "city", "off"}, *body.Failover)) {
@@ -496,6 +501,9 @@ func (s *Server) updatePeer(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Failover != nil {
 		p.Failover = *body.Failover
+	}
+	if body.HTTPSOnly != nil {
+		p.HTTPSOnly = *body.HTTPSOnly
 	}
 	writeJSON(w, http.StatusOK, p)
 }

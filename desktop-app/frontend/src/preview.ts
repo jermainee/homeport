@@ -160,7 +160,7 @@ const previewQR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAATQAAAE0AQMAAAC
 
 // &use=ready|empty|broke|backup|unreachable picks how Use starts. On
 // backup, the travel router's line in Lyon is offline, so it runs on a
-// backup line nearby.
+// backup line nearby. The laptop has HTTPS only off, for SSH.
 export function previewUse(start: string): UseApi {
   let balance: Balance =
     start === "empty" || start === "broke"
@@ -171,9 +171,9 @@ export function previewUse(start: string): UseApi {
       ? []
       : [
           start === "backup"
-            ? { peerId: "p-router", name: "Travel router", lineId: offlineLine, country: "FR", city: "Lyon", isp: "Orange", failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" }
-            : { peerId: "p-router", name: "Travel router", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", failover: "country", exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
-          { peerId: "p-laptop", name: "Laptop", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", failover: "country", exitLine: null, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
+            ? { peerId: "p-router", name: "Travel router", lineId: offlineLine, country: "FR", city: "Lyon", isp: "Orange", failover: "country", httpsOnly: true, exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" }
+            : { peerId: "p-router", name: "Travel router", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e6", country: "DE", city: "Berlin", isp: "Deutsche Telekom", failover: "country", httpsOnly: true, exitLine: null, ipv4: "10.77.0.3", ipv6: "fd77::3", createdAt: "2026-11-13T18:20:00Z" },
+          { peerId: "p-laptop", name: "Laptop", lineId: "01a1c4af-8a0f-7f5c-b0ff-05e16a4457e7", country: "PT", city: "Lisbon", isp: "MEO", failover: "country", httpsOnly: false, exitLine: null, ipv4: "10.77.0.2", ipv6: "fd77::2", createdAt: "2026-11-10T08:00:00Z" },
         ];
   const now = new Date().toISOString();
   devices = devices.map((d) => ({ ...d, exitLine: exitOf(d, now) }));
@@ -205,7 +205,7 @@ export function previewUse(start: string): UseApi {
     async devices() {
       return devices;
     },
-    async addDevice(country, city, name) {
+    async addDevice(country, city, name, httpsOnly) {
       await sleep(700);
       const device: Device = {
         peerId: `p-${n}`,
@@ -215,6 +215,7 @@ export function previewUse(start: string): UseApi {
         city: city || previewCities[country]?.[0]?.city || "",
         isp: previewIsps[country] ?? "",
         failover: "country",
+        httpsOnly,
         exitLine: null,
         ipv4: `10.77.0.${n}`,
         ipv6: `fd77::${n}`,
@@ -248,7 +249,16 @@ export function previewUse(start: string): UseApi {
               isp: previewIsps[change.country] ?? "",
             };
       if (change.failover) moved.failover = change.failover;
+      if (change.httpsOnly !== undefined) moved.httpsOnly = change.httpsOnly;
       const device: Device = { ...moved, exitLine: exitOf(moved, new Date().toISOString()) };
+      devices = devices.map((d) => (d.peerId === peerId ? device : d));
+      return device;
+    },
+    async setHttpsOnly(peerId, on) {
+      await sleep(400);
+      const old = devices.find((d) => d.peerId === peerId);
+      if (!old) throw fail("device_gone");
+      const device: Device = { ...old, httpsOnly: on };
       devices = devices.map((d) => (d.peerId === peerId ? device : d));
       return device;
     },

@@ -16,14 +16,17 @@ export const wailsUse: UseApi = {
   countries: async (exceptPeer) => (await UseService.Countries(exceptPeer ?? "")) ?? [],
   cities: async (country, exceptPeer) => (await UseService.Cities(country, exceptPeer ?? "")) ?? [],
   devices: async () => ((await UseService.Devices()) ?? []).map(device),
-  addDevice: async (country, city, name) => {
-    const dev = await UseService.AddDevice(country, city, name);
+  addDevice: async (country, city, name, httpsOnly) => {
+    const dev = await UseService.AddDevice(country, city, name, httpsOnly);
     return { ...dev, device: device(dev.device) };
   },
   saveConfig: (peerId) => UseService.SaveConfig(peerId),
   forgetConfig: (peerId) => UseService.ForgetConfig(peerId),
   removeDevice: (peerId) => UseService.RemoveDevice(peerId),
-  // An empty argument keeps what the device has.
+  // An empty argument, or a null HTTPS only, keeps what the device has.
   updateDevice: async (peerId, change) =>
-    device(await UseService.UpdateDevice(peerId, change.country ?? "", change.city ?? "", change.failover ?? "")),
+    device(
+      await UseService.UpdateDevice(peerId, change.country ?? "", change.city ?? "", change.failover ?? "", change.httpsOnly ?? null),
+    ),
+  setHttpsOnly: async (peerId, on) => device(await UseService.SetHTTPSOnly(peerId, on)),
 };

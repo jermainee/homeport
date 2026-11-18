@@ -20,6 +20,7 @@ export const laptop: Device = {
   city: "Berlin",
   isp: "Deutsche Telekom",
   failover: "country",
+  httpsOnly: true,
   exitLine: null,
   ipv4: "10.77.0.2",
   ipv6: "fd77::2",
@@ -37,6 +38,7 @@ export function newDevice(country: string, city: string, name: string, n = 3): N
       city: city || "Somewhere",
       isp: "Vodafone",
       failover: "country",
+      httpsOnly: true,
       exitLine: null,
       ipv4: `10.77.0.${n}`,
       ipv6: `fd77::${n}`,
@@ -67,9 +69,12 @@ export class FakeUse implements UseApi {
   removeAnswer: Error | null = null;
   /** What the next updateDevice answers; by default the device, changed. */
   updateAnswer: Answer<Device> | null = null;
+  /** What the next setHttpsOnly answers; by default the device, changed. */
+  httpsOnlyAnswer: Answer<Device> | null = null;
 
   calls: string[] = [];
   updates: Array<[string, DeviceChange]> = [];
+  httpsOnly: Array<[string, boolean]> = [];
   forgotten: string[] = [];
   removed: string[] = [];
   #hold: Promise<void> | null = null;
@@ -108,10 +113,11 @@ export class FakeUse implements UseApi {
     this.calls.push("devices");
     return settle(this.devicesAnswer);
   }
-  async addDevice(country: string, city: string, name: string) {
-    this.calls.push(`addDevice ${country} ${city || "-"} ${name}`);
+  async addDevice(country: string, city: string, name: string, httpsOnly: boolean) {
+    this.calls.push(`addDevice ${country} ${city || "-"} ${name}${httpsOnly ? "" : ", HTTPS only off"}`);
     await this.#hold;
-    const a = this.addAnswer ?? newDevice(country, city, name);
+    const made = newDevice(country, city, name);
+    const a = this.addAnswer ?? { ...made, device: { ...made.device, httpsOnly } };
     this.addAnswer = null;
     const dev = settle(a);
     if (Array.isArray(this.devicesAnswer)) this.devicesAnswer = [dev.device, ...this.devicesAnswer];
@@ -139,16 +145,35 @@ export class FakeUse implements UseApi {
     await this.#hold;
     const a = this.updateAnswer;
     this.updateAnswer = null;
-    if (a) return settle(a);
-    const devices = settle(this.devicesAnswer);
-    const old = devices.find((d) => d.peerId === peerId);
-    if (!old) throw new Error(`no device ${peerId}`);
     // A move lands on another line in the region, as the API picks it.
     const moved =
       change.country === undefined
         ? {}
         : { lineId: `line-${change.country}-${change.city || "any"}-2`, country: change.country, city: change.city || "Somewhere", isp: "M-net" };
-    const dev: Device = { ...old, ...moved, ...(change.failover ? { failover: change.failover } : {}) };
+    return a
+      ? settle(a)
+      : this.#patch(peerId, {
+          ...moved,
+          ...(change.failover ? { failover: change.failover } : {}),
+          ...(change.httpsOnly !== undefined ? { httpsOnly: change.httpsOnly } : {}),
+        });
+  }
+
+  async setHttpsOnly(peerId: string, on: boolean) {
+    this.calls.push(`setHttpsOnly ${peerId}`);
+    this.httpsOnly.push([peerId, on]);
+    await this.#hold;
+    const a = this.httpsOnlyAnswer;
+    this.httpsOnlyAnswer = null;
+    return a ? settle(a) : this.#patch(peerId, { httpsOnly: on });
+  }
+
+  // #patch changes one of the devices, as the API answers a PATCH.
+  #patch(peerId: string, change: Partial<Device>): Device {
+    const devices = settle(this.devicesAnswer);
+    const old = devices.find((d) => d.peerId === peerId);
+    if (!old) throw new Error(`no device ${peerId}`);
+    const dev: Device = { ...old, ...change };
     this.devicesAnswer = devices.map((d) => (d.peerId === peerId ? dev : d));
     return dev;
   }

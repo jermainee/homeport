@@ -362,7 +362,7 @@ func (f *useFixture) offerBerlinCity() string {
 // returns it with the config its QR code holds.
 func (f *useFixture) addDevice(t *testing.T, city, name string) (services.NewDevice, string) {
 	t.Helper()
-	got, err := f.use.AddDevice(t.Context(), "DE", city, name)
+	got, err := f.use.AddDevice(t.Context(), "DE", city, name, true)
 	if err != nil {
 		t.Fatalf("AddDevice: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestAddDeviceGetsAFreeLineInTheCity(t *testing.T) {
 	}
 	want := services.Device{
 		PeerID: p.PeerID, Name: "iPhone", LineID: munich, Country: "DE", City: "Munich", ISP: "M-net",
-		Failover: services.FailoverCountry, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		Failover: services.FailoverCountry, HTTPSOnly: true, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if got.Device != want {
 		t.Errorf("device = %+v, want %+v", got.Device, want)
@@ -470,7 +470,7 @@ func TestAddDeviceWhenTheRegionHasNoFreeLine(t *testing.T) {
 	f := newUse(t)
 	f.offerBerlin()
 
-	_, err := f.use.AddDevice(t.Context(), "DE", "Hamburg", "iPhone")
+	_, err := f.use.AddDevice(t.Context(), "DE", "Hamburg", "iPhone", true)
 
 	if code := errCode(err); code != services.ErrNoFreeLine {
 		t.Errorf("error = %v, want code %q", err, services.ErrNoFreeLine)
@@ -481,7 +481,7 @@ func TestAddDeviceNeedsACountry(t *testing.T) {
 	f := newUse(t)
 	f.offerBerlin()
 
-	_, err := f.use.AddDevice(t.Context(), "", "", "iPhone")
+	_, err := f.use.AddDevice(t.Context(), "", "", "iPhone", true)
 
 	if code := errCode(err); code != services.ErrNoCountry {
 		t.Errorf("error = %v, want code %q", err, services.ErrNoCountry)
@@ -526,7 +526,7 @@ func TestAddDeviceRetriesWithTheSameKeyAndRequest(t *testing.T) {
 	f.offerBerlin()
 	f.api.LoseNextResponse("POST /v1/wireguard/peers")
 
-	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone"); err == nil {
+	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone", true); err == nil {
 		t.Fatal("AddDevice succeeded although the answer was lost")
 	}
 	_, config := f.addDevice(t, "Berlin", "iPhone")
@@ -544,7 +544,7 @@ func TestAddDeviceStartsAnewWhenTheRetryIsTooOld(t *testing.T) {
 	f := newUse(t)
 	f.offerBerlin()
 	f.api.LoseNextResponse("POST /v1/wireguard/peers")
-	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone"); err == nil {
+	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone", true); err == nil {
 		t.Fatal("AddDevice succeeded although the answer was lost")
 	}
 	f.api.FailNext("POST /v1/wireguard/peers", http.StatusBadRequest, "request_id_expired")
@@ -578,7 +578,7 @@ func TestAddDeviceExplainsWhyItGotNoLine(t *testing.T) {
 			f.offerBerlin()
 			f.api.FailNext("POST /v1/wireguard/peers", tc.status, tc.code)
 
-			_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone")
+			_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "iPhone", true)
 
 			if code := errCode(err); code != tc.want {
 				t.Errorf("error = %v, want code %q", err, tc.want)
@@ -592,7 +592,7 @@ func TestAddDeviceNeedsAName(t *testing.T) {
 
 	f.offerBerlin()
 	for _, name := range []string{"", "   ", strings.Repeat("x", 65)} {
-		_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", name)
+		_, err := f.use.AddDevice(t.Context(), "DE", "Berlin", name, true)
 		if code := errCode(err); code != services.ErrInvalidName {
 			t.Errorf("name %q: error = %v, want code %q", name, err, services.ErrInvalidName)
 		}
@@ -827,7 +827,7 @@ func TestUpdateDeviceMovesItToAnotherLineInTheRegion(t *testing.T) {
 	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	second := f.offer("DE", "Berlin", "M-net")
 
-	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "")
+	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "", nil)
 	if err != nil {
 		t.Fatalf("UpdateDevice: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestUpdateDeviceMovesItToAnotherCountry(t *testing.T) {
 	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 	lyon := f.offerLyon()
 
-	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "", services.FailoverCity)
+	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "", services.FailoverCity, nil)
 	if err != nil {
 		t.Fatalf("UpdateDevice: %v", err)
 	}
@@ -867,7 +867,7 @@ func TestUpdateDeviceChangesOnlyItsFailover(t *testing.T) {
 	dev, _ := f.addDevice(t, "Berlin", "iPhone")
 
 	for _, failover := range []string{services.FailoverCity, services.FailoverOff, services.FailoverCountry} {
-		got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "", "", failover)
+		got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "", "", failover, nil)
 		if err != nil {
 			t.Fatalf("UpdateDevice %s: %v", failover, err)
 		}
@@ -886,7 +886,7 @@ func TestUpdateDeviceNeedsAChange(t *testing.T) {
 	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 
 	for _, tc := range []struct{ country, city, failover string }{{"", "", ""}, {"", "", "everywhere"}, {"", "Berlin", ""}} {
-		_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, tc.city, tc.failover)
+		_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, tc.city, tc.failover, nil)
 		if code := errCode(err); code != services.ErrUnexpected {
 			t.Errorf("%+v: error = %v, want code %q", tc, err, services.ErrUnexpected)
 		}
@@ -901,7 +901,7 @@ func TestUpdateDeviceWhenTheRegionHasNoOtherFreeLine(t *testing.T) {
 	f := newUse(t)
 	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
 
-	_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "")
+	_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Berlin", "", nil)
 
 	if code := errCode(err); code != services.ErrNoFreeLine {
 		t.Errorf("error = %v, want code %q", err, services.ErrNoFreeLine)
@@ -926,7 +926,7 @@ func TestUpdateDeviceExplainsWhyItGotNoLine(t *testing.T) {
 			f.offerLyon()
 			f.api.FailNext("PATCH /v1/wireguard/peers/", tc.status, tc.code)
 
-			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "Lyon", "")
+			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "FR", "Lyon", "", nil)
 
 			if code := errCode(err); code != tc.want {
 				t.Errorf("error = %v, want code %q", err, tc.want)
@@ -952,10 +952,167 @@ func TestUpdateDeviceThatWasRemoved(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, "", tc.failover)
+			_, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, tc.country, "", tc.failover, nil)
 
 			if code := errCode(err); code != services.ErrDeviceGone {
 				t.Errorf("error = %v, want code %q", err, services.ErrDeviceGone)
+			}
+		})
+	}
+}
+
+// A member who knows a device needs plain HTTP or SSH adds it with HTTPS
+// only off from the start.
+func TestAddDeviceWithHTTPSOnlyOff(t *testing.T) {
+	f := newUse(t)
+	f.offerBerlin()
+
+	got, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "Laptop", false)
+	if err != nil {
+		t.Fatalf("AddDevice: %v", err)
+	}
+
+	if got.Device.HTTPSOnly {
+		t.Errorf("device = %+v, want HTTPS only off", got.Device)
+	}
+	if p := f.api.Peers(t, email)[0]; p.HTTPSOnly {
+		t.Errorf("peer = %+v, want HTTPS only off", p)
+	}
+}
+
+// A retry after a lost answer reuses the request only for the same device:
+// one with HTTPS only switched since is a new request.
+func TestAddDeviceRetryWithHTTPSOnlyChangedIsANewRequest(t *testing.T) {
+	f := newUse(t)
+	f.offerBerlin()
+	f.api.LoseNextResponse("POST /v1/wireguard/peers")
+	if _, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "Laptop", true); err == nil {
+		t.Fatal("AddDevice succeeded although the answer was lost")
+	}
+
+	got, err := f.use.AddDevice(t.Context(), "DE", "Berlin", "Laptop", false)
+	if err != nil {
+		t.Fatalf("AddDevice again: %v", err)
+	}
+	if got.Device.HTTPSOnly {
+		t.Errorf("device = %+v, want HTTPS only off", got.Device)
+	}
+}
+
+// HTTPS only goes in the same PATCH as a move and a new failover.
+func TestUpdateDeviceChangesHTTPSOnlyWithTheRest(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	munich := f.offer("DE", "Munich", "M-net")
+	off := false
+
+	got, err := f.use.UpdateDevice(t.Context(), dev.Device.PeerID, "DE", "Munich", services.FailoverOff, &off)
+	if err != nil {
+		t.Fatalf("UpdateDevice: %v", err)
+	}
+
+	p := f.api.Peers(t, email)[0]
+	if p.LineID != munich || p.Failover != services.FailoverOff || p.HTTPSOnly {
+		t.Errorf("peer = %+v, want on %s, failover off, HTTPS only off", p, munich)
+	}
+	if got.LineID != munich || got.HTTPSOnly {
+		t.Errorf("device = %+v, want on %s with HTTPS only off", got, munich)
+	}
+	if reqs := slices.DeleteFunc(f.api.Requests(), func(r string) bool { return !strings.HasPrefix(r, "PATCH ") }); len(reqs) != 1 {
+		t.Errorf("PATCH requests = %q, want 1", reqs)
+	}
+}
+
+// Every device starts with HTTPS only on: the gateway lets through only
+// TCP that opens with TLS, so the line's owner can't read or change it.
+func TestDevicesStartWithHTTPSOnlyOn(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	if !dev.Device.HTTPSOnly {
+		t.Errorf("new device = %+v, want HTTPS only on", dev.Device)
+	}
+
+	got, err := f.use.Devices(t.Context())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+	if len(got) != 1 || !got[0].HTTPSOnly {
+		t.Errorf("devices = %+v, want one with HTTPS only on", got)
+	}
+}
+
+// A member who needs plain HTTP or SSH on one device turns HTTPS only off
+// for it, and on again; its line and failover stay as they are.
+func TestSetHTTPSOnlyTurnsItOffAndOnForOneDevice(t *testing.T) {
+	f := newUse(t)
+	berlin := f.offerBerlin()
+	phone, _ := f.addDevice(t, "Berlin", "iPhone")
+	router, _ := f.addDevice(t, "Berlin", "Travel router")
+	if _, err := f.use.UpdateDevice(t.Context(), phone.Device.PeerID, "", "", services.FailoverCity, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, on := range []bool{false, true} {
+		got, err := f.use.SetHTTPSOnly(t.Context(), phone.Device.PeerID, on)
+		if err != nil {
+			t.Fatalf("SetHTTPSOnly %t: %v", on, err)
+		}
+		want := phone.Device
+		want.Failover = services.FailoverCity
+		want.HTTPSOnly = on
+		if got != want {
+			t.Errorf("SetHTTPSOnly %t: device = %+v, want %+v", on, got, want)
+		}
+		peers := map[string]fakeapi.Peer{}
+		for _, p := range f.api.Peers(t, email) {
+			peers[p.PeerID] = p
+		}
+		if p := peers[phone.Device.PeerID]; p.HTTPSOnly != on || p.LineID != berlin || p.Failover != services.FailoverCity {
+			t.Errorf("SetHTTPSOnly %t: peer = %+v, want HTTPS only %[1]t on %[3]s with failover city", on, p, berlin)
+		}
+		if p := peers[router.Device.PeerID]; !p.HTTPSOnly {
+			t.Errorf("SetHTTPSOnly %t: the other device lost HTTPS only: %+v", on, p)
+		}
+	}
+}
+
+func TestSetHTTPSOnlyOnADeviceThatWasRemoved(t *testing.T) {
+	f := newUse(t)
+	dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+	if err := f.use.RemoveDevice(t.Context(), dev.Device.PeerID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := f.use.SetHTTPSOnly(t.Context(), dev.Device.PeerID, false)
+
+	if code := errCode(err); code != services.ErrDeviceGone {
+		t.Errorf("error = %v, want code %q", err, services.ErrDeviceGone)
+	}
+}
+
+func TestSetHTTPSOnlyWhenTheAPIRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		want   services.ErrorCode
+	}{
+		{"unverified", http.StatusForbidden, "identity_required", services.ErrIdentityRequired},
+		{"signed out", http.StatusUnauthorized, "unauthorized", services.ErrSignedOut},
+		{"rate limited", http.StatusTooManyRequests, "rate_limited", services.ErrRateLimited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUse(t)
+			dev, _ := f.addDevice(t, f.offerBerlinCity(), "iPhone")
+			f.api.FailNext("PATCH /v1/wireguard/peers/", tc.status, tc.code)
+
+			_, err := f.use.SetHTTPSOnly(t.Context(), dev.Device.PeerID, false)
+
+			if code := errCode(err); code != tc.want {
+				t.Errorf("error = %v, want code %q", err, tc.want)
+			}
+			if p := f.api.Peers(t, email)[0]; !p.HTTPSOnly {
+				t.Errorf("peer = %+v, want HTTPS only still on", p)
 			}
 		})
 	}

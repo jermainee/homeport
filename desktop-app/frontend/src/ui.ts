@@ -144,6 +144,8 @@ function fallbackFor(k: FocusKey): string | undefined {
     case "use-cancel-add":
     case "use-done":
     case "use-confirm-remove":
+    // The device was removed elsewhere, so its switch is gone.
+    case "use-https-only":
       return '[data-action="use-add"]';
     case "use-remove":
       return `[data-action="use-cancel-remove"]${peer}`;
@@ -512,6 +514,10 @@ export function mount(signIn: SignIn, app: HTMLElement, announcer: HTMLElement, 
         return use?.startEditing(peer);
       case "use-cancel-edit":
         return use?.cancelEditing();
+      case "use-https-only":
+        return void use?.toggleHttpsOnly(peer);
+      case "use-form-https-only":
+        return use?.pickHttpsOnly(button.getAttribute("aria-checked") !== "true");
     }
   });
 }

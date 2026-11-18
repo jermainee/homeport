@@ -58,10 +58,11 @@ type UseService struct {
 // newPeer is what an AddDevice retry repeats: the region, the name, and
 // the device's key pair, whose public key the API may have registered.
 type newPeer struct {
-	country string
-	city    string
-	name    string
-	key     *ecdh.PrivateKey
+	country   string
+	city      string
+	name      string
+	httpsOnly bool
+	key       *ecdh.PrivateKey
 }
 
 // heldConfig is a new device's complete config, private key included. It
@@ -263,6 +264,10 @@ type Device struct {
 	// Failover is where the device goes while its line is offline:
 	// FailoverCountry, FailoverCity or FailoverOff.
 	Failover string `json:"failover"`
+	// HTTPSOnly is whether the gateway lets through only the device's TCP
+	// that opens with TLS, so the line's owner can't read or change it.
+	// Every device starts with it on.
+	HTTPSOnly bool `json:"httpsOnly"`
 	// ExitLine is the line the device's current session exits through:
 	// LineID, or a backup line while LineID is offline. Nil while the
 	// device has no session.
@@ -297,7 +302,7 @@ func deviceOf(p apiclient.Peer) Device {
 	d := Device{
 		PeerID: p.ID, Name: p.Name, LineID: p.LineID,
 		Country: deref(p.Line.Country), City: deref(p.Line.City), ISP: deref(p.Line.ISP),
-		Failover: p.Failover, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
+		Failover: p.Failover, HTTPSOnly: p.HTTPSOnly, IPv4: p.IPv4, IPv6: p.IPv6, CreatedAt: p.CreatedAt,
 	}
 	if e := p.ExitLine; e != nil {
 		d.ExitLine = &ExitLine{LineID: e.LineID, Country: deref(e.Country), City: deref(e.City), Since: e.Since}
@@ -315,11 +320,12 @@ type NewDevice struct {
 }
 
 // AddDevice creates a WireGuard config for a device named name, on a free
-// line the API picks in country, and in city unless it is empty. The app
+// line the API picks in country, and in city unless it is empty, with
+// HTTPS only on or off (see SetHTTPSOnly). The app
 // makes the device's key pair and sends the API only the public key; the
 // private key goes into the config, which the member sees once: it stays
 // in memory until ForgetConfig, and no copy is stored.
-func (s *UseService) AddDevice(ctx context.Context, country, city, name string) (NewDevice, error) {
+func (s *UseService) AddDevice(ctx context.Context, country, city, name string, httpsOnly bool) (NewDevice, error) {
 	name = strings.TrimSpace(name)
 	if n := utf8.RuneCountInString(name); n < 1 || n > maxDeviceName {
 		return NewDevice{}, &Error{Code: ErrInvalidName}
@@ -337,15 +343,17 @@ func (s *UseService) AddDevice(ctx context.Context, country, city, name string) 
 	var created apiclient.PeerCreated
 	var key *ecdh.PrivateKey
 	err = s.addPeer.send(sess.MemberID,
-		func(p newPeer) bool { return p.country == country && p.city == city && p.name == name },
+		func(p newPeer) bool {
+			return p.country == country && p.city == city && p.name == name && p.httpsOnly == httpsOnly
+		},
 		func() (newPeer, error) {
 			k, err := newWireGuardKey()
-			return newPeer{country: country, city: city, name: name, key: k}, err
+			return newPeer{country: country, city: city, name: name, httpsOnly: httpsOnly, key: k}, err
 		},
 		func(requestID string, p newPeer) (err error) {
 			key = p.key
 			public := base64.StdEncoding.EncodeToString(p.key.PublicKey().Bytes())
-			created, err = s.api.CreatePeer(ctx, sess.Token, requestID, country, city, name, public)
+			created, err = s.api.CreatePeer(ctx, sess.Token, requestID, country, city, name, public, httpsOnly)
 			return err
 		})
 	if err != nil {
@@ -526,21 +534,21 @@ func (s *UseService) Devices(ctx context.Context) ([]Device, error) {
 
 // UpdateDevice moves a device to a free line the API picks in country,
 // and in city unless it is empty, or changes its failover (FailoverCountry,
-// FailoverCity or FailoverOff), or both; an empty argument keeps what the
-// device has. The new line is on the device's gateway and isn't its current
-// one. The device keeps its config: within about 30 seconds the gateway ends
-// its session on the old line, and its next connection exits through the
-// new one.
-func (s *UseService) UpdateDevice(ctx context.Context, peerID, country, city, failover string) (Device, error) {
-	if (country == "" && failover == "") || (city != "" && country == "") ||
+// FailoverCity or FailoverOff) or HTTPS only, in one PATCH; an empty
+// argument, or a nil httpsOnly, keeps what the device has. The new line is
+// on the device's gateway and isn't its current one. The device keeps its
+// config: within about 30 seconds the gateway ends its session on the old
+// line, and its next connection exits through the new one.
+func (s *UseService) UpdateDevice(ctx context.Context, peerID, country, city, failover string, httpsOnly *bool) (Device, error) {
+	if (country == "" && failover == "" && httpsOnly == nil) || (city != "" && country == "") ||
 		(failover != "" && failover != FailoverCountry && failover != FailoverCity && failover != FailoverOff) {
-		return Device{}, &Error{Code: ErrUnexpected, err: errors.New("update a device's region, its failover, or both")}
+		return Device{}, &Error{Code: ErrUnexpected, err: errors.New("update a device's region, failover or HTTPS only")}
 	}
 	sess, err := session(s.profile)
 	if err != nil {
 		return Device{}, err
 	}
-	p, err := s.api.UpdatePeer(ctx, sess.Token, peerID, country, city, failover)
+	p, err := s.api.UpdatePeer(ctx, sess.Token, peerID, country, city, failover, httpsOnly)
 	if apiclient.IsStatus(err, http.StatusNotFound) {
 		return Device{}, &Error{Code: ErrDeviceGone, err: err}
 	}
@@ -548,6 +556,16 @@ func (s *UseService) UpdateDevice(ctx context.Context, peerID, country, city, fa
 		return Device{}, peerError(err)
 	}
 	return deviceOf(p), nil
+}
+
+// SetHTTPSOnly turns HTTPS only on or off for one device, and changes
+// nothing else. While it is on, the gateway lets through only the device's
+// TCP that opens with TLS: plain HTTP, SSH and mail that starts
+// unencrypted don't work. Off, they do, and the line's owner can read and
+// change that unencrypted traffic. The change resets the device's open
+// connections within about 30 seconds; its config stays.
+func (s *UseService) SetHTTPSOnly(ctx context.Context, peerID string, on bool) (Device, error) {
+	return s.UpdateDevice(ctx, peerID, "", "", "", &on)
 }
 
 // RemoveDevice deletes a device. Within about 30 seconds the gateway drops

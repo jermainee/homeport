@@ -73,6 +73,13 @@ export interface Device {
     "failover": string;
 
     /**
+     * HTTPSOnly is whether the gateway lets through only the device's TCP
+     * that opens with TLS, so the line's owner can't read or change it.
+     * Every device starts with it on.
+     */
+    "httpsOnly": boolean;
+
+    /**
      * ExitLine is the line the device's current session exits through:
      * LineID, or a backup line while LineID is offline. Nil while the
      * device has no session.

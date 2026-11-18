@@ -20,13 +20,14 @@ import * as $models from "./models.js";
 
 /**
  * AddDevice creates a WireGuard config for a device named name, on a free
- * line the API picks in country, and in city unless it is empty. The app
+ * line the API picks in country, and in city unless it is empty, with
+ * HTTPS only on or off (see SetHTTPSOnly). The app
  * makes the device's key pair and sends the API only the public key; the
  * private key goes into the config, which the member sees once: it stays
  * in memory until ForgetConfig, and no copy is stored.
  */
-export function AddDevice(country: string, city: string, name: string): $CancellablePromise<$models.NewDevice> {
-    return $Call.ByID(2885959988, country, city, name);
+export function AddDevice(country: string, city: string, name: string, httpsOnly: boolean): $CancellablePromise<$models.NewDevice> {
+    return $Call.ByID(2885959988, country, city, name, httpsOnly);
 }
 
 /**
@@ -105,14 +106,26 @@ export function SaveConfig(peerID: string): $CancellablePromise<boolean> {
 }
 
 /**
+ * SetHTTPSOnly turns HTTPS only on or off for one device, and changes
+ * nothing else. While it is on, the gateway lets through only the device's
+ * TCP that opens with TLS: plain HTTP, SSH and mail that starts
+ * unencrypted don't work. Off, they do, and the line's owner can read and
+ * change that unencrypted traffic. The change resets the device's open
+ * connections within about 30 seconds; its config stays.
+ */
+export function SetHTTPSOnly(peerID: string, on: boolean): $CancellablePromise<$models.Device> {
+    return $Call.ByID(940356444, peerID, on);
+}
+
+/**
  * UpdateDevice moves a device to a free line the API picks in country,
  * and in city unless it is empty, or changes its failover (FailoverCountry,
- * FailoverCity or FailoverOff), or both; an empty argument keeps what the
- * device has. The new line is on the device's gateway and isn't its current
- * one. The device keeps its config: within about 30 seconds the gateway ends
- * its session on the old line, and its next connection exits through the
- * new one.
+ * FailoverCity or FailoverOff) or HTTPS only, in one PATCH; an empty
+ * argument, or a nil httpsOnly, keeps what the device has. The new line is
+ * on the device's gateway and isn't its current one. The device keeps its
+ * config: within about 30 seconds the gateway ends its session on the old
+ * line, and its next connection exits through the new one.
  */
-export function UpdateDevice(peerID: string, country: string, city: string, failover: string): $CancellablePromise<$models.Device> {
-    return $Call.ByID(1798641512, peerID, country, city, failover);
+export function UpdateDevice(peerID: string, country: string, city: string, failover: string, httpsOnly: boolean | null): $CancellablePromise<$models.Device> {
+    return $Call.ByID(1798641512, peerID, country, city, failover, httpsOnly);
 }

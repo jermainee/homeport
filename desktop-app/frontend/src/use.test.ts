@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, Use, type UseView } from "./use";
+import { backupLine, CHECKOUT_GIVE_UP_MS, CHECKOUT_POLL_MS, httpsOnlyOf, Use, type UseView } from "./use";
 import { serviceError } from "./test/fake-auth";
 import { FakeUse, balance, berlin, france, germany, laptop, lyon, munich, newDevice, portugal } from "./test/fake-use";
 
@@ -292,6 +292,7 @@ describe("adding a device", () => {
       city: "",
       query: "",
       name: "",
+      httpsOnly: true,
       creating: false,
     });
   });
@@ -368,6 +369,44 @@ describe("adding a device", () => {
     expect(api.calls).toContain("addDevice DE Munich iPhone");
     expect(ready().step).toEqual({ kind: "config", device: created, saving: false, saved: false });
     expect(ready().devices).toEqual([created.device, laptop]);
+  });
+
+  it("creates the device with HTTPS only off when the member turns it off", async () => {
+    await open();
+    await use.startAdding();
+    use.setName("Laptop");
+
+    use.pickHttpsOnly(false);
+    await use.create();
+
+    expect(api.calls).toContain("addDevice DE - Laptop, HTTPS only off");
+    expect(ready().devices[0]).toMatchObject({ name: "Laptop", httpsOnly: false });
+  });
+
+  it("keeps the name's error when HTTPS only turns", async () => {
+    await open();
+    await use.startAdding();
+    await use.create();
+    expect(adding().error).toBe("invalid_name");
+
+    use.pickHttpsOnly(false);
+
+    expect(adding()).toMatchObject({ httpsOnly: false, error: "invalid_name" });
+  });
+
+  it("keeps HTTPS only as it is while the config is created", async () => {
+    await open();
+    await use.startAdding();
+    use.setName("Laptop");
+    api.hold();
+    const creating = use.create();
+
+    use.pickHttpsOnly(false);
+    api.release();
+    await creating;
+
+    expect(api.calls).toContain("addDevice DE - Laptop");
+    expect(ready().devices[0]).toMatchObject({ name: "Laptop", httpsOnly: true });
   });
 
   it("creates the config in any city of the country when no city is picked", async () => {
@@ -617,6 +656,38 @@ describe("changing a device", () => {
     expect(refreshed).toBeUndefined();
   });
 
+  it("does not call the old line a backup line when HTTPS only turns during the move", async () => {
+    await open();
+    await moving();
+    api.updateAnswer = { ...laptop, lineId: movedLine, exitLine: exitOn(laptop.lineId) };
+    await use.saveDevice();
+    api.httpsOnlyAnswer = { ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) };
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(ready().devices[0]?.httpsOnly).toBe(false);
+    expect(backupLine(ready().devices[0]!)).toBeUndefined();
+  });
+
+  it("keeps a move that landed while HTTPS only was turning", async () => {
+    await open();
+    let answer!: (d: typeof laptop) => void;
+    api.setHttpsOnly = () => new Promise((r) => (answer = r));
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+    await moving();
+    api.updateAnswer = { ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) };
+    await use.saveDevice();
+    // The server turned HTTPS only before the move, so its late answer
+    // still has the old line.
+    answer({ ...laptop, httpsOnly: false });
+    await turning;
+
+    expect(ready().devices[0]).toMatchObject({ lineId: movedLine, httpsOnly: false });
+    api.devicesAnswer = [{ ...laptop, lineId: movedLine, httpsOnly: false, exitLine: exitOn(laptop.lineId) }];
+    await use.refreshDevices();
+    expect(backupLine(ready().devices[0]!)).toBeUndefined();
+  });
+
   it("shows a backup line again once the device has left its old line", async () => {
     await open();
     await moving();
@@ -660,9 +731,53 @@ describe("changing a device", () => {
       city: "Berlin",
       query: "",
       failover: "city",
+      httpsOnly: true,
       saving: false,
     });
     expect(api.calls).not.toContain("countries");
+  });
+
+  it("turns HTTPS only off together with the failover, in one change", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+
+    use.pickHttpsOnly(false);
+    use.pickFailover("off");
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "off", httpsOnly: false }]]);
+    expect(ready().devices[0]).toMatchObject({ failover: "off", httpsOnly: false });
+    expect(ready().step).toEqual({ kind: "list" });
+  });
+
+  it("starts from a turn of the row's switch still on its way, and doesn't undo it", async () => {
+    await open();
+    api.hold();
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+
+    use.startEditing(laptop.peerId);
+    expect(editing().httpsOnly).toBe(false);
+    api.release();
+    await turning;
+    use.pickFailover("off");
+    await use.saveDevice();
+
+    expect(api.updates).toEqual([[laptop.peerId, { failover: "off" }]]);
+    expect(ready().devices[0]).toMatchObject({ failover: "off", httpsOnly: false });
+  });
+
+  it("sends HTTPS only alone when nothing else changed, and nothing once it's back", async () => {
+    await open();
+    use.startEditing(laptop.peerId);
+    use.pickHttpsOnly(false);
+    await use.saveDevice();
+    expect(api.updates).toEqual([[laptop.peerId, { httpsOnly: false }]]);
+
+    use.startEditing(laptop.peerId);
+    use.pickHttpsOnly(true);
+    use.pickHttpsOnly(false);
+    await use.saveDevice();
+    expect(api.updates).toHaveLength(1);
   });
 
   it("loads where lines are free once the member chooses to move it, keeping its city", async () => {
@@ -871,5 +986,126 @@ describe("removing a device", () => {
 
     expect(ready().removing).toEqual({ peerId: laptop.peerId, busy: false, error: "offline" });
     expect(ready().devices).toEqual([laptop]);
+  });
+});
+
+describe("HTTPS only", () => {
+  it("turns off for one device, and on again", async () => {
+    await open();
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false });
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(api.httpsOnly).toEqual([[laptop.peerId, false]]);
+    expect(ready().devices).toEqual([{ ...laptop, httpsOnly: false }]);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(api.httpsOnly).toEqual([
+      [laptop.peerId, false],
+      [laptop.peerId, true],
+    ]);
+    expect(ready().devices).toEqual([laptop]);
+  });
+
+  it("shows the position asked for while it turns, and ignores a second press", async () => {
+    await open();
+    api.hold();
+
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    void use.toggleHttpsOnly(laptop.peerId);
+    api.release();
+    await turning;
+
+    expect(api.httpsOnly).toEqual([[laptop.peerId, false]]);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+  });
+
+  it("says why it didn't turn, and goes back to where the device is", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("offline");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false, error: "offline" });
+    expect(ready().devices).toEqual([laptop]);
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    expect(httpsOnlyOf(ready(), ready().devices[0]!)).toEqual({ on: false, busy: false });
+  });
+
+  it("drops the error once the devices load again", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("offline");
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    await use.refreshDevices();
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: true, busy: false });
+    expect(ready().httpsOnly).toEqual({});
+  });
+
+  it("keeps a turn on its way when the devices load again", async () => {
+    await open();
+    api.hold();
+    const turning = use.toggleHttpsOnly(laptop.peerId);
+
+    await use.refresh();
+
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    api.release();
+    await turning;
+  });
+
+  it("drops a device that was removed meanwhile", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("device_gone");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(ready().devices).toEqual([]);
+    expect(ready().httpsOnly?.[laptop.peerId]).toBeUndefined();
+  });
+
+  it("goes to sign-in when the session ended", async () => {
+    await open();
+    api.httpsOnlyAnswer = serviceError("signed_out");
+
+    await use.toggleHttpsOnly(laptop.peerId);
+
+    expect(use.view).toEqual({ kind: "signedOut" });
+  });
+
+  it("keeps a turn that finished while a refresh was on its way", async () => {
+    await open();
+    let answer!: (d: typeof laptop[]) => void;
+    api.devices = () => new Promise((r) => (answer = r));
+    const refreshing = use.refresh();
+
+    await use.toggleHttpsOnly(laptop.peerId);
+    answer([laptop]); // the list from before the turn
+    await refreshing;
+
+    expect(ready().devices).toEqual([{ ...laptop, httpsOnly: false }]);
+  });
+
+  it("turns two devices at once", async () => {
+    const phone = { ...laptop, peerId: "peer-phone", name: "iPhone", httpsOnly: false };
+    api.devicesAnswer = [laptop, phone];
+    await open();
+    api.hold();
+
+    const first = use.toggleHttpsOnly(laptop.peerId);
+    const second = use.toggleHttpsOnly(phone.peerId);
+    expect(httpsOnlyOf(ready(), laptop)).toEqual({ on: false, busy: true });
+    expect(httpsOnlyOf(ready(), phone)).toEqual({ on: true, busy: true });
+    api.release();
+    await Promise.all([first, second]);
+
+    expect(ready().devices).toEqual([
+      { ...laptop, httpsOnly: false },
+      { ...phone, httpsOnly: true },
+    ]);
+    expect(ready().httpsOnly).toEqual({});
   });
 });
